@@ -837,7 +837,7 @@ static void create_pages(lv_obj_t *scr)
     s_gi = 0;
 
     /* Page dots, centred at the bottom; fixed on the screen, not part of the strip */
-    const lv_coord_t d = 8, gap = 10;
+    const lv_coord_t d = 6, gap = 10;   /* dot 20 % smaller than the original 8 px */
     lv_coord_t total = PAGE_COUNT * d + (PAGE_COUNT - 1) * gap;
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
         s_dot[pg] = lv_obj_create(scr);
@@ -1270,7 +1270,8 @@ static void create_ui(void)
     lv_obj_align(s_cfg_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_montserrat_20.line_height / 2);
 
     lv_obj_t *btn = make_button(cp[0], "Theme", lv_color_hex(0x5E5E6E));
-    /* portrait: one column; landscape: buttons left, brightness and orientation right */
+    /* portrait: one column (refresh, theme, orientation, brightness last); landscape: refresh
+     * and theme left, orientation and brightness right */
     const lv_coord_t colx = s_landscape ? SCR_W / 4 : 0;   /* column offset from centre */
     if (s_landscape) lv_obj_align(btn, LV_ALIGN_TOP_MID, -colx, 96);
     else lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 106);
@@ -1280,8 +1281,8 @@ static void create_ui(void)
     s_bri_caption = lv_label_create(cp[0]);
     lv_label_set_text(s_bri_caption, "Brightness");
     lv_obj_set_style_text_font(s_bri_caption, &lv_font_latin_14, 0);
-    if (s_landscape) lv_obj_set_pos(s_bri_caption, SCR_W / 2 + (SCR_W / 2 - 148) / 2, 40);
-    else lv_obj_align_to(s_bri_caption, btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 36);
+    if (s_landscape) lv_obj_set_pos(s_bri_caption, SCR_W / 2 + (SCR_W / 2 - 148) / 2, 96);
+    else lv_obj_align_to(s_bri_caption, btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 62 + 20);   /* below orientation */
 
     lv_obj_t *sl = lv_slider_create(cp[0]);
     lv_obj_set_width(sl, 132);
@@ -1297,8 +1298,8 @@ static void create_ui(void)
 
     /* Orientation: the label names the action, like the theme button */
     lv_obj_t *ob = make_button(cp[0], s_landscape ? "Portrait" : "Landscape", lv_color_hex(0x5E5E6E));
-    if (s_landscape) lv_obj_align(ob, LV_ALIGN_TOP_MID, colx, 96);
-    else lv_obj_align(ob, LV_ALIGN_TOP_MID, 0, 246);
+    if (s_landscape) lv_obj_align(ob, LV_ALIGN_TOP_MID, colx, 40);
+    else lv_obj_align(ob, LV_ALIGN_TOP_MID, 0, 168);
     lv_obj_add_event_cb(ob, orient_cb, LV_EVENT_CLICKED, NULL);
     s_orient_btn = ob;
 
@@ -1321,11 +1322,11 @@ static void create_ui(void)
     for (int i = 0; i < CFG_PAGES; i++) {
         s_cfg_dot[i] = lv_obj_create(s_cfg);
         lv_obj_remove_style_all(s_cfg_dot[i]);
-        lv_obj_set_size(s_cfg_dot[i], 8, 8);
+        lv_obj_set_size(s_cfg_dot[i], 6, 6);
         lv_obj_set_style_radius(s_cfg_dot[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_opa(s_cfg_dot[i], LV_OPA_COVER, 0);
         lv_obj_clear_flag(s_cfg_dot[i], LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_align(s_cfg_dot[i], LV_ALIGN_BOTTOM_MID, (i * 2 - (CFG_PAGES - 1)) * 8, -(DOTS_H - 8) / 2);
+        lv_obj_align(s_cfg_dot[i], LV_ALIGN_BOTTOM_MID, (i * 2 - (CFG_PAGES - 1)) * 8, -(DOTS_H - 6) / 2);
     }
 
     /* Status icons on the panel too, since the panel covers the main screen's */
