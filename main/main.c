@@ -523,18 +523,19 @@ static void clock_tick(lv_timer_t *t)
             if (KIND(pg, i) == LAYOUT_CLOCK) clock_update(GI(pg, i));
 }
 
-/* clock_size small/medium/large = 22/48/72 px digits, smaller while the time doesn't fit
- * its block */
+/* clock_size small/medium/large = 22/48/72 px digits, smaller (72, 48, 36, 22) while the
+ * time doesn't fit its block */
 /* seconds / AM-PM beside the time: smaller next to a small clock */
 static const lv_font_t *clock_small_font(const lv_font_t *time_font)
 {
-    return time_font == &lv_font_latin_22 ? &lv_font_latin_16 : &lv_font_latin_22;
+    return time_font->line_height <= lv_font_montserrat_36.line_height ? &lv_font_latin_16 : &lv_font_latin_22;
 }
 
 static const lv_font_t *clock_font(uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
 {
-    static const lv_font_t *const fonts[] = { &lv_font_latin_22, &lv_font_clock_48, &lv_font_clock_72 };
-    int i = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 2 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 1 : 0;
+    /* steps down through 36 px, so a large clock in a narrow block stays bigger than small */
+    static const lv_font_t *const fonts[] = { &lv_font_latin_22, &lv_font_montserrat_36, &lv_font_clock_48, &lv_font_clock_72 };
+    int i = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 3 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 2 : 0;
     /* seconds and AM/PM are drawn small beside the time */
     lv_point_t extra = { 0, 0 };
     const char *small = (flags & LAYOUT_CLOCK_SECONDS) && (flags & LAYOUT_CLOCK_12H) ? ":00 PM"
