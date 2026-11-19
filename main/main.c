@@ -542,12 +542,12 @@ static const lv_font_t *clock_font(uint8_t flags)
 static void create_clock_page(lv_obj_t *page, int pg)
 {
     const layout_item_t *it = &s_layout.pages[pg].items[0];
-    if (!(it->flags & LAYOUT_CLOCK_NO_BG)) {   /* translucent card panel, like the buttons */
+    if (!(it->flags & LAYOUT_CLOCK_NO_BG)) {   /* translucent card panel */
         lv_obj_t *bg = lv_obj_create(page);
         lv_obj_remove_style_all(bg);
         lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_radius(bg, 14, 0);
-        lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);
+        lv_obj_set_style_bg_opa(bg, LV_OPA_20, 0);   /* 80 % transparent */
         lv_obj_set_size(bg, SCR_W - 16, SCR_H - STATUS_H - DOTS_H - 8);
         lv_obj_set_pos(bg, 8, STATUS_H + 4);
         s_clk_bg[pg] = bg;
