@@ -178,6 +178,7 @@ void app_main(void)
 
 #include "config.h"
 #include "nvs.h"
+#include "names.h"
 
 /* Screen size in the current orientation (portrait 172x320, landscape 320x172) */
 #define SCR_W  lv_disp_get_hor_res(NULL)
@@ -255,6 +256,50 @@ static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y)
     } else {
         *cx = SCR_W / 2;
         *y = row_y(i, ROWS(pg));
+    }
+}
+
+/* ---- Name labels: shortened when too wide ---- */
+static char s_full[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][32];   /* names before shortening */
+
+static int name_width(const char *txt, void *ctx)
+{
+    (void)ctx;
+    lv_point_t sz;
+    lv_txt_get_size(&sz, txt, NFONT, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return sz.x;
+}
+
+/* Widest a name may be: its column in landscape, the screen (or value column) otherwise */
+static lv_coord_t name_max_w(int pg)
+{
+    if (IS_GRAPH(pg)) return (s_landscape ? GRAPH_LW : SCR_W) - 8;
+    return (s_landscape ? SCR_W / LV_MAX(ROWS(pg), 1) : SCR_W) - 8;
+}
+
+/* Text centred on cx below the value; ends in "..." if it still doesn't fit */
+static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_coord_t cx, lv_coord_t y)
+{
+    lv_label_set_text(l, txt);
+    bool fits = name_width(txt, NULL) <= max_w;
+    lv_label_set_long_mode(l, fits ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
+    lv_obj_set_width(l, fits ? LV_SIZE_CONTENT : max_w);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+}
+
+/* Re-apply all row names of value page pg, dropping words they all share if one is too wide */
+static void page_names_update(int pg)
+{
+    char n[LAYOUT_MAX_ROWS][32];
+    for (int i = 0; i < ROWS(pg); i++) strcpy(n[i], s_full[pg][i]);
+    lv_coord_t max_w = name_max_w(pg);
+    names_abbreviate(n, ROWS(pg), max_w, name_width, NULL);
+    for (int i = 0; i < ROWS(pg); i++) {
+        if (!s_name[pg][i]) continue;
+        lv_coord_t cx, y;
+        value_pos(pg, i, &cx, &y);
+        set_name_label(s_name[pg][i], n[i], max_w, cx, y);
     }
 }
 
@@ -341,11 +386,9 @@ static void ha_sensor_changed(int page, int row, const char *value, const char *
     if (page >= 0 && page < PAGE_COUNT && !IS_GRAPH(page) && row >= 0 && row < ROWS(page) && s_val[page][row]) {
         lv_label_set_text(s_val[page][row], value);
         lv_label_set_text(s_unit[page][row], unit);
-        if (strcmp(lv_label_get_text(s_name[page][row]), name)) {
-            lv_coord_t cx, y;
-            value_pos(page, row, &cx, &y);
-            lv_label_set_text(s_name[page][row], name);
-            lv_obj_align(s_name[page][row], LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+        if (strncmp(s_full[page][row], name, 31)) {
+            snprintf(s_full[page][row], sizeof(s_full[page][row]), "%s", name);
+            page_names_update(page);
         }
         place_value(page, row);
     }
@@ -366,8 +409,7 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
     if (name && strcmp(lv_label_get_text(s_g_name), name)) {
         lv_coord_t cx, y;
         graph_value_pos(&cx, &y);
-        lv_label_set_text(s_g_name, name);
-        lv_obj_align(s_g_name, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+        set_name_label(s_g_name, name, name_max_w(s_gi), cx, y);
     }
     if (latest) {
         lv_label_set_text(s_g_val, latest);
@@ -524,9 +566,8 @@ static void create_graph_page(lv_obj_t *page)
     place_graph_value();
     s_g_name = lv_label_create(page);
     const layout_item_t *it = &s_layout.pages[s_gi].items[0];
-    lv_label_set_text(s_g_name, it->name[0] ? it->name : it->entity);
     lv_obj_set_style_text_font(s_g_name, NFONT, 0);
-    lv_obj_align(s_g_name, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+    set_name_label(s_g_name, it->name[0] ? it->name : it->entity, name_max_w(s_gi), cx, y);
 
     /* line chart filling the lower part of the page, no axes or grid */
     s_chart = lv_chart_create(page);
@@ -600,9 +641,9 @@ static void create_pages(lv_obj_t *scr)
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
-            lv_label_set_text(s_name[pg][i], it->name[0] ? it->name : it->entity);
             lv_obj_set_style_text_font(s_name[pg][i], NFONT, 0);
-            lv_obj_align(s_name[pg][i], LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+            snprintf(s_full[pg][i], sizeof(s_full[pg][i]), "%.31s", it->name[0] ? it->name : it->entity);
+            (void)cx; (void)y;
             /* value centred on the page; unit placed right next to it */
             s_val[pg][i] = lv_label_create(page);
             lv_label_set_text(s_val[pg][i], "--");
@@ -613,6 +654,7 @@ static void create_pages(lv_obj_t *scr)
             lv_obj_set_style_text_opa(s_unit[pg][i], LV_OPA_80, 0);
             place_value(pg, i);
         }
+        page_names_update(pg);
     }
     s_gi = 0;
 
