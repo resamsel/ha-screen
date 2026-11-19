@@ -303,6 +303,7 @@ static void page_names_update(int pg)
     for (int i = 0; i < ROWS(pg); i++) strcpy(n[i], s_full[pg][i]);
     lv_coord_t max_w = name_max_w(pg);
     names_abbreviate(n, ROWS(pg), max_w, name_width, NULL);
+    int saved_gi = s_gi;
     for (int i = 0; i < ROWS(pg); i++) {
         lv_coord_t cx, y;
         if (IS_GRAPH(pg)) {   /* left-aligned at the top of each graph block */
@@ -316,6 +317,7 @@ static void page_names_update(int pg)
         value_pos(pg, i, &cx, &y);
         set_name_label(s_name[pg][i], n[i], max_w, cx, y, false);
     }
+    s_gi = saved_gi;
 }
 
 /* Value centred on cx with the unit hanging off its right side, same baseline */
@@ -868,8 +870,8 @@ static void group_objs(int g, lv_obj_t *o[3])
     if (pg >= PAGE_COUNT) return;
     if (IS_GRAPH(pg)) {
         if (row >= ROWS(pg)) return;
-        s_gi = GI(pg, row);
-        o[0] = s_g_val; o[1] = s_g_unit; o[2] = s_g_name;
+        int gi = GI(pg, row);   /* index directly: s_gi belongs to the caller */
+        o[0] = s_g_val_[gi]; o[1] = s_g_unit_[gi]; o[2] = s_g_name_[gi];
         return;
     }
     if (row >= ROWS(pg)) return;
@@ -900,11 +902,11 @@ static void group_area_n(int g, int n, lv_area_t *a)
 /* Tap area of a group: its labels; for a graph page also the chart, i.e. the whole block */
 static void group_area(int g, lv_area_t *a)
 {
-    group_area_n(g, 3, a);   /* sets s_gi for graph groups */
+    group_area_n(g, 3, a);
     int pg = group_page(g);
-    if (pg < PAGE_COUNT && IS_GRAPH(pg) && s_chart) {
+    if (pg < PAGE_COUNT && IS_GRAPH(pg) && s_chart_[g]) {   /* g == GI(page, row) */
         lv_area_t c;
-        lv_obj_get_coords(s_chart, &c);
+        lv_obj_get_coords(s_chart_[g], &c);
         a->x1 = LV_MIN(a->x1, c.x1);
         a->y1 = LV_MIN(a->y1, c.y1);
         a->x2 = LV_MAX(a->x2, c.x2);
