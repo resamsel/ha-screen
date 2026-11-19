@@ -523,18 +523,24 @@ static void clock_tick(lv_timer_t *t)
             if (KIND(pg, i) == LAYOUT_CLOCK) clock_update(GI(pg, i));
 }
 
-/* clock_size small/medium/large = 36/48/72 px digits, smaller while the time doesn't fit
+/* clock_size small/medium/large = 22/48/72 px digits, smaller while the time doesn't fit
  * its block */
+/* seconds / AM-PM beside the time: smaller next to a small clock */
+static const lv_font_t *clock_small_font(const lv_font_t *time_font)
+{
+    return time_font == &lv_font_latin_22 ? &lv_font_latin_16 : &lv_font_latin_22;
+}
+
 static const lv_font_t *clock_font(uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
 {
-    static const lv_font_t *const fonts[] = { &lv_font_montserrat_36, &lv_font_clock_48, &lv_font_clock_72 };
+    static const lv_font_t *const fonts[] = { &lv_font_latin_22, &lv_font_clock_48, &lv_font_clock_72 };
     int i = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 2 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 1 : 0;
     /* seconds and AM/PM are drawn small beside the time */
     lv_point_t extra = { 0, 0 };
     const char *small = (flags & LAYOUT_CLOCK_SECONDS) && (flags & LAYOUT_CLOCK_12H) ? ":00 PM"
                       : flags & LAYOUT_CLOCK_SECONDS ? ":00" : flags & LAYOUT_CLOCK_12H ? "PM" : "";
-    if (small[0]) lv_txt_get_size(&extra, small, &lv_font_latin_22, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     for (; i > 0; i--) {
+        if (small[0]) lv_txt_get_size(&extra, small, clock_small_font(fonts[i]), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         lv_point_t sz;
         lv_txt_get_size(&sz, "00:00", fonts[i], 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         if (sz.x + (extra.x ? extra.x + 4 : 0) <= max_w && fonts[i]->line_height <= max_h) break;
@@ -561,10 +567,10 @@ static void create_clock(lv_obj_t *page, int pg, int i)
     if (it->entity[0] && !tz_posix(it->entity))
         ESP_LOGW("clock", "time zone '%s' not known, using the board's", it->entity);
     s_clk_time[gi] = lv_label_create(page);
-    lv_obj_set_style_text_font(s_clk_time[gi], clock_font(it->flags, lv_area_get_width(&blk) - 24,
-                                                          lv_area_get_height(&blk) - 8), 0);
+    const lv_font_t *tf = clock_font(it->flags, lv_area_get_width(&blk) - 24, lv_area_get_height(&blk) - 8);
+    lv_obj_set_style_text_font(s_clk_time[gi], tf, 0);
     s_clk_small[gi] = lv_label_create(page);
-    lv_obj_set_style_text_font(s_clk_small[gi], &lv_font_latin_22, 0);
+    lv_obj_set_style_text_font(s_clk_small[gi], clock_small_font(tf), 0);
     if (!s_clk_timer) s_clk_timer = lv_timer_create(clock_tick, 1000, NULL);
     clock_update(gi);
 }
