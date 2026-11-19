@@ -684,7 +684,20 @@ static void group_area_n(int g, int n, lv_area_t *a)
     }
 }
 
-static void group_area(int g, lv_area_t *a) { group_area_n(g, 3, a); }
+/* Tap area of a group: its labels; for a graph page also the chart, i.e. the whole block */
+static void group_area(int g, lv_area_t *a)
+{
+    group_area_n(g, 3, a);   /* sets s_gi for graph groups */
+    int pg = group_page(g);
+    if (pg < PAGE_COUNT && IS_GRAPH(pg) && s_chart) {
+        lv_area_t c;
+        lv_obj_get_coords(s_chart, &c);
+        a->x1 = LV_MIN(a->x1, c.x1);
+        a->y1 = LV_MIN(a->y1, c.y1);
+        a->x2 = LV_MAX(a->x2, c.x2);
+        a->y2 = LV_MAX(a->y2, c.y2);
+    }
+}
 
 /* Lay out every element on page pg for the current zoom levels. The active number grows
  * about its centre; its unit keeps its size and follows the number's right edge and
