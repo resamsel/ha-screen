@@ -226,9 +226,14 @@ bool layout_sanitize(ha_layout_t *l)
     for (int p = 0; ok && p < l->count; p++) {
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
-        if (pg->kind != LAYOUT_GRAPH) pg->kind = LAYOUT_VALUES;
-        if (pg->hours < 1) pg->hours = LAYOUT_HOURS_DEFAULT;
-        if (pg->hours > LAYOUT_HOURS_MAX) pg->hours = LAYOUT_HOURS_MAX;
+        if (pg->kind != LAYOUT_GRAPH) {
+            pg->kind = LAYOUT_VALUES;
+            pg->hours = 0;                    /* unused; as layout_parse leaves it */
+        } else if (pg->hours < 1) {
+            pg->hours = LAYOUT_HOURS_DEFAULT;
+        } else if (pg->hours > LAYOUT_HOURS_MAX) {
+            pg->hours = LAYOUT_HOURS_MAX;
+        }
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
             pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;

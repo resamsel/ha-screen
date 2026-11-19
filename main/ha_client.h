@@ -25,6 +25,10 @@ typedef void (*ha_done_cb_t)(bool ok);
 typedef void (*ha_layout_cb_t)(const ha_layout_t *layout);
 void ha_client_set_layout_cb(ha_layout_cb_t cb);  /* call before ha_client_start */
 
+/* true while the network task talks to HA (a poll, a tap, the dashboard check), then false */
+typedef void (*ha_busy_cb_t)(bool busy);
+void ha_client_set_busy_cb(ha_busy_cb_t cb);      /* call before ha_client_start */
+
 /* Value page row: page/row index into the current layout; name = card name or friendly_name. */
 typedef void (*ha_sensor_cb_t)(int page, int row, const char *value, const char *unit, const char *name);
 

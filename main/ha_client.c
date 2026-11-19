@@ -46,6 +46,8 @@ static ha_graph_cb_t s_graph_cb;
 static bool s_force_report;
 static ha_layout_cb_t s_layout_cb;
 void ha_client_set_layout_cb(ha_layout_cb_t cb) { s_layout_cb = cb; }
+static ha_busy_cb_t s_busy_cb;
+void ha_client_set_busy_cb(ha_busy_cb_t cb) { s_busy_cb = cb; }
 static ha_layout_t s_layout;              /* current layout, used only by the network task */
 static uint32_t s_layout_hash;
 
@@ -492,6 +494,7 @@ static void ha_task(void *arg)
         /* wait for a tap, or poll the state every HA_POLL_INTERVAL_MS */
         EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
         s_err[0] = 0;
+        if (s_busy_cb) s_busy_cb(true);
         bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT);
         /* not while a tap waits: the dashboard check can take seconds */
         if (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS))) {
@@ -532,6 +535,7 @@ static void ha_task(void *arg)
             if (s_done_cb) s_done_cb(ok);
         }
         if (s_err_cb) s_err_cb(s_err);
+        if (s_busy_cb) s_busy_cb(false);
     }
 }
 

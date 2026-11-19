@@ -70,6 +70,7 @@ static void create_ui(void);
 static void ha_toggle_cb(lv_event_t *e);
 static void set_busy(bool busy);
 static void show_status(ha_state_t state);
+static void ha_busy(bool busy);
 static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
@@ -179,6 +180,7 @@ void app_main(void)
     ha_client_set_error_cb(ha_errors);
     ha_client_set_landscape_cb(ha_landscape_changed);
     ha_client_set_layout_cb(ha_layout_changed);
+    ha_client_set_busy_cb(ha_busy);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -465,9 +467,18 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
         lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (lv_coord_t)(bot * 10), (lv_coord_t)(top * 10));
         s_ytop = top;
         s_ybot = bot;
-        for (int i = 0; i < n && i < HA_GRAPH_POINTS; i++)
-            lv_chart_set_value_by_id(s_chart, s_chart_ser, i,
-                                     isnan(sm[i]) ? LV_CHART_POINT_NONE : (lv_coord_t)(sm[i] * 10));
+        /* resample the n smoothed points onto the chart's (fewer) points */
+        int cnt = lv_chart_get_point_count(s_chart);
+        n = LV_MIN(n, HA_GRAPH_POINTS);
+        for (int c = 0; c < cnt; c++) {
+            float x = cnt > 1 ? (float)c * (n - 1) / (cnt - 1) : 0;
+            int i0 = (int)x, i1 = LV_MIN(i0 + 1, n - 1);
+            float f = x - i0, v;
+            if (isnan(sm[i0])) v = sm[i1];
+            else if (isnan(sm[i1])) v = sm[i0];
+            else v = sm[i0] + (sm[i1] - sm[i0]) * f;
+            lv_chart_set_value_by_id(s_chart, s_chart_ser, c, isnan(v) ? LV_CHART_POINT_NONE : (lv_coord_t)(v * 10));
+        }
         lv_chart_refresh(s_chart);
         place_time_axis(end);
     }
@@ -548,6 +559,28 @@ static void place_graph_value(void)
     if (s_g_name) page_relayout(s_gi);
 }
 
+/* Fills the area under each line segment down to the chart's bottom edge, in the line's
+ * colour at low opacity; the chart background stays transparent. */
+static void chart_fill_cb(lv_event_t *e)
+{
+    lv_obj_draw_part_dsc_t *d = lv_event_get_draw_part_dsc(e);
+    if (d->part != LV_PART_ITEMS || d->type != LV_CHART_DRAW_PART_LINE_AND_POINT || !d->p1 || !d->p2) return;
+    lv_obj_t *chart = lv_event_get_target(e);
+    lv_area_t a;
+    lv_obj_get_coords(chart, &a);
+    lv_coord_t bottom = a.y2 - lv_obj_get_style_pad_bottom(chart, 0);
+    lv_point_t pts[4] = {
+        { d->p1->x, d->p1->y }, { d->p2->x, d->p2->y }, { d->p2->x, bottom }, { d->p1->x, bottom },
+    };
+    lv_draw_rect_dsc_t r;
+    lv_draw_rect_dsc_init(&r);
+    r.bg_color = d->line_dsc ? d->line_dsc->color : lv_color_hex(0x18BCF2);
+    r.bg_opa = LV_OPA_30;
+    r.border_width = 0;
+    r.radius = 0;
+    lv_draw_polygon(d->draw_ctx, &r, pts, 4);
+}
+
 static lv_obj_t *make_page(int pg)
 {
     lv_obj_t *page = lv_obj_create(s_strip);
@@ -593,12 +626,15 @@ static void create_graph_page(lv_obj_t *page)
     lv_obj_set_style_pad_all(s_chart, 2, 0);
     lv_chart_set_div_line_count(s_chart, 0, 0);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_point_count(s_chart, HA_GRAPH_POINTS);
+    /* fewer points than pixels: at one point per pixel LVGL draws plain vertical strokes,
+     * without antialiasing or the fill underneath */
+    lv_chart_set_point_count(s_chart, LV_MIN(HA_GRAPH_POINTS, (lv_obj_get_style_width(s_chart, 0) - 4) / 2));
     lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 10);
     lv_obj_set_style_line_width(s_chart, HA_GRAPH_LINE_WIDTH, LV_PART_ITEMS);
     lv_obj_set_style_line_rounded(s_chart, true, LV_PART_ITEMS);   /* round joints */
     lv_obj_set_style_size(s_chart, 0, LV_PART_INDICATOR);          /* no point markers */
     s_chart_ser = lv_chart_add_series(s_chart, lv_color_hex(0x18BCF2), LV_CHART_AXIS_PRIMARY_Y);
+    lv_obj_add_event_cb(s_chart, chart_fill_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
     lv_chart_set_all_value(s_chart, s_chart_ser, LV_CHART_POINT_NONE);
 
     s_ymax = lv_label_create(page);
@@ -1173,22 +1209,60 @@ static void set_busy(bool busy)
     }
 }
 
-/* Wi-Fi icon: green = connected, grey = not. HA dot: green = HA answered, red = not.
+/* Wi-Fi icon: green = connected, grey = not. HA dot: grey = not connected yet, green = HA answered, red = HA error; it pulses while connecting or reading.
  * Must be called with the LVGL lock held. */
+
+/* HA dot fades in and out while connecting (no Wi-Fi) or while data is being read */
+static bool s_net_busy, s_offline = true;
+static void dot_opa_cb(void *obj, int32_t v) { lv_obj_set_style_bg_opa(obj, (lv_opa_t)v, 0); }
+static void update_dot_pulse(void)
+{
+    bool on = s_net_busy || s_offline;
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *d = s_ha_icon[i];
+        if (!d) continue;
+        bool running = lv_anim_get(d, dot_opa_cb) != NULL;
+        if (on && !running) {
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, d);
+            lv_anim_set_exec_cb(&a, dot_opa_cb);
+            lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_20);
+            lv_anim_set_time(&a, 500);
+            lv_anim_set_playback_time(&a, 500);
+            lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+            lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+            lv_anim_start(&a);
+        } else if (!on && running) {
+            lv_anim_del(d, dot_opa_cb);
+            lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+        }
+    }
+}
+
+static void ha_busy(bool busy)
+{
+    if (!lvgl_port_lock(0)) return;
+    s_net_busy = busy;
+    update_dot_pulse();
+    lvgl_port_unlock();
+}
 
 static void show_status(ha_state_t state)
 {
+    s_offline = state == HA_STATE_OFFLINE;
     /* darker shades on the light background for contrast */
     const uint32_t ok  = s_light ? 0x0B4D22 : 0x2ECC71;
     const uint32_t bad = s_light ? 0x8E0E0E : 0xE74C3C;
     const uint32_t off = s_light ? 0x2B2E33 : 0x8A8F98;
     bool wifi = state != HA_STATE_OFFLINE;
-    uint32_t ha = (wifi && state != HA_STATE_ERROR) ? ok : bad;
+    uint32_t ha = !wifi ? off : state == HA_STATE_ERROR ? bad : ok;   /* grey until connected */
     for (int i = 0; i < 2; i++) {
         if (!s_wifi_icon[i]) continue;
         lv_obj_set_style_text_color(s_wifi_icon[i], lv_color_hex(wifi ? ok : off), 0);
         lv_obj_set_style_bg_color(s_ha_icon[i], lv_color_hex(ha), 0);
     }
+    update_dot_pulse();
 }
 
 /* Network task: the request finished and the state was re-read */

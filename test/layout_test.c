@@ -186,7 +186,9 @@ static void test_sanitize(void)
 {
     ha_layout_t l;
     parse_sections("[" SEC(GRAPH("sensor.g")) "," SEC(TILE("sensor.a")) "]", &l);
+    uint32_t before = layout_hash(&l);
     assert(layout_sanitize(&l));
+    assert(layout_hash(&l) == before);   /* a valid layout comes back unchanged (cache hit) */
     l.pages[0].hours = 0;
     l.pages[1].kind = 7;
     assert(layout_sanitize(&l));
