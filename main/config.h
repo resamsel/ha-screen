@@ -30,29 +30,12 @@
 #define HA_VIEW               "main"
 #define HA_LAYOUT_INTERVAL_MS 60000
 
-/* Main screen pages, switched by dragging left or right. Each page has one row per floor,
- * top to bottom, all sharing the row names below. */
-#define HA_SENSOR_PAGES  2      /* temperature, humidity; the graph pages come after */
-#define HA_ROW_COUNT     3
-#define HA_PAGE_TITLES   { "Temperature", "Humidity", "Packet loss", "Ping" }   /* status line; graph pages last */
-#define HA_ROW_NAMES     { "First floor",              "Ground floor",             "Basement" }
-#define HA_TEMP_ENTITIES { "sensor.temperature_og",    "sensor.temperature_eg",    "sensor.temperature_ug" }
-#define HA_HUM_ENTITIES  { "sensor.luftfeuchtigkeit_og", "sensor.luftfeuchtigkeit_eg", "sensor.luftfeuchtigkeit_ug" }
-
-/* Graph pages, after the sensor pages: last HA_GRAPH_HOURS of each sensor, with its current
- * value on top. One title per graph page goes at the end of HA_PAGE_TITLES. */
-#define HA_GRAPH_COUNT       2
-#define HA_GRAPH_ENTITIES    { "sensor.www_google_at_paketverlust", "sensor.www_google_at_durchschnittliche_umlaufzeit" }
-#define HA_GRAPH_NAMES       { "www.google.at",                     "www.google.at" }
-#define HA_GRAPH_DECIMALS    { 1,                                   0 }   /* digits after the point */
-#define HA_GRAPH_ZERO_BASED  { 1,                                   0 }   /* 1 = y axis from 0, 0 = fit to the data */
+/* Graph pages (the time span comes from the dashboard card's hours_to_show) */
 /* Line smoothing: Gaussian blur width in points (pixels); 0 = raw data, higher = smoother.
  * Write decimals with a point (3.0f or 3, not 3f). */
-#define HA_GRAPH_SMOOTHING   3.0f
+#define HA_GRAPH_SMOOTHING   6.0f
 #define HA_GRAPH_LINE_WIDTH  2       /* graph line thickness in pixels */
-#define HA_GRAPH_HOURS       24
 #define HA_GRAPH_POINTS      168     /* horizontal resolution (1 px per point) */
-#define HA_GRAPH_TICK_HOURS  6       /* time labels under the graph, every N hours */
 
 /* A tapped value (with its unit and name) grows by this factor; 1.2 = 20 % bigger */
 #define HA_ACTIVE_SCALE      1.6f

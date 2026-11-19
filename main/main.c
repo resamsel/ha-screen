@@ -65,14 +65,16 @@ static void ha_toggle_cb(lv_event_t *e);
 static void set_busy(bool busy);
 static void show_status(ha_state_t state);
 static void apply_panel_theme(bool light);
-static void ha_sensor_changed(int page, int row, const char *value, const char *unit);
+static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
+static void ha_layout_changed(const ha_layout_t *layout);
 static void axis_text(char *b, size_t n, float v, const char *unit)
 {
     if (v >= 10 || v == floorf(v)) snprintf(b, n, "%.0f %s", (double)v, unit);
     else snprintf(b, n, "%.1f %s", (double)v, unit);
 }
 
-static void ha_graph_changed(int graph, const char *latest, const char *unit, const float *pts, int n, int64_t end);
+static void ha_graph_changed(int graph, const char *latest, const char *unit, const char *name, const float *pts,
+                             int n, int64_t end, int hours, bool zero_based);
 static void place_graph_value(void);
 static void place_time_axis(int64_t end);
 static float nice_ceil(float x);
@@ -170,6 +172,7 @@ void app_main(void)
     tzset();
     ha_client_set_error_cb(ha_errors);
     ha_client_set_landscape_cb(ha_landscape_changed);
+    ha_client_set_layout_cb(ha_layout_changed);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -194,44 +197,48 @@ void app_main(void)
 #define ROW_BLOCK  64                    /* value (36 px font) + name below it */
 #define PAGE_W     SCR_W
 #define SWIPE_MIN  40                    /* drag distance that flips the page */
-#define PAGE_COUNT (HA_SENSOR_PAGES + HA_GRAPH_COUNT)
-#define IS_GRAPH(pg) ((pg) >= HA_SENSOR_PAGES)        /* graph pages come last */
+static ha_layout_t s_layout;                  /* pages from the HA dashboard (LVGL lock) */
+#define PAGE_COUNT (s_layout.count)
+#define IS_GRAPH(pg) (s_layout.pages[pg].kind == LAYOUT_GRAPH)
+#define ROWS(pg)     (s_layout.pages[pg].count)
 
 /* Where row i's value goes: portrait = rows stacked, landscape = side-by-side columns.
  * cx = horizontal centre, y = top of the value. */
-static void value_pos(int i, lv_coord_t *cx, lv_coord_t *y);
-static lv_coord_t row_y(int i)
+static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y);
+static lv_coord_t row_y(int i, int rows)
 {
-    lv_coord_t slot = (SCR_H - STATUS_H - DOTS_H) / HA_ROW_COUNT;
+    lv_coord_t slot = (SCR_H - STATUS_H - DOTS_H) / LV_MAX(rows, 1);
     return STATUS_H + i * slot + (slot - ROW_BLOCK) / 2;
 }
 
 static lv_obj_t *s_strip = NULL;                         /* all pages side by side */
-static lv_obj_t *s_name[HA_SENSOR_PAGES][HA_ROW_COUNT];
-static lv_obj_t *s_val[HA_SENSOR_PAGES][HA_ROW_COUNT];
-static lv_obj_t *s_unit[HA_SENSOR_PAGES][HA_ROW_COUNT];
-static lv_obj_t *s_dot[PAGE_COUNT];
+static lv_obj_t *s_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_val[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_dot[LAYOUT_MAX_PAGES];
 static int s_page = 0;
 static lv_obj_t *s_page_title = NULL;               /* page name, left side of the status line */
 
 /* graph page */
-/* graph pages: one set per graph; s_gi selects which one the s_g_* / s_chart names mean */
+/* graph pages: one set per page index; s_gi (a page index) selects which one the s_g_* / s_chart names mean */
 static int s_gi = 0;
-static lv_obj_t *s_g_name_[HA_GRAPH_COUNT], *s_g_val_[HA_GRAPH_COUNT], *s_g_unit_[HA_GRAPH_COUNT], *s_chart_[HA_GRAPH_COUNT];
-static lv_chart_series_t *s_chart_ser_[HA_GRAPH_COUNT];
+static lv_obj_t *s_g_name_[LAYOUT_MAX_PAGES], *s_g_val_[LAYOUT_MAX_PAGES], *s_g_unit_[LAYOUT_MAX_PAGES], *s_chart_[LAYOUT_MAX_PAGES];
+static lv_chart_series_t *s_chart_ser_[LAYOUT_MAX_PAGES];
 #define s_g_name    s_g_name_[s_gi]
 #define s_g_val     s_g_val_[s_gi]
 #define s_g_unit    s_g_unit_[s_gi]
 #define s_chart     s_chart_[s_gi]
 #define s_chart_ser s_chart_ser_[s_gi]
-#define AXIS_MAX  (HA_GRAPH_HOURS / HA_GRAPH_TICK_HOURS + 1)
+#define AXIS_MAX  5                        /* ticks every hours/4 (rounded up) */
+static int s_hours_[LAYOUT_MAX_PAGES];     /* graph span per page */
+static bool s_zero_[LAYOUT_MAX_PAGES];     /* y axis from 0 */
 #define AXIS_H    16
-static lv_obj_t *s_axis_[HA_GRAPH_COUNT][AXIS_MAX];
-static float s_ytop_[HA_GRAPH_COUNT], s_ybot_[HA_GRAPH_COUNT];
-static lv_obj_t *s_ymin_[HA_GRAPH_COUNT];   /* y axis lower bound, bottom-left (if not 0) */
+static lv_obj_t *s_axis_[LAYOUT_MAX_PAGES][AXIS_MAX];
+static float s_ytop_[LAYOUT_MAX_PAGES], s_ybot_[LAYOUT_MAX_PAGES];
+static lv_obj_t *s_ymin_[LAYOUT_MAX_PAGES];   /* y axis lower bound, bottom-left (if not 0) */
 #define s_ybot s_ybot_[s_gi]
 #define s_ymin s_ymin_[s_gi]
-static lv_obj_t *s_ymax_[HA_GRAPH_COUNT];   /* y axis top value, top-left of the graph */
+static lv_obj_t *s_ymax_[LAYOUT_MAX_PAGES];   /* y axis top value, top-left of the graph */
 #define s_axis s_axis_[s_gi]
 #define s_ytop s_ytop_[s_gi]
 #define s_ymax s_ymax_[s_gi]
@@ -239,15 +246,15 @@ static lv_obj_t *s_ymax_[HA_GRAPH_COUNT];   /* y axis top value, top-left of the
 
 /* Centre the value horizontally in its row and hang the unit off its right side,
  * on the same baseline. Call after changing either text (LVGL lock held). */
-static void value_pos(int i, lv_coord_t *cx, lv_coord_t *y)
+static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y)
 {
     if (s_landscape) {
-        lv_coord_t colw = SCR_W / HA_ROW_COUNT;
+        lv_coord_t colw = SCR_W / LV_MAX(ROWS(pg), 1);
         *cx = i * colw + colw / 2;
         *y = STATUS_H + (SCR_H - STATUS_H - DOTS_H - 52) / 2;
     } else {
         *cx = SCR_W / 2;
-        *y = row_y(i);
+        *y = row_y(i, ROWS(pg));
     }
 }
 
@@ -269,9 +276,9 @@ static void place_pair(lv_obj_t *val, lv_obj_t *unit, lv_coord_t cx, lv_coord_t 
 static void place_value(int pg, int row)
 {
     lv_coord_t cx, y;
-    value_pos(row, &cx, &y);
+    value_pos(pg, row, &cx, &y);
     place_pair(s_val[pg][row], s_unit[pg][row], cx, y);
-    if (s_unit[pg][HA_ROW_COUNT - 1]) page_relayout(pg);   /* once the page is complete */
+    if (s_unit[pg][ROWS(pg) - 1]) page_relayout(pg);   /* once the page is complete */
 }
 
 /* Sensor text and page dot colours for the current theme. LVGL lock must be held. */
@@ -279,15 +286,15 @@ static void apply_temp_theme(bool light)
 {
     lv_color_t fg = light ? lv_color_hex(0x1C1C1E) : lv_color_white();
     lv_color_t sub = lv_color_hex(light ? 0x4A5058 : 0x9AA0A8);
-    for (int pg = 0; pg < HA_SENSOR_PAGES; pg++) {
-        for (int i = 0; i < HA_ROW_COUNT; i++) {
+    for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++) {
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++) {
             if (!s_val[pg][i]) continue;
             lv_obj_set_style_text_color(s_name[pg][i], sub, 0);
             lv_obj_set_style_text_color(s_val[pg][i], fg, 0);
             lv_obj_set_style_text_color(s_unit[pg][i], fg, 0);
         }
     }
-    for (s_gi = 0; s_gi < HA_GRAPH_COUNT; s_gi++) {
+    for (s_gi = 0; s_gi < LAYOUT_MAX_PAGES; s_gi++) {
         if (!s_chart) continue;
         for (int i = 0; i < AXIS_MAX; i++) lv_obj_set_style_text_color(s_axis[i], sub, 0);
         lv_obj_set_style_text_color(s_ymax, sub, 0);
@@ -311,11 +318,11 @@ static void value_select(int g);
 static void show_page(int page)
 {
     value_select(-1);
-    static const char *titles[PAGE_COUNT] = HA_PAGE_TITLES;
+    if (!PAGE_COUNT || !s_strip) return;
     if (page < 0) page = 0;                       /* no wrap-around: stop at either end */
     if (page >= PAGE_COUNT) page = PAGE_COUNT - 1;
     s_page = page;
-    lv_label_set_text(s_page_title, titles[s_page]);
+    lv_label_set_text(s_page_title, s_layout.pages[s_page].title);
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_strip);
@@ -328,21 +335,40 @@ static void show_page(int page)
 }
 
 /* Network task: new value for one sensor */
-static void ha_sensor_changed(int page, int row, const char *value, const char *unit)
+static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name)
 {
-    if (page < 0 || page >= HA_SENSOR_PAGES || row < 0 || row >= HA_ROW_COUNT || !lvgl_port_lock(0)) return;
-    lv_label_set_text(s_val[page][row], value);
-    lv_label_set_text(s_unit[page][row], unit);
-    place_value(page, row);
+    if (!lvgl_port_lock(0)) return;
+    if (page >= 0 && page < PAGE_COUNT && !IS_GRAPH(page) && row >= 0 && row < ROWS(page) && s_val[page][row]) {
+        lv_label_set_text(s_val[page][row], value);
+        lv_label_set_text(s_unit[page][row], unit);
+        if (strcmp(lv_label_get_text(s_name[page][row]), name)) {
+            lv_coord_t cx, y;
+            value_pos(page, row, &cx, &y);
+            lv_label_set_text(s_name[page][row], name);
+            lv_obj_align(s_name[page][row], LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+        }
+        place_value(page, row);
+    }
     lvgl_port_unlock();
 }
 
 /* Network task: graph page value, or a fresh set of history points */
-static void ha_graph_changed(int graph, const char *latest, const char *unit, const float *pts, int n, int64_t end)
+static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y);
+static void ha_graph_changed(int graph, const char *latest, const char *unit, const char *name, const float *pts,
+                             int n, int64_t end, int hours, bool zero_based)
 {
-    if (graph < 0 || graph >= HA_GRAPH_COUNT || !lvgl_port_lock(0)) return;
+    if (!lvgl_port_lock(0)) return;
+    if (graph < 0 || graph >= PAGE_COUNT || !IS_GRAPH(graph)) { lvgl_port_unlock(); return; }
     s_gi = graph;
     if (!s_chart) { lvgl_port_unlock(); return; }
+    s_hours_[s_gi] = hours;
+    s_zero_[s_gi] = zero_based;
+    if (name && strcmp(lv_label_get_text(s_g_name), name)) {
+        lv_coord_t cx, y;
+        graph_value_pos(&cx, &y);
+        lv_label_set_text(s_g_name, name);
+        lv_obj_align(s_g_name, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+    }
     if (latest) {
         lv_label_set_text(s_g_val, latest);
         lv_label_set_text(s_g_unit, unit ? unit : "");
@@ -374,9 +400,8 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
             if (sm[i] < mn) mn = sm[i];
         }
         if (isinf(mx)) { mx = 1; mn = 0; }      /* no data yet */
-        static const int zero_based[HA_GRAPH_COUNT] = HA_GRAPH_ZERO_BASED;
         float top, bot = 0;
-        if (zero_based[s_gi]) {
+        if (s_zero_[s_gi]) {
             /* 0 .. the next "nice" number (1, 2, 2.5, 5 x 10^n) above the peak */
             top = nice_ceil(LV_MAX(mx, 1.0f) * 1.05f);
         } else {
@@ -413,7 +438,7 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
     lvgl_port_unlock();
 }
 
-/* Time labels under the graph at every HA_GRAPH_TICK_HOURS of local clock time
+/* Time labels under the graph every hours/4 (rounded up) of local clock time
  * (e.g. 18:00, 0:00, 6:00, 12:00), positioned to match the chart's x axis. */
 
 static float nice_ceil(float x)
@@ -428,7 +453,9 @@ static float nice_ceil(float x)
 static void place_time_axis(int64_t end)
 {
     if (!end) return;
-    const int64_t span = HA_GRAPH_HOURS * 3600, start = end - span;
+    const int hours = s_hours_[s_gi] > 0 ? s_hours_[s_gi] : LAYOUT_HOURS_DEFAULT;
+    const int tick = (hours + AXIS_MAX - 2) / (AXIS_MAX - 1);   /* at most AXIS_MAX labels */
+    const int64_t span = (int64_t)hours * 3600, start = end - span;
     const lv_coord_t pad = 2, w = lv_obj_get_width(s_chart) - 2 * pad;
     const lv_coord_t x0 = lv_obj_get_x(s_chart) + pad;
     const lv_coord_t y = lv_obj_get_y(s_chart) + lv_obj_get_height(s_chart) + 1;
@@ -438,7 +465,7 @@ static void place_time_axis(int64_t end)
         time_t tt = (time_t)t;
         struct tm lt;
         localtime_r(&tt, &lt);
-        if (lt.tm_hour % HA_GRAPH_TICK_HOURS) continue;
+        if (lt.tm_hour % tick) continue;
         lv_obj_t *l = s_axis[used++];
         lv_label_set_text_fmt(l, "%d:00", lt.tm_hour);
         lv_obj_update_layout(l);
@@ -460,7 +487,7 @@ static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y)
         *y = STATUS_H + (SCR_H - STATUS_H - DOTS_H - 52) / 2;
     } else {
         *cx = SCR_W / 2;
-        *y = row_y(0);
+        *y = row_y(0, 3);   /* same spot as the first of three rows */
     }
 }
 
@@ -469,7 +496,7 @@ static void place_graph_value(void)
     lv_coord_t cx, y;
     graph_value_pos(&cx, &y);
     place_pair(s_g_val, s_g_unit, cx, y);
-    if (s_g_name) page_relayout(HA_SENSOR_PAGES + s_gi);
+    if (s_g_name) page_relayout(s_gi);
 }
 
 static lv_obj_t *make_page(int pg)
@@ -496,8 +523,8 @@ static void create_graph_page(lv_obj_t *page)
     lv_obj_set_style_text_opa(s_g_unit, LV_OPA_80, 0);
     place_graph_value();
     s_g_name = lv_label_create(page);
-    static const char *gnames[HA_GRAPH_COUNT] = HA_GRAPH_NAMES;
-    lv_label_set_text(s_g_name, gnames[s_gi]);
+    const layout_item_t *it = &s_layout.pages[s_gi].items[0];
+    lv_label_set_text(s_g_name, it->name[0] ? it->name : it->entity);
     lv_obj_set_style_text_font(s_g_name, NFONT, 0);
     lv_obj_align(s_g_name, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
 
@@ -545,21 +572,35 @@ static void create_graph_page(lv_obj_t *page)
 
 static void create_pages(lv_obj_t *scr)
 {
-    static const char *names[HA_ROW_COUNT] = HA_ROW_NAMES;
-
+    if (!PAGE_COUNT) {   /* nothing from HA or the cache yet */
+        lv_obj_t *l = lv_label_create(scr);
+        lv_label_set_text(l, "Loading layout...");
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(l, s_light ? lv_color_hex(0x1C1C1E) : lv_color_white(), 0);
+        lv_obj_center(l);
+        s_strip = NULL;
+        s_page_title = NULL;
+        return;
+    }
     s_strip = lv_obj_create(scr);
     lv_obj_remove_style_all(s_strip);
     lv_obj_set_size(s_strip, PAGE_W * PAGE_COUNT, SCR_H);
     lv_obj_set_pos(s_strip, 0, 0);
     lv_obj_clear_flag(s_strip, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int pg = 0; pg < HA_SENSOR_PAGES; pg++) {
+    for (int pg = 0; pg < PAGE_COUNT; pg++) {
+        if (IS_GRAPH(pg)) {
+            s_gi = pg;
+            create_graph_page(make_page(pg));
+            continue;
+        }
         lv_obj_t *page = make_page(pg);
-        for (int i = 0; i < HA_ROW_COUNT; i++) {
+        for (int i = 0; i < ROWS(pg); i++) {
+            const layout_item_t *it = &s_layout.pages[pg].items[i];
             lv_coord_t cx, y;
-            value_pos(i, &cx, &y);
+            value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
-            lv_label_set_text(s_name[pg][i], names[i]);
+            lv_label_set_text(s_name[pg][i], it->name[0] ? it->name : it->entity);
             lv_obj_set_style_text_font(s_name[pg][i], NFONT, 0);
             lv_obj_align(s_name[pg][i], LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
             /* value centred on the page; unit placed right next to it */
@@ -573,7 +614,6 @@ static void create_pages(lv_obj_t *scr)
             place_value(pg, i);
         }
     }
-    for (s_gi = 0; s_gi < HA_GRAPH_COUNT; s_gi++) create_graph_page(make_page(HA_SENSOR_PAGES + s_gi));
     s_gi = 0;
 
     /* Page dots, centred at the bottom; fixed on the screen, not part of the strip */
@@ -594,34 +634,36 @@ static void create_pages(lv_obj_t *scr)
     lv_obj_set_style_text_font(s_page_title, &lv_font_montserrat_16, 0);
     /* vertically centred on the status icons (HA dot centre is at y = 14 + 10/2) */
     lv_obj_align(s_page_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_montserrat_16.line_height / 2);
-    {
-        static const char *titles[PAGE_COUNT] = HA_PAGE_TITLES;
-        lv_label_set_text(s_page_title, titles[0]);
-    }
+    lv_label_set_text(s_page_title, s_layout.pages[s_page].title);
     apply_temp_theme(s_light);
 }
 
 
 /* ---- Tapped value grows (only the number; unit and name keep their size and move along) ----------- */
-#define GROUPS     (HA_SENSOR_PAGES * HA_ROW_COUNT + HA_GRAPH_COUNT)   /* graph values last */
+#define GROUPS     (LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS)   /* g = page * LAYOUT_MAX_ROWS + row */
 #define ZOOM_BIG   ((uint16_t)(HA_ACTIVE_SCALE * 256 + 0.5f))   /* LVGL zoom: 256 = 100 % */
 static int s_sel = -1;
 static uint16_t s_zoom[GROUPS];
 
+/* o[0] = NULL when group g doesn't exist in the current layout */
 static void group_objs(int g, lv_obj_t *o[3])
 {
-    if (g >= HA_SENSOR_PAGES * HA_ROW_COUNT) {
-        s_gi = g - HA_SENSOR_PAGES * HA_ROW_COUNT;
+    int pg = g / LAYOUT_MAX_ROWS, row = g % LAYOUT_MAX_ROWS;
+    o[0] = o[1] = o[2] = NULL;
+    if (pg >= PAGE_COUNT) return;
+    if (IS_GRAPH(pg)) {
+        if (row) return;
+        s_gi = pg;
         o[0] = s_g_val; o[1] = s_g_unit; o[2] = s_g_name;
         return;
     }
-    int pg = g / HA_ROW_COUNT, row = g % HA_ROW_COUNT;
+    if (row >= ROWS(pg)) return;
     o[0] = s_val[pg][row]; o[1] = s_unit[pg][row]; o[2] = s_name[pg][row];
 }
 
 static int group_page(int g)
 {
-    return g >= HA_SENSOR_PAGES * HA_ROW_COUNT ? HA_SENSOR_PAGES + (g - HA_SENSOR_PAGES * HA_ROW_COUNT) : g / HA_ROW_COUNT;
+    return g / LAYOUT_MAX_ROWS;
 }
 
 /* Screen area covered by a group's first n labels (2 = value and unit, 3 = with name) */
@@ -649,11 +691,15 @@ static void group_area(int g, lv_area_t *a) { group_area_n(g, 3, a); }
  * cross the screen (or graph) edge is pushed back inside, so nothing gets cut off. */
 static void page_relayout(int pg)
 {
-    int gs[HA_ROW_COUNT], n = 0;
-    for (int g = 0; g < GROUPS; g++) if (group_page(g) == pg) gs[n++] = g;
-    lv_area_t va[HA_ROW_COUNT], ua[HA_ROW_COUNT], na[HA_ROW_COUNT];
-    float f[HA_ROW_COUNT];
-    lv_obj_t *o[HA_ROW_COUNT][3];
+    int gs[LAYOUT_MAX_ROWS], n = 0;
+    lv_obj_t *probe[3];
+    for (int g = pg * LAYOUT_MAX_ROWS; g < (pg + 1) * LAYOUT_MAX_ROWS && g < GROUPS; g++) {
+        group_objs(g, probe);
+        if (probe[0]) gs[n++] = g;
+    }
+    lv_area_t va[LAYOUT_MAX_ROWS], ua[LAYOUT_MAX_ROWS], na[LAYOUT_MAX_ROWS];
+    float f[LAYOUT_MAX_ROWS];
+    lv_obj_t *o[LAYOUT_MAX_ROWS][3];
     for (int k = 0; k < n; k++) {
         group_objs(gs[k], o[k]);
         if (!o[k][0]) return;
@@ -735,6 +781,9 @@ static void value_tap(lv_point_t p)
 {
     for (int g = 0; g < GROUPS; g++) {
         if (group_page(g) != s_page) continue;
+        lv_obj_t *o[3];
+        group_objs(g, o);
+        if (!o[0]) continue;
         lv_area_t a;
         group_area(g, &a);
         if (p.x >= a.x1 - 8 && p.x <= a.x2 + 8 && p.y >= a.y1 - 8 && p.y <= a.y2 + 8) {
@@ -842,7 +891,7 @@ static void edge_swipe_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         s_dragging = s_cfg_open || p.y <= CFG_EDGE;
-        s_paging = !s_dragging;
+        s_paging = !s_dragging && s_strip;
         s_drag_start_x = p.x;
         s_drag_start_y = p.y;
         s_cfg_mode = s_cfg_open ? CFG_UNDECIDED : CFG_VERTICAL;
@@ -1302,7 +1351,7 @@ static void button_poll(lv_timer_t *t)
     bool down = gpio_get_level(BUTTON_GPIO) == 0;
     if (!down && was_down) {   /* act on release, not on press */
         if (s_cfg_open) cfg_show_page((s_cfg_page + 1) % CFG_PAGES);
-        else show_page((s_page + 1) % PAGE_COUNT);
+        else if (PAGE_COUNT) show_page((s_page + 1) % PAGE_COUNT);
     }
     was_down = down;
 }
@@ -1366,4 +1415,22 @@ static void orient_cb(lv_event_t *e)
     if (s_busy || s_swiped) return;
     set_busy(true);
     ha_client_toggle_landscape();
+}
+
+/* Network task: a new layout from the dashboard (or the NVS cache). Rebuilds the UI right
+ * away, before the values for it arrive; keeps the current page when it still exists. */
+static void ha_layout_changed(const ha_layout_t *layout)
+{
+    if (!lvgl_port_lock(0)) return;
+    int page = s_page;
+    bool was_open = s_cfg_open;
+    s_layout = *layout;
+    create_ui();
+    if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
+    if (s_strip && page > 0 && page < PAGE_COUNT) {
+        lv_obj_set_x(s_strip, -page * PAGE_W);
+        show_page(page);
+    }
+    lv_obj_invalidate(lv_scr_act());
+    lvgl_port_unlock();
 }

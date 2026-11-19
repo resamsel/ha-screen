@@ -6,6 +6,7 @@ static void add_error(const char *fmt, ...);
 #include <stdlib.h>
 #include <strings.h>
 #include <math.h>
+#include <time.h>
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,6 +17,8 @@ static void add_error(const char *fmt, ...);
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "ha_client.h"
+#include "dash_fetch.h"
+#include "layout_store.h"
 
 #include "config.h"
 
@@ -41,6 +44,10 @@ static ha_done_cb_t s_done_cb;
 static ha_sensor_cb_t s_sensor_cb;
 static ha_graph_cb_t s_graph_cb;
 static bool s_force_report;
+static ha_layout_cb_t s_layout_cb;
+void ha_client_set_layout_cb(ha_layout_cb_t cb) { s_layout_cb = cb; }
+static ha_layout_t s_layout;              /* current layout, used only by the network task */
+static uint32_t s_layout_hash;
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -76,6 +83,7 @@ static bool s_hist_has[HA_GRAPH_POINTS];
 static char s_hist_line[384];
 static int s_hist_len;
 static int s_hist_depth;                  /* {} nesting: entries are the depth-1 objects */
+static int s_hist_hours = LAYOUT_HOURS_DEFAULT;  /* span of the graph being fetched */
 
 /* days since 1970-01-01 for a civil date (Howard Hinnant's algorithm) */
 static int64_t days_from_civil(int y, int m, int d)
@@ -117,9 +125,9 @@ static void hist_point(const char *obj)
     char *end;
     float v = strtof(st + 9, &end);
     if (end == st + 9) return;            /* "unavailable" etc. */
-    int64_t start = s_now - HA_GRAPH_HOURS * 3600;
+    int64_t start = s_now - (int64_t)s_hist_hours * 3600;
     int64_t ts = parse_iso(lc + 16);
-    int b = ts <= start ? 0 : (int)((ts - start) * HA_GRAPH_POINTS / (HA_GRAPH_HOURS * 3600));
+    int b = ts <= start ? 0 : (int)((ts - start) * HA_GRAPH_POINTS / ((int64_t)s_hist_hours * 3600));
     if (b < 0 || b >= HA_GRAPH_POINTS) return;
     if (!s_hist_has[b] || v > s_hist_bucket[b]) s_hist_bucket[b] = v;  /* keep spikes */
     s_hist_last[b] = v;                   /* history is in time order: last one wins */
@@ -255,6 +263,8 @@ static bool json_num(const char *json, const char *key, float *out)
     return true;
 }
 
+static float read_entity(const layout_item_t *it, char text[24], char unit[8], char name[32]);
+
 static bool fetch_state(void)
 {
     static resp_t r;
@@ -287,62 +297,75 @@ static bool fetch_state(void)
         }
     }
 
-    /* Sensor pages (temperature, humidity): value + unit, or "--" when unavailable */
-    static const char *entities[HA_SENSOR_PAGES][HA_ROW_COUNT] = { HA_TEMP_ENTITIES, HA_HUM_ENTITIES };
-    static const int decimals[HA_SENSOR_PAGES] = { 1, 0 };
-    for (int pg = 0; pg < HA_SENSOR_PAGES; pg++) {
-        for (int i = 0; i < HA_ROW_COUNT; i++) {
-            char path[96], text[24] = "--", unit[8] = "";
-            snprintf(path, sizeof(path), "/api/states/%s", entities[pg][i]);
-            if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
-                float v;
-                if (json_num(r.buf, "\"state\":\"", &v)) {
-                    const char *u = strstr(r.buf, "\"unit_of_measurement\":\"");
-                    if (u) {
-                        u += 23;
-                        int n = 0;
-                        while (u[n] && u[n] != '"' && n < (int)sizeof(unit) - 1) { unit[n] = u[n]; n++; }
-                        unit[n] = 0;
-                    }
-                    snprintf(text, sizeof(text), "%.*f", decimals[pg], (double)v);
-                }
-            }
-            if (s_sensor_cb) s_sensor_cb(pg, i, text, unit);
+    for (int pg = 0; pg < s_layout.count; pg++) {
+        if (s_layout.pages[pg].kind != LAYOUT_VALUES) continue;
+        for (int i = 0; i < s_layout.pages[pg].count; i++) {
+            const layout_item_t *it = &s_layout.pages[pg].items[i];
+            char text[24], unit[8], name[32];
+            read_entity(it, text, unit, name);
+            if (s_sensor_cb) s_sensor_cb(pg, i, text, unit, name);
         }
     }
     return st == 200;
 }
 
-/* Latest value and the 24 h history, every poll */
-static void fetch_graph(int gi)
+/* Copies the JSON string value after `key` ("\"key\":\"") into out; false if missing */
+static bool json_str(const char *json, const char *key, char *out, size_t n)
 {
-    static const char *entities[HA_GRAPH_COUNT] = HA_GRAPH_ENTITIES;
-    static const int decimals[HA_GRAPH_COUNT] = HA_GRAPH_DECIMALS;
+    const char *p = strstr(json, key);
+    if (!p) return false;
+    p += strlen(key);
+    size_t i = 0;
+    while (p[i] && p[i] != '"' && i < n - 1) { out[i] = p[i]; i++; }
+    out[i] = 0;
+    return true;
+}
+
+/* Current value of a layout item as display text ("--" when not numeric), its unit and the
+ * name to show (card name, else friendly_name, else the entity id). Returns the value, or NAN. */
+static float read_entity(const layout_item_t *it, char text[24], char unit[8], char name[32])
+{
     static resp_t r;
-    char path[192];
-    char latest[24] = "--", unit[8] = "";
-    snprintf(path, sizeof(path), "/api/states/%s", entities[gi]);
+    char path[96];
+    float v = NAN;
+    strcpy(text, "--");
+    unit[0] = 0;
+    snprintf(name, 32, "%.31s", it->name[0] ? it->name : it->entity);
+    snprintf(path, sizeof(path), "/api/states/%s", it->entity);
     if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
-        float v;
-        if (json_num(r.buf, "\"state\":\"", &v)) {
-            const char *u = strstr(r.buf, "\"unit_of_measurement\":\"");
-            if (u) {
-                u += 23;
-                int n = 0;
-                while (u[n] && u[n] != '"' && n < (int)sizeof(unit) - 1) { unit[n] = u[n]; n++; }
-            }
-            snprintf(latest, sizeof(latest), "%.*f", decimals[gi], (double)v);
-        }
+        if (!it->name[0]) json_str(r.buf, "\"friendly_name\":\"", name, 32);
+        json_str(r.buf, "\"unit_of_measurement\":\"", unit, 8);
+        if (json_num(r.buf, "\"state\":\"", &v))
+            snprintf(text, 24, "%.*f", fabsf(v) < 100 ? 1 : 0, (double)v);   /* 1 decimal below 100 */
+        else
+            v = NAN;
     }
-    if (s_graph_cb) s_graph_cb(gi, latest, unit, NULL, 0, 0);
+    return v;
+}
+
+/* Graph page: latest value every poll, then the history over the page's span */
+static void fetch_graph(int pg)
+{
+    const layout_page_t *page = &s_layout.pages[pg];
+    char latest[24], unit[8], name[32], path[256];
+    read_entity(&page->items[0], latest, unit, name);
+    bool zero_based = !strcmp(unit, "%");
+    if (s_graph_cb) s_graph_cb(pg, latest, unit, name, NULL, 0, 0, page->hours, zero_based);
 
     if (!s_now) return;                   /* need the server time to place points */
 
+    /* start time = now - span, as "2026-11-19T13:05:12+00:00" */
+    time_t t0 = (time_t)(s_now - (int64_t)page->hours * 3600);
+    struct tm g;
+    gmtime_r(&t0, &g);
+    char start[32];
+    strftime(start, sizeof(start), "%Y-%m-%dT%H:%M:%S%%2B00:00", &g);
+    s_hist_hours = page->hours;
     memset(s_hist_has, 0, sizeof(s_hist_has));
     s_hist_len = 0;
     s_hist_mode = true;
-    /* no start time in the path = HA's default of the last 24 h */
-    snprintf(path, sizeof(path), "/api/history/period?filter_entity_id=%s&minimal_response&no_attributes", entities[gi]);
+    snprintf(path, sizeof(path), "/api/history/period/%s?filter_entity_id=%s&minimal_response&no_attributes",
+             start, page->items[0].entity);
     int st = ha_request(HTTP_METHOD_GET, path, NULL, NULL);
     s_hist_mode = false;
     if (st != 200) return;
@@ -359,7 +382,50 @@ static void fetch_graph(int gi)
         else pts[i] = carry;
     }
     ESP_LOGD(TAG, "history: %d of %d buckets with data", known, HA_GRAPH_POINTS);
-    if (s_graph_cb) s_graph_cb(gi, NULL, NULL, pts, HA_GRAPH_POINTS, s_now);
+    if (s_graph_cb) s_graph_cb(pg, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, page->hours, zero_based);
+}
+
+/* An entity is usable unless HA says it doesn't exist or its state can never be a number.
+ * unavailable/unknown keep their row ("--"); network errors keep it too. */
+static bool entity_usable(const char *entity, void *ctx)
+{
+    (void)ctx;
+    static resp_t r;
+    char path[96], state[24];
+    snprintf(path, sizeof(path), "/api/states/%s", entity);
+    int st = ha_request(HTTP_METHOD_GET, path, NULL, &r);
+    if (st == 404) { ESP_LOGW(TAG, "layout: %s does not exist, skipped", entity); return false; }
+    if (st != 200 || !json_str(r.buf, "\"state\":\"", state, sizeof(state))) return true;
+    char *end;
+    strtof(state, &end);
+    if (end != state || !strcmp(state, "unavailable") || !strcmp(state, "unknown")) return true;
+    ESP_LOGW(TAG, "layout: %s is not numeric ('%s'), skipped", entity, state);
+    return false;
+}
+
+static void use_layout(const ha_layout_t *l)
+{
+    s_layout = *l;
+    s_layout_hash = layout_hash(l);
+    if (s_layout_cb) s_layout_cb(&s_layout);
+}
+
+/* Re-read the dashboard; switch to it if it is usable and differs from the current one.
+ * Failures keep the current layout and never reach the error box. */
+static void refresh_layout(void)
+{
+    static ha_layout_t l;
+    char *json = dash_fetch_config();
+    if (!json) return;
+    int n = layout_parse(json, HA_VIEW, &l);
+    free(json);
+    if (n) n = layout_filter(&l, entity_usable, NULL);
+    s_err[0] = 0;                         /* validation errors are not shown */
+    if (!n) { ESP_LOGW(TAG, "dashboard has no usable pages, keeping the current layout"); return; }
+    if (layout_hash(&l) == s_layout_hash) return;
+    ESP_LOGI(TAG, "new layout: %d pages", n);
+    layout_store_save(&l);
+    use_layout(&l);
 }
 
 static void ha_task(void *arg)
@@ -370,11 +436,23 @@ static void ha_task(void *arg)
     snprintf(path, sizeof(path), "/api/services/%.*s/toggle", (int)(dot - HA_THEME_ENTITY), HA_THEME_ENTITY);
     const char *body = "{\"entity_id\":\"" HA_THEME_ENTITY "\"}";
 
+    {   /* start with the cached layout, if any */
+        static ha_layout_t cached;
+        if (layout_store_load(&cached)) use_layout(&cached);
+    }
+    TickType_t layout_at = 0;
+    bool layout_read = false;
+
     for (;;) {
         xEventGroupWaitBits(s_events, WIFI_UP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
         /* wait for a tap, or poll the state every HA_POLL_INTERVAL_MS */
         EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
         s_err[0] = 0;
+        if (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)) {
+            refresh_layout();
+            layout_at = xTaskGetTickCount();
+            layout_read = true;
+        }
         bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT);
         bool ok = true;
         if (b & SETBRI_BIT) {
@@ -400,7 +478,8 @@ static void ha_task(void *arg)
             s_force_report = true;         /* resync the UI even if nothing changed */
         }
         bool fetched = fetch_state();
-        for (int gi = 0; gi < HA_GRAPH_COUNT; gi++) fetch_graph(gi);
+        for (int pg = 0; pg < s_layout.count; pg++)
+            if (s_layout.pages[pg].kind == LAYOUT_GRAPH) fetch_graph(pg);
         if (b & REFRESH_BIT) ok &= fetched;
         if (updated) {
             ESP_LOGI(TAG, "update %s", ok ? "succeeded" : "FAILED");

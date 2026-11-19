@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "layout.h"
 
 typedef enum {
     HA_STATE_OFFLINE,  /* no Wi-Fi */
@@ -19,15 +20,19 @@ typedef void (*ha_brightness_cb_t)(float value, float min, float max);
 /* Called after a toggle/set request finished and the state was re-read; ok = HA accepted it. */
 typedef void (*ha_done_cb_t)(bool ok);
 
-/* Called for each sensor with display text: page 0 = temperature, 1 = humidity;
- * row indexes into that page's entity list in config.h. */
-typedef void (*ha_sensor_cb_t)(int page, int row, const char *value, const char *unit);
+/* New main-screen layout (from the dashboard or the NVS cache). The pointer is only valid
+ * during the call. Called from the network task before any sensor/graph callback for it. */
+typedef void (*ha_layout_cb_t)(const ha_layout_t *layout);
+void ha_client_set_layout_cb(ha_layout_cb_t cb);  /* call before ha_client_start */
 
-/* Graph page: `latest`/`unit` = current value (points NULL), or `points` = n history
- * buckets oldest first, NAN where no data yet (latest NULL), with `end` = the UTC
- * time (s) of the right edge; the left edge is HA_GRAPH_HOURS earlier. */
-typedef void (*ha_graph_cb_t)(int graph, const char *latest, const char *unit, const float *points, int n,
-                              int64_t end);
+/* Value page row: page/row index into the current layout; name = card name or friendly_name. */
+typedef void (*ha_sensor_cb_t)(int page, int row, const char *value, const char *unit, const char *name);
+
+/* Graph page `page`: `latest`/`unit`/`name` = current value (points NULL), or `points` = n history
+ * buckets oldest first, NAN where no data yet (latest NULL), with `end` = the UTC time (s) of
+ * the right edge; the left edge is `hours` earlier. zero_based = y axis starts at 0. */
+typedef void (*ha_graph_cb_t)(int page, const char *latest, const char *unit, const char *name,
+                              const float *points, int n, int64_t end, int hours, bool zero_based);
 
 /* Called after every poll with the errors it hit, one per line; "" = none. */
 typedef void (*ha_error_cb_t)(const char *errors);

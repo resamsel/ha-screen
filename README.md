@@ -1,7 +1,20 @@
 # ha-screen
 
 Home Assistant display for the Waveshare ESP32-C6-Touch-LCD-1.47.
-Settings (HA URL, entities, poll interval, graphs) are in `main/config.h`.
+Settings (HA URL, settings entities, poll interval, graph style) are in `main/config.h`.
+
+## Pages from a dashboard
+
+The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
+(`esp32-c6-dev/main`). The board re-reads it every minute and rebuilds when it changed:
+
+- each section = one page; its heading card = the page title
+- `tile` cards = value rows (up to 4), in dashboard order; name = the card's name or the
+  entity's friendly name
+- a `sensor` card with `graph: line` = a graph page (span = `hours_to_show`, default 24)
+- up to 8 pages; anything else (other cards, missing or non-numeric entities) is skipped
+
+The last good layout is kept in flash, so the board starts with it when HA isn't reachable.
 
 ## Secrets
 
