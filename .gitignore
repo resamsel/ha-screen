@@ -1,0 +1,13 @@
+# build output (out/ holds firmware with the secrets compiled in)
+build/
+out/
+sdkconfig.old
+
+# fetched by the IDF component manager from dependencies.lock
+managed_components/
+
+# secrets
+.env
+
+# local Claude Code settings
+.claude/settings.local.json

@@ -1,0 +1,15 @@
+# Writes OUT (secrets_env.h) from the WIFI_SSID, WIFI_PASS and HA_TOKEN environment
+# variables. Runs on every build; the file only changes when a value changes.
+set(body "/* Generated from environment variables at build time. Do not edit or commit. */\n#pragma once\n")
+foreach(name WIFI_SSID WIFI_PASS HA_TOKEN)
+    if(NOT DEFINED ENV{${name}} OR "$ENV{${name}}" STREQUAL "")
+        message(FATAL_ERROR "Environment variable ${name} is not set. Set WIFI_SSID, WIFI_PASS and HA_TOKEN before building (see README.md).")
+    endif()
+    set(v "$ENV{${name}}")
+    string(REPLACE "\\" "\\\\" v "${v}")
+    string(REPLACE "\"" "\\\"" v "${v}")
+    string(APPEND body "#define ${name} \"${v}\"\n")
+endforeach()
+file(WRITE "${OUT}.tmp" "${body}")
+file(COPY_FILE "${OUT}.tmp" "${OUT}" ONLY_IF_DIFFERENT)
+file(REMOVE "${OUT}.tmp")
