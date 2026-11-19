@@ -74,16 +74,10 @@ static void ha_busy(bool busy);
 static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
-static void axis_text(char *b, size_t n, float v, const char *unit)
-{
-    if (v >= 10 || v == floorf(v)) snprintf(b, n, "%.0f %s", (double)v, unit);
-    else snprintf(b, n, "%.1f %s", (double)v, unit);
-}
 
 static void ha_graph_changed(int graph, const char *latest, const char *unit, const char *name, const float *pts,
                              int n, int64_t end, int hours, bool zero_based);
 static void place_graph_value(void);
-static void place_time_axis(int64_t end);
 static float nice_ceil(float x);
 static void ha_state_changed(ha_state_t state);
 static void ha_brightness_changed(float value, float min, float max);
@@ -197,7 +191,6 @@ void app_main(void)
 #define UFONT  (s_landscape ? &lv_font_latin_16 : &lv_font_latin_22)
 #define NFONT  (s_landscape ? &lv_font_latin_14 : &lv_font_latin_16)
 #define NAME_DY (s_landscape ? 34 : 44)       /* name label below the value's top */
-#define GRAPH_LW 112                          /* landscape graph page: value column width */
 
 /* ---- Main screen: pages dragged left/right, with page dots at the bottom ----------
  * Sensor pages (temperature, humidity) first, then the graph page.
@@ -239,19 +232,7 @@ static lv_chart_series_t *s_chart_ser_[LAYOUT_MAX_PAGES];
 #define s_g_unit    s_g_unit_[s_gi]
 #define s_chart     s_chart_[s_gi]
 #define s_chart_ser s_chart_ser_[s_gi]
-#define AXIS_MAX  5                        /* ticks every hours/4 (rounded up) */
-static int s_hours_[LAYOUT_MAX_PAGES];     /* graph span per page */
 static bool s_zero_[LAYOUT_MAX_PAGES];     /* y axis from 0 */
-#define AXIS_H    16
-static lv_obj_t *s_axis_[LAYOUT_MAX_PAGES][AXIS_MAX];
-static float s_ytop_[LAYOUT_MAX_PAGES], s_ybot_[LAYOUT_MAX_PAGES];
-static lv_obj_t *s_ymin_[LAYOUT_MAX_PAGES];   /* y axis lower bound, bottom-left (if not 0) */
-#define s_ybot s_ybot_[s_gi]
-#define s_ymin s_ymin_[s_gi]
-static lv_obj_t *s_ymax_[LAYOUT_MAX_PAGES];   /* y axis top value, top-left of the graph */
-#define s_axis s_axis_[s_gi]
-#define s_ytop s_ytop_[s_gi]
-#define s_ymax s_ymax_[s_gi]
 
 
 /* Centre the value horizontally in its row and hang the unit off its right side,
@@ -282,7 +263,7 @@ static int name_width(const char *txt, void *ctx)
 /* Widest a name may be: its column in landscape, the screen (or value column) otherwise */
 static lv_coord_t name_max_w(int pg)
 {
-    if (IS_GRAPH(pg)) return (s_landscape ? GRAPH_LW : SCR_W) - 8;
+    if (IS_GRAPH(pg)) return SCR_W - 8;
     return (s_landscape ? SCR_W / LV_MAX(ROWS(pg), 1) : SCR_W) - 8;
 }
 
@@ -350,9 +331,6 @@ static void apply_temp_theme(bool light)
     }
     for (s_gi = 0; s_gi < LAYOUT_MAX_PAGES; s_gi++) {
         if (!s_chart) continue;
-        for (int i = 0; i < AXIS_MAX; i++) lv_obj_set_style_text_color(s_axis[i], sub, 0);
-        lv_obj_set_style_text_color(s_ymax, sub, 0);
-        lv_obj_set_style_text_color(s_ymin, sub, 0);
         lv_obj_set_style_text_color(s_g_name, sub, 0);
         lv_obj_set_style_text_color(s_g_val, fg, 0);
         lv_obj_set_style_text_color(s_g_unit, fg, 0);
@@ -406,6 +384,7 @@ static void ha_sensor_changed(int page, int row, const char *value, const char *
 
 /* Network task: graph page value, or a fresh set of history points */
 static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y);
+static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y);
 static void ha_graph_changed(int graph, const char *latest, const char *unit, const char *name, const float *pts,
                              int n, int64_t end, int hours, bool zero_based)
 {
@@ -413,12 +392,12 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
     if (graph < 0 || graph >= PAGE_COUNT || !IS_GRAPH(graph)) { lvgl_port_unlock(); return; }
     s_gi = graph;
     if (!s_chart) { lvgl_port_unlock(); return; }
-    s_hours_[s_gi] = hours;
+    (void)hours; (void)end;
     s_zero_[s_gi] = zero_based;
     if (name && strcmp(lv_label_get_text(s_g_name), name)) {
         lv_coord_t cx, y;
-        graph_value_pos(&cx, &y);
-        set_name_label(s_g_name, name, name_max_w(s_gi), cx, y);
+        graph_name_pos(&cx, &y);
+        set_name_label(s_g_name, name, name_max_w(s_gi), cx, y - NAME_DY);
     }
     if (latest) {
         lv_label_set_text(s_g_val, latest);
@@ -465,8 +444,6 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
             if (bot < 0) bot = 0;
         }
         lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (lv_coord_t)(bot * 10), (lv_coord_t)(top * 10));
-        s_ytop = top;
-        s_ybot = bot;
         /* resample the n smoothed points onto the chart's (fewer) points */
         int cnt = lv_chart_get_point_count(s_chart);
         n = LV_MIN(n, HA_GRAPH_POINTS);
@@ -480,26 +457,9 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
             lv_chart_set_value_by_id(s_chart, s_chart_ser, c, isnan(v) ? LV_CHART_POINT_NONE : (lv_coord_t)(v * 10));
         }
         lv_chart_refresh(s_chart);
-        place_time_axis(end);
-    }
-    if (s_ytop > 0) {           /* "10 %": axis values plus the sensor's unit */
-        char tb[24];
-        const char *un = lv_label_get_text(s_g_unit);
-        axis_text(tb, sizeof(tb), s_ytop, un);
-        lv_label_set_text(s_ymax, tb);
-        if (s_ybot > 0) {       /* lower bound only when the axis doesn't start at 0 */
-            axis_text(tb, sizeof(tb), s_ybot, un);
-            lv_label_set_text(s_ymin, tb);
-            lv_obj_clear_flag(s_ymin, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(s_ymin, LV_OBJ_FLAG_HIDDEN);
-        }
     }
     lvgl_port_unlock();
 }
-
-/* Time labels under the graph every hours/4 (rounded up) of local clock time
- * (e.g. 18:00, 0:00, 6:00, 12:00), positioned to match the chart's x axis. */
 
 static float nice_ceil(float x)
 {
@@ -510,45 +470,17 @@ static float nice_ceil(float x)
     return 10 * mag;
 }
 
-static void place_time_axis(int64_t end)
+/* Graph page, both orientations: name at the top, value below it, chart under both */
+static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y)
 {
-    if (!end) return;
-    const int hours = s_hours_[s_gi] > 0 ? s_hours_[s_gi] : LAYOUT_HOURS_DEFAULT;
-    const int tick = (hours + AXIS_MAX - 2) / (AXIS_MAX - 1);   /* at most AXIS_MAX labels */
-    const int64_t span = (int64_t)hours * 3600, start = end - span;
-    const lv_coord_t pad = 2, w = lv_obj_get_width(s_chart) - 2 * pad;
-    const lv_coord_t x0 = lv_obj_get_x(s_chart) + pad;
-    const lv_coord_t y = lv_obj_get_y(s_chart) + lv_obj_get_height(s_chart) + 1;
-    int used = 0;
-    /* walk whole hours from the left edge; label those on a tick boundary */
-    for (int64_t t = (start / 3600 + 1) * 3600; t < end && used < AXIS_MAX; t += 3600) {
-        time_t tt = (time_t)t;
-        struct tm lt;
-        localtime_r(&tt, &lt);
-        if (lt.tm_hour % tick) continue;
-        lv_obj_t *l = s_axis[used++];
-        lv_label_set_text_fmt(l, "%d:00", lt.tm_hour);
-        lv_obj_update_layout(l);
-        lv_coord_t lw = lv_obj_get_width(l);
-        lv_coord_t x = x0 + (lv_coord_t)((t - start) * w / span) - lw / 2;
-        if (x < 0) x = 0;                                  /* keep labels on screen */
-        if (x + lw > PAGE_W) x = PAGE_W - lw;
-        lv_obj_set_pos(l, x, y);
-        lv_obj_clear_flag(l, LV_OBJ_FLAG_HIDDEN);
-    }
-    for (int i = used; i < AXIS_MAX; i++) lv_obj_add_flag(s_axis[i], LV_OBJ_FLAG_HIDDEN);
+    *cx = SCR_W / 2;
+    *y = STATUS_H + 2;
 }
 
-/* Graph page value: portrait = on top like a sensor row, landscape = left column */
 static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y)
 {
-    if (s_landscape) {
-        *cx = GRAPH_LW / 2;
-        *y = STATUS_H + (SCR_H - STATUS_H - DOTS_H - 52) / 2;
-    } else {
-        *cx = SCR_W / 2;
-        *y = row_y(0, 3);   /* same spot as the first of three rows */
-    }
+    graph_name_pos(cx, y);
+    *y += ((const lv_font_t *)NFONT)->line_height + 2;
 }
 
 static void place_graph_value(void)
@@ -593,9 +525,10 @@ static lv_obj_t *make_page(int pg)
 
 static void create_graph_page(lv_obj_t *page)
 {
-    /* same layout as the sensor rows: value centred, unit beside it, name below */
-    lv_coord_t cx, y;
+    /* name on top, value (unit beside it) below, chart filling the rest */
+    lv_coord_t cx, y, ny;
     graph_value_pos(&cx, &y);
+    graph_name_pos(&cx, &ny);
     s_g_val = lv_label_create(page);
     lv_label_set_text(s_g_val, "--");
     lv_obj_set_style_text_font(s_g_val, VFONT, 0);
@@ -607,18 +540,13 @@ static void create_graph_page(lv_obj_t *page)
     s_g_name = lv_label_create(page);
     const layout_item_t *it = &s_layout.pages[s_gi].items[0];
     lv_obj_set_style_text_font(s_g_name, NFONT, 0);
-    set_name_label(s_g_name, it->name[0] ? it->name : it->entity, name_max_w(s_gi), cx, y);
+    set_name_label(s_g_name, it->name[0] ? it->name : it->entity, name_max_w(s_gi), cx, ny - NAME_DY);
 
-    /* line chart filling the lower part of the page, no axes or grid */
+    /* line chart below the value down to the page dots, full width, no axes or grid */
     s_chart = lv_chart_create(page);
-    if (s_landscape) {   /* right of the value column, full height */
-        lv_obj_set_size(s_chart, SCR_W - GRAPH_LW - 4, SCR_H - DOTS_H - AXIS_H - STATUS_H - 4);
-        lv_obj_set_pos(s_chart, GRAPH_LW, STATUS_H + 4);
-    } else {             /* below the value */
-        lv_coord_t h = SCR_H - DOTS_H - AXIS_H - (y + ROW_BLOCK + 16);
-        lv_obj_set_size(s_chart, PAGE_W, h);
-        lv_obj_set_pos(s_chart, 0, SCR_H - DOTS_H - AXIS_H - h);
-    }
+    lv_coord_t top = y + ((const lv_font_t *)VFONT)->line_height + 2;
+    lv_obj_set_size(s_chart, PAGE_W, SCR_H - DOTS_H - top);
+    lv_obj_set_pos(s_chart, 0, top);
     lv_obj_clear_flag(s_chart, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(s_chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chart, 0, 0);
@@ -637,21 +565,6 @@ static void create_graph_page(lv_obj_t *page)
     lv_obj_add_event_cb(s_chart, chart_fill_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
     lv_chart_set_all_value(s_chart, s_chart_ser, LV_CHART_POINT_NONE);
 
-    s_ymax = lv_label_create(page);
-    lv_label_set_text(s_ymax, "");
-    lv_obj_set_style_text_font(s_ymax, &lv_font_latin_12, 0);
-    lv_obj_align_to(s_ymax, s_chart, LV_ALIGN_TOP_LEFT, 4, 0);
-    s_ymin = lv_label_create(page);
-    lv_label_set_text(s_ymin, "");
-    lv_obj_set_style_text_font(s_ymin, &lv_font_latin_12, 0);
-    lv_obj_align_to(s_ymin, s_chart, LV_ALIGN_BOTTOM_LEFT, 4, 0);
-    lv_obj_add_flag(s_ymin, LV_OBJ_FLAG_HIDDEN);
-
-    for (int i = 0; i < AXIS_MAX; i++) {
-        s_axis[i] = lv_label_create(page);
-        lv_obj_set_style_text_font(s_axis[i], &lv_font_latin_12, 0);
-        lv_obj_add_flag(s_axis[i], LV_OBJ_FLAG_HIDDEN);
-    }
 }
 
 static void create_pages(lv_obj_t *scr)
@@ -796,7 +709,7 @@ static void page_relayout(int pg)
         }
     }
     bool cols = s_landscape && !IS_GRAPH(pg);
-    lv_coord_t right_bound = (s_landscape && IS_GRAPH(pg)) ? GRAPH_LW - 2 : SCR_W - 2;
+    lv_coord_t right_bound = SCR_W - 2;
     const lv_font_t *vf = VFONT;
     for (int k = 0; k < n; k++) {
         /* push away from the neighbours' growth */
@@ -827,7 +740,8 @@ static void page_relayout(int pg)
         lv_obj_set_style_translate_x(o[k][1], tx + udx, 0);
         lv_obj_set_style_translate_y(o[k][1], ty + udy, 0);
         lv_obj_set_style_translate_x(o[k][2], tx, 0);
-        lv_obj_set_style_translate_y(o[k][2], ty + gh / 2, 0);
+        /* the name moves away from the growing value: down below it, up above it (graphs) */
+        lv_obj_set_style_translate_y(o[k][2], IS_GRAPH(pg) ? ty - gh / 2 : ty + gh / 2, 0);
     }
 }
 
@@ -1048,7 +962,8 @@ static void create_ui(void)
     lv_obj_t *scr = lv_scr_act();
     lv_anim_del_all();
     lv_obj_clean(scr);
-    s_page = 0;
+    /* stay on the current page across rebuilds (rotation, new layout) when it still exists */
+    if (s_page >= PAGE_COUNT) s_page = 0;
     s_sel = -1;
     memset(s_zoom, 0, sizeof(s_zoom));
     s_cfg_page = 0;
@@ -1069,6 +984,7 @@ static void create_ui(void)
 
     /* Main screen: sensor pages and status line */
     create_pages(scr);
+    if (s_strip) lv_obj_set_x(s_strip, -s_page * PAGE_W);
     create_status_icons(scr, 0);
 
     /* Config panel, parked just above the top edge */
@@ -1545,15 +1461,10 @@ static void orient_cb(lv_event_t *e)
 static void ha_layout_changed(const ha_layout_t *layout)
 {
     if (!lvgl_port_lock(0)) return;
-    int page = s_page;
     bool was_open = s_cfg_open;
     s_layout = *layout;
-    create_ui();
+    create_ui();   /* keeps the current page when it still exists */
     if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
-    if (s_strip && page > 0 && page < PAGE_COUNT) {
-        lv_obj_set_x(s_strip, -page * PAGE_W);
-        show_page(page);
-    }
     lv_obj_invalidate(lv_scr_act());
     lvgl_port_unlock();
 }
