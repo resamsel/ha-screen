@@ -28,13 +28,14 @@ typedef struct {
     char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
     uint8_t action;         /* layout_action_t, button pages */
     uint16_t hours;         /* graph span (graph pages) */
-    uint8_t flags;          /* LAYOUT_CLOCK_* (clock pages) */
+    uint8_t flags;          /* LAYOUT_CLOCK_* (clock cards) */
+    uint8_t kind;           /* layout_kind_t of this card: each card is its own block */
     char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
                              * entity, text:<text>; resolved by the network task */
 } layout_item_t;
 
 typedef struct {
-    layout_kind_t kind;
+    layout_kind_t kind;     /* kind of the first card (pages may mix kinds: see items[].kind) */
     char title[32];         /* section heading, "" if none */
     int count;
     layout_item_t items[LAYOUT_MAX_ROWS];

@@ -126,7 +126,8 @@ static void test_graph_first_wins(void)
     ha_layout_t l;
     assert(parse_sections("[" SEC(GRAPH("sensor.g") "," TILE("sensor.t")) "]", &l) == 1);
     assert(l.pages[0].kind == LAYOUT_GRAPH);
-    assert(l.pages[0].count == 1);
+    assert(l.pages[0].count == 2);   /* mixed: both cards, each with its own kind */
+    assert(l.pages[0].items[0].kind == LAYOUT_GRAPH && l.pages[0].items[1].kind == LAYOUT_VALUES);
     assert(!strcmp(l.pages[0].items[0].entity, "sensor.g"));
     assert(parse_sections("[" SEC("{\"type\":\"sensor\",\"entity\":\"sensor.s\"}") "]", &l) == 0);
 }
@@ -136,9 +137,10 @@ static void test_several_graphs(void)
     ha_layout_t l;
     assert(parse_sections("[" SEC(HEAD("Netz") "," GRAPH("sensor.a") "," TILE("sensor.t") ","
                                   "{\"type\":\"sensor\",\"graph\":\"line\",\"entity\":\"sensor.b\",\"hours_to_show\":6}") "]", &l) == 1);
-    assert(l.pages[0].kind == LAYOUT_GRAPH && l.pages[0].count == 2);
-    assert(!strcmp(l.pages[0].items[1].entity, "sensor.b"));
-    assert(l.pages[0].items[0].hours == 24 && l.pages[0].items[1].hours == 6);
+    assert(l.pages[0].kind == LAYOUT_GRAPH && l.pages[0].count == 3);
+    assert(!strcmp(l.pages[0].items[2].entity, "sensor.b"));
+    assert(l.pages[0].items[0].hours == 24 && l.pages[0].items[2].hours == 6);
+    assert(l.pages[0].items[1].kind == LAYOUT_VALUES && l.pages[0].items[1].hours == 0);
 }
 
 static void test_limits(void)
@@ -222,14 +224,14 @@ static void test_buttons(void)
                                   "{\"type\":\"button\",\"entity\":\"scene.x\",\"tap_action\":{\"action\":\"toggle\"}}" ","
                                   "{\"type\":\"button\"}") "]", &l) == 1);
     assert(l.pages[0].kind == LAYOUT_BUTTONS);
-    assert(l.pages[0].count == 3);                       /* tile and entity-less button skipped */
+    assert(l.pages[0].count == 4);                       /* entity-less button skipped */
     assert(!strcmp(l.pages[0].items[0].entity, "switch.a"));
     assert(l.pages[0].items[0].action == LAYOUT_ACT_TOGGLE);
-    assert(l.pages[0].items[1].action == LAYOUT_ACT_NONE);
-    assert(l.pages[0].items[2].action == LAYOUT_ACT_TOGGLE);
-    /* a tile section with a button: button skipped */
+    assert(l.pages[0].items[1].kind == LAYOUT_VALUES);   /* the tile stays, as its own block */
+    assert(l.pages[0].items[2].action == LAYOUT_ACT_NONE);
+    assert(l.pages[0].items[3].action == LAYOUT_ACT_TOGGLE);
     assert(parse_sections("[" SEC(TILE("sensor.t") "," BTN("switch.a")) "]", &l) == 1);
-    assert(l.pages[0].kind == LAYOUT_VALUES && l.pages[0].count == 1);
+    assert(l.pages[0].kind == LAYOUT_VALUES && l.pages[0].count == 2 && l.pages[0].items[1].kind == LAYOUT_BUTTONS);
     /* sanitize keeps button pages */
     parse_sections("[" SEC(BTN("switch.a")) "]", &l);
     uint32_t h = layout_hash(&l);
@@ -257,7 +259,8 @@ static void test_clock(void)
     ha_layout_t l;
     assert(parse_sections("[" SEC(HEAD("Zeit") "," "{\"type\":\"clock\",\"clock_size\":\"large\",\"show_seconds\":true,\"time_format\":\"12\"}" ","
                                   TILE("sensor.t")) "," SEC("{\"type\":\"clock\"}") "]", &l) == 2);
-    assert(l.pages[0].kind == LAYOUT_CLOCK && l.pages[0].count == 1);
+    assert(l.pages[0].kind == LAYOUT_CLOCK && l.pages[0].count == 2);   /* clock + tile */
+    assert(l.pages[0].items[0].kind == LAYOUT_CLOCK && l.pages[0].items[1].kind == LAYOUT_VALUES);
     assert(!strcmp(l.pages[0].title, "Zeit"));
     assert(l.pages[0].items[0].flags == (LAYOUT_CLOCK_SECONDS | LAYOUT_CLOCK_12H | LAYOUT_CLOCK_LARGE));
     assert(l.pages[0].items[0].entity[0] == 0);
