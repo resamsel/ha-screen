@@ -560,11 +560,11 @@ static bool clock_fits(int i, uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
     return sz.x + (extra.x ? extra.x + 4 : 0) <= max_w && CLOCK_FONTS[i]->line_height <= max_h;
 }
 
-/* clock_size small/medium/large = 24/56/72 px. When a large clock wouldn't fit its block,
+/* clock_size small/medium/large = 40/56/72 px. When a large clock wouldn't fit its block,
  * all three shrink by the same factor, so large stays bigger than medium and small. */
 static const lv_font_t *clock_font(uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
 {
-    int target = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 72 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 56 : 24;
+    int target = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 72 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 56 : 40;
     int fit = 0;   /* largest size that fits, measured with this clock's seconds/AM-PM */
     for (int i = CLOCK_N - 1; i >= 0; i--) if (clock_fits(i, flags, max_w, max_h)) { fit = i; break; }
     int want = target * CLOCK_PX[fit] / 72;
