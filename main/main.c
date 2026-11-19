@@ -263,19 +263,20 @@ static int name_width(const char *txt, void *ctx)
 /* Widest a name may be: its column in landscape, the screen (or value column) otherwise */
 static lv_coord_t name_max_w(int pg)
 {
-    if (IS_GRAPH(pg)) return SCR_W - 8;
+    if (IS_GRAPH(pg)) return SCR_W - 2 * 10;
     return (s_landscape ? SCR_W / LV_MAX(ROWS(pg), 1) : SCR_W) - 8;
 }
 
 /* Text centred on cx below the value; ends in "..." if it still doesn't fit */
-static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_coord_t cx, lv_coord_t y)
+static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_coord_t cx, lv_coord_t y, bool left)
 {
     lv_label_set_text(l, txt);
     bool fits = name_width(txt, NULL) <= max_w;
     lv_label_set_long_mode(l, fits ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
     lv_obj_set_width(l, fits ? LV_SIZE_CONTENT : max_w);
-    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(l, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
+    lv_obj_set_style_text_align(l, left ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
+    if (left) lv_obj_align(l, LV_ALIGN_TOP_LEFT, cx, y + NAME_DY);
+    else lv_obj_align(l, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
 }
 
 /* Re-apply all row names of value page pg, dropping words they all share if one is too wide */
@@ -289,20 +290,22 @@ static void page_names_update(int pg)
         if (!s_name[pg][i]) continue;
         lv_coord_t cx, y;
         value_pos(pg, i, &cx, &y);
-        set_name_label(s_name[pg][i], n[i], max_w, cx, y);
+        set_name_label(s_name[pg][i], n[i], max_w, cx, y, false);
     }
 }
 
 /* Value centred on cx with the unit hanging off its right side, same baseline */
 static void page_relayout(int pg);
-static void place_pair(lv_obj_t *val, lv_obj_t *unit, lv_coord_t cx, lv_coord_t y)
+/* left = false: value centred on x; left = true: value's left edge at x */
+static void place_pair(lv_obj_t *val, lv_obj_t *unit, lv_coord_t x, lv_coord_t y, bool left)
 {
     /* align on the untranslated positions; page_relayout re-applies the active shifts */
     lv_obj_set_style_translate_x(val, 0, 0);
     lv_obj_set_style_translate_y(val, 0, 0);
     lv_obj_set_style_translate_x(unit, 0, 0);
     lv_obj_set_style_translate_y(unit, 0, 0);
-    lv_obj_align(val, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y);
+    if (left) lv_obj_align(val, LV_ALIGN_TOP_LEFT, x, y);
+    else lv_obj_align(val, LV_ALIGN_TOP_MID, x - SCR_W / 2, y);
     lv_obj_update_layout(val);
     lv_obj_align_to(unit, val, LV_ALIGN_OUT_RIGHT_BOTTOM, 3,
                     -(((const lv_font_t *)VFONT)->base_line - ((const lv_font_t *)UFONT)->base_line));
@@ -312,7 +315,7 @@ static void place_value(int pg, int row)
 {
     lv_coord_t cx, y;
     value_pos(pg, row, &cx, &y);
-    place_pair(s_val[pg][row], s_unit[pg][row], cx, y);
+    place_pair(s_val[pg][row], s_unit[pg][row], cx, y, false);
     if (s_unit[pg][ROWS(pg) - 1]) page_relayout(pg);   /* once the page is complete */
 }
 
@@ -397,7 +400,7 @@ static void ha_graph_changed(int graph, const char *latest, const char *unit, co
     if (name && strcmp(lv_label_get_text(s_g_name), name)) {
         lv_coord_t cx, y;
         graph_name_pos(&cx, &y);
-        set_name_label(s_g_name, name, name_max_w(s_gi), cx, y - NAME_DY);
+        set_name_label(s_g_name, name, name_max_w(s_gi), cx, y - NAME_DY, true);
     }
     if (latest) {
         lv_label_set_text(s_g_val, latest);
@@ -471,9 +474,10 @@ static float nice_ceil(float x)
 }
 
 /* Graph page, both orientations: name at the top, value below it, chart under both */
+#define GRAPH_X 10   /* left margin of the graph page's name and value */
 static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y)
 {
-    *cx = SCR_W / 2;
+    *cx = GRAPH_X;
     *y = STATUS_H + 2;
 }
 
@@ -487,7 +491,7 @@ static void place_graph_value(void)
 {
     lv_coord_t cx, y;
     graph_value_pos(&cx, &y);
-    place_pair(s_g_val, s_g_unit, cx, y);
+    place_pair(s_g_val, s_g_unit, cx, y, true);
     if (s_g_name) page_relayout(s_gi);
 }
 
@@ -540,7 +544,7 @@ static void create_graph_page(lv_obj_t *page)
     s_g_name = lv_label_create(page);
     const layout_item_t *it = &s_layout.pages[s_gi].items[0];
     lv_obj_set_style_text_font(s_g_name, NFONT, 0);
-    set_name_label(s_g_name, it->name[0] ? it->name : it->entity, name_max_w(s_gi), cx, ny - NAME_DY);
+    set_name_label(s_g_name, it->name[0] ? it->name : it->entity, name_max_w(s_gi), cx, ny - NAME_DY, true);
 
     /* line chart below the value down to the page dots, full width, no axes or grid */
     s_chart = lv_chart_create(page);
@@ -722,26 +726,29 @@ static void page_relayout(int pg)
         lv_coord_t tx = cols ? (lv_coord_t)shift : 0, ty = cols ? 0 : (lv_coord_t)shift;
         lv_coord_t w = lv_area_get_width(&va[k]), h = lv_area_get_height(&va[k]);
         lv_coord_t gw = (lv_coord_t)(w * f[k]), gh = (lv_coord_t)(h * f[k]);
-        lv_coord_t udx = gw / 2;
-        lv_coord_t udy = (lv_coord_t)(((vf->line_height - vf->base_line) - h / 2) * f[k]);
+        /* graphs: the value grows from its top-left corner (away from the name above it and
+         * the status bar); rows: about its centre */
+        bool corner = IS_GRAPH(pg);
+        lv_coord_t udx = corner ? gw : gw / 2;
+        lv_coord_t udy = (lv_coord_t)(((vf->line_height - vf->base_line) - (corner ? 0 : h / 2)) * f[k]);
         /* keep the whole element on screen */
         /* page-relative: the page may be anywhere on the strip (even off screen) */
         lv_area_t pa;
         lv_obj_get_coords(lv_obj_get_parent(o[k][0]), &pa);
-        lv_coord_t left = LV_MIN(va[k].x1 - gw / 2, na[k].x1) + tx - pa.x1;
-        lv_coord_t right = LV_MAX(LV_MAX(va[k].x2 + gw / 2, ua[k].x2 + udx), na[k].x2) + tx - pa.x1;
+        lv_coord_t left = LV_MIN(va[k].x1 - (corner ? 0 : gw / 2), na[k].x1) + tx - pa.x1;
+        lv_coord_t right = LV_MAX(LV_MAX(va[k].x2 + (corner ? gw : gw / 2), ua[k].x2 + udx), na[k].x2) + tx - pa.x1;
         if (right > right_bound) tx -= right - right_bound;
         else if (left < 2) tx += 2 - left;
-        lv_obj_set_style_transform_pivot_x(o[k][0], w / 2, 0);
-        lv_obj_set_style_transform_pivot_y(o[k][0], h / 2, 0);
+        lv_obj_set_style_transform_pivot_x(o[k][0], corner ? 0 : w / 2, 0);
+        lv_obj_set_style_transform_pivot_y(o[k][0], corner ? 0 : h / 2, 0);
         lv_obj_set_style_transform_zoom(o[k][0], (lv_coord_t)(256 + f[k] * 256 + 0.5f), 0);
         lv_obj_set_style_translate_x(o[k][0], tx, 0);
         lv_obj_set_style_translate_y(o[k][0], ty, 0);
         lv_obj_set_style_translate_x(o[k][1], tx + udx, 0);
         lv_obj_set_style_translate_y(o[k][1], ty + udy, 0);
         lv_obj_set_style_translate_x(o[k][2], tx, 0);
-        /* the name moves away from the growing value: down below it, up above it (graphs) */
-        lv_obj_set_style_translate_y(o[k][2], IS_GRAPH(pg) ? ty - gh / 2 : ty + gh / 2, 0);
+        /* the name below a row moves down with the growing value; the graph name above stays */
+        lv_obj_set_style_translate_y(o[k][2], corner ? 0 : ty + gh / 2, 0);
     }
 }
 
