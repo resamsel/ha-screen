@@ -290,6 +290,8 @@ static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_co
     bool fits = name_width(txt, NULL) <= max_w;
     lv_label_set_long_mode(l, fits ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
     lv_obj_set_width(l, fits ? LV_SIZE_CONTENT : max_w);
+    /* one line: with a growing height LONG_DOT wraps instead of cutting off with "..." */
+    lv_obj_set_height(l, fits ? LV_SIZE_CONTENT : lv_obj_get_style_text_font(l, 0)->line_height);
     lv_obj_set_style_text_align(l, left ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
     if (left) lv_obj_align(l, LV_ALIGN_TOP_LEFT, cx, y + NAME_DY);
     else lv_obj_align(l, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
@@ -437,6 +439,7 @@ static void create_button_page(lv_obj_t *page, int pg)
         lv_obj_set_style_text_font(s_btn_name[pg][i], &lv_font_latin_16, 0);
         lv_label_set_long_mode(s_btn_name[pg][i], LV_LABEL_LONG_DOT);
         lv_obj_set_width(s_btn_name[pg][i], inner);
+        lv_obj_set_height(s_btn_name[pg][i], lv_font_latin_16.line_height);   /* one line, "..." */
         lv_obj_set_style_text_align(s_btn_name[pg][i], LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(s_btn_name[pg][i], it->name[0] ? it->name : it->entity);
         lv_obj_align(s_btn_name[pg][i], LV_ALIGN_CENTER, 0, -10);
