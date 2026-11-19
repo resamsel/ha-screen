@@ -331,7 +331,7 @@ static lv_obj_t *s_btn_state[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static ha_btn_state_t s_btn_st[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static bool s_btn_pending[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];   /* tapped, waiting for HA */
 #define BTN_ON_COLOR 0xFFC107   /* HA's amber for "on" */
-#define BTN_OPA      LV_OPA_60 /* buttons are 40 % transparent */
+#define BTN_OPA      LV_OPA_40 /* buttons are 60 % transparent */
 
 static void btn_pulse_cb(void *obj, int32_t v) { lv_obj_set_style_bg_opa(obj, (lv_opa_t)v, 0); }
 
@@ -362,7 +362,7 @@ static void btn_paint(int pg, int i)
         lv_anim_init(&a);
         lv_anim_set_var(&a, b);
         lv_anim_set_exec_cb(&a, btn_pulse_cb);
-        lv_anim_set_values(&a, BTN_OPA, LV_OPA_20);
+        lv_anim_set_values(&a, BTN_OPA, LV_OPA_10);
         lv_anim_set_time(&a, 400);
         lv_anim_set_playback_time(&a, 400);
         lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
