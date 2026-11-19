@@ -469,7 +469,7 @@ static void create_button_page(lv_obj_t *page, int pg)
 }
 
 /* ---- Clock pages: the board's time (set from HA's responses), updated every second ---- */
-static lv_obj_t *s_clk_time[LAYOUT_MAX_PAGES], *s_clk_small[LAYOUT_MAX_PAGES], *s_clk_date[LAYOUT_MAX_PAGES];
+static lv_obj_t *s_clk_time[LAYOUT_MAX_PAGES], *s_clk_small[LAYOUT_MAX_PAGES];   /* no date, like HA's card */
 static lv_obj_t *s_clk_bg[LAYOUT_MAX_PAGES];   /* card background (unless no_background) */
 static lv_timer_t *s_clk_timer;
 
@@ -484,7 +484,7 @@ static void clock_update(int pg)
     if (zone) { setenv("TZ", zone, 1); tzset(); }
     localtime_r(&now, &t);
     if (zone) { setenv("TZ", HA_TIMEZONE, 1); tzset(); }
-    char hm[8], small[8] = "", date[16] = "";
+    char hm[8], small[8] = "";
     if (t.tm_year < 120) {                 /* before 2020: no time from HA yet */
         strcpy(hm, "--:--");
     } else {
@@ -495,22 +495,19 @@ static void clock_update(int pg)
         int n = 0;
         if (fl & LAYOUT_CLOCK_SECONDS) n = snprintf(small, sizeof(small), ":%02d", t.tm_sec);
         if (fl & LAYOUT_CLOCK_12H) snprintf(small + n, sizeof(small) - n, "%s%s", n ? " " : "", t.tm_hour < 12 ? "AM" : "PM");
-        strftime(date, sizeof(date), "%d.%m.%Y", &t);
     }
     lv_label_set_text(s_clk_time[pg], hm);
     lv_label_set_text(s_clk_small[pg], small);
-    lv_label_set_text(s_clk_date[pg], date);
-    /* centre time + seconds/AM-PM together; date below */
+    /* centre time + seconds/AM-PM together */
     lv_obj_update_layout(s_clk_time[pg]);
     lv_obj_update_layout(s_clk_small[pg]);
     lv_coord_t tw = lv_obj_get_width(s_clk_time[pg]), sw = small[0] ? lv_obj_get_width(s_clk_small[pg]) + 4 : 0;
     lv_coord_t th = lv_obj_get_height(s_clk_time[pg]);
-    lv_coord_t y = STATUS_H + (SCR_H - STATUS_H - DOTS_H - th - 24) / 2;
+    lv_coord_t y = STATUS_H + (SCR_H - STATUS_H - DOTS_H - th) / 2;
     lv_obj_set_pos(s_clk_time[pg], (SCR_W - tw - sw) / 2, y);
     lv_obj_align_to(s_clk_small[pg], s_clk_time[pg], LV_ALIGN_OUT_RIGHT_BOTTOM, 4,
                     -(lv_obj_get_style_text_font(s_clk_time[pg], 0)->base_line -
                       lv_obj_get_style_text_font(s_clk_small[pg], 0)->base_line));
-    lv_obj_align_to(s_clk_date[pg], s_clk_time[pg], LV_ALIGN_OUT_BOTTOM_MID, sw / 2, 0);
 }
 
 static void clock_tick(lv_timer_t *t)
@@ -558,8 +555,6 @@ static void create_clock_page(lv_obj_t *page, int pg)
     lv_obj_set_style_text_font(s_clk_time[pg], clock_font(it->flags), 0);
     s_clk_small[pg] = lv_label_create(page);
     lv_obj_set_style_text_font(s_clk_small[pg], &lv_font_latin_22, 0);
-    s_clk_date[pg] = lv_label_create(page);
-    lv_obj_set_style_text_font(s_clk_date[pg], NFONT, 0);
     if (!s_clk_timer) s_clk_timer = lv_timer_create(clock_tick, 1000, NULL);
     clock_update(pg);
 }
@@ -647,7 +642,6 @@ static void apply_temp_theme(bool light)
         if (s_clk_time[pg]) {
             lv_obj_set_style_text_color(s_clk_time[pg], val, 0);
             lv_obj_set_style_text_color(s_clk_small[pg], sub, 0);
-            lv_obj_set_style_text_color(s_clk_date[pg], sub, 0);
         }
     }
     if (s_page_title) lv_obj_set_style_text_color(s_page_title, fg, 0);
@@ -1357,7 +1351,6 @@ static void create_ui(void)
     memset(s_btn_st, 0, sizeof(s_btn_st));   /* "--" until the first poll */
     memset(s_clk_time, 0, sizeof(s_clk_time));
     memset(s_clk_small, 0, sizeof(s_clk_small));
-    memset(s_clk_date, 0, sizeof(s_clk_date));
     memset(s_clk_bg, 0, sizeof(s_clk_bg));
     s_err_box = s_err_label = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
