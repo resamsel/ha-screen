@@ -35,7 +35,15 @@ LV_FONT_DECLARE(lv_font_latin_12)
 LV_FONT_DECLARE(lv_font_latin_14)
 LV_FONT_DECLARE(lv_font_latin_16)
 LV_FONT_DECLARE(lv_font_latin_22)
+LV_FONT_DECLARE(lv_font_clock_24)
+LV_FONT_DECLARE(lv_font_clock_28)
+LV_FONT_DECLARE(lv_font_clock_32)
+LV_FONT_DECLARE(lv_font_clock_36)
+LV_FONT_DECLARE(lv_font_clock_40)
+LV_FONT_DECLARE(lv_font_clock_44)
 LV_FONT_DECLARE(lv_font_clock_48)
+LV_FONT_DECLARE(lv_font_clock_56)
+LV_FONT_DECLARE(lv_font_clock_64)
 LV_FONT_DECLARE(lv_font_clock_72)
 
 
@@ -525,28 +533,43 @@ static void clock_tick(lv_timer_t *t)
 
 /* clock_size small/medium/large = 22/48/72 px digits, smaller (72, 48, 36, 22) while the
  * time doesn't fit its block */
-/* seconds / AM-PM beside the time: smaller next to a small clock */
+/* digits-only clock fonts (tools/make_fonts.py), ascending */
+static const lv_font_t *const CLOCK_FONTS[] = {
+    &lv_font_clock_24, &lv_font_clock_28, &lv_font_clock_32, &lv_font_clock_36, &lv_font_clock_40,
+    &lv_font_clock_44, &lv_font_clock_48, &lv_font_clock_56, &lv_font_clock_64, &lv_font_clock_72,
+};
+static const uint8_t CLOCK_PX[] = { 24, 28, 32, 36, 40, 44, 48, 56, 64, 72 };
+#define CLOCK_N (int)(sizeof(CLOCK_PX) / sizeof(CLOCK_PX[0]))
+
+/* seconds / AM-PM beside the time, scaled with it */
 static const lv_font_t *clock_small_font(const lv_font_t *time_font)
 {
-    return time_font->line_height <= lv_font_montserrat_36.line_height ? &lv_font_latin_16 : &lv_font_latin_22;
+    int lh = time_font->line_height;
+    return lh >= lv_font_clock_48.line_height ? &lv_font_latin_22
+         : lh >= lv_font_clock_32.line_height ? &lv_font_latin_16 : &lv_font_latin_12;
 }
 
-static const lv_font_t *clock_font(uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
+static bool clock_fits(int i, uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
 {
-    /* steps down through 36 px, so a large clock in a narrow block stays bigger than small */
-    static const lv_font_t *const fonts[] = { &lv_font_latin_22, &lv_font_montserrat_36, &lv_font_clock_48, &lv_font_clock_72 };
-    int i = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 3 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 2 : 0;
-    /* seconds and AM/PM are drawn small beside the time */
-    lv_point_t extra = { 0, 0 };
     const char *small = (flags & LAYOUT_CLOCK_SECONDS) && (flags & LAYOUT_CLOCK_12H) ? ":00 PM"
                       : flags & LAYOUT_CLOCK_SECONDS ? ":00" : flags & LAYOUT_CLOCK_12H ? "PM" : "";
-    for (; i > 0; i--) {
-        if (small[0]) lv_txt_get_size(&extra, small, clock_small_font(fonts[i]), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        lv_point_t sz;
-        lv_txt_get_size(&sz, "00:00", fonts[i], 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        if (sz.x + (extra.x ? extra.x + 4 : 0) <= max_w && fonts[i]->line_height <= max_h) break;
-    }
-    return fonts[i];
+    lv_point_t sz, extra = { 0, 0 };
+    lv_txt_get_size(&sz, "00:00", CLOCK_FONTS[i], 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (small[0]) lv_txt_get_size(&extra, small, clock_small_font(CLOCK_FONTS[i]), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return sz.x + (extra.x ? extra.x + 4 : 0) <= max_w && CLOCK_FONTS[i]->line_height <= max_h;
+}
+
+/* clock_size small/medium/large = 24/48/72 px. When a large clock wouldn't fit its block,
+ * all three shrink by the same factor, so large stays bigger than medium and small. */
+static const lv_font_t *clock_font(uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
+{
+    int target = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 72 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 48 : 24;
+    int fit = 0;   /* largest size that fits, measured with this clock's seconds/AM-PM */
+    for (int i = CLOCK_N - 1; i >= 0; i--) if (clock_fits(i, flags, max_w, max_h)) { fit = i; break; }
+    int want = target * CLOCK_PX[fit] / 72;
+    int pick = 0;
+    for (int i = 0; i < CLOCK_N; i++) if (CLOCK_PX[i] <= want) pick = i;
+    return CLOCK_FONTS[pick];
 }
 
 static void create_clock(lv_obj_t *page, int pg, int i)
