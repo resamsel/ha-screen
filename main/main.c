@@ -490,7 +490,7 @@ static void clock_update(int pg)
     } else {
         int h = t.tm_hour;
         if (fl & LAYOUT_CLOCK_12H) h = h % 12 ? h % 12 : 12;
-        snprintf(hm, sizeof(hm), "%d:%02d", h, t.tm_min);
+        snprintf(hm, sizeof(hm), "%02d:%02d", h, t.tm_min);   /* zero padded: 07:05 */
         /* seconds and AM/PM go small beside the time: ":05 PM" */
         int n = 0;
         if (fl & LAYOUT_CLOCK_SECONDS) n = snprintf(small, sizeof(small), ":%02d", t.tm_sec);
