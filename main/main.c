@@ -337,7 +337,7 @@ static void apply_temp_theme(bool light)
         lv_obj_set_style_text_color(s_g_name, sub, 0);
         lv_obj_set_style_text_color(s_g_val, fg, 0);
         lv_obj_set_style_text_color(s_g_unit, fg, 0);
-        lv_chart_set_series_color(s_chart, s_chart_ser, lv_color_hex(light ? 0x0B7FAB : 0x0E6FA8));   /* dark: like HA's sensor card */
+        lv_chart_set_series_color(s_chart, s_chart_ser, lv_color_hex(light ? 0x2A8BD0 : 0x0E6FA8));   /* like HA's sensor card */
     }
     s_gi = 0;
     if (s_page_title) lv_obj_set_style_text_color(s_page_title, fg, 0);
@@ -511,7 +511,7 @@ static void chart_fill_cb(lv_event_t *e)
     lv_draw_rect_dsc_t r;
     lv_draw_rect_dsc_init(&r);
     r.bg_color = d->line_dsc ? d->line_dsc->color : lv_color_hex(0x18BCF2);
-    r.bg_opa = s_light ? LV_OPA_30 : 41;   /* dark: about 16 %, like HA's sensor card */
+    r.bg_opa = s_light ? LV_OPA_20 : 41;   /* about 20 % / 16 %, like HA's sensor card */
     r.border_width = 0;
     r.radius = 0;
     lv_draw_polygon(d->draw_ctx, &r, pts, 4);
