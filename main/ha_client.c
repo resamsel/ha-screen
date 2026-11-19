@@ -318,13 +318,10 @@ static bool fetch_state(void)
     }
 
     for (int pg = 0; pg < s_layout.count; pg++) {
-        if (s_layout.pages[pg].kind == LAYOUT_BUTTONS) {
-            for (int i = 0; i < s_layout.pages[pg].count; i++) fetch_button(pg, i);
-            continue;
-        }
-        if (s_layout.pages[pg].kind != LAYOUT_VALUES) continue;
         for (int i = 0; i < s_layout.pages[pg].count; i++) {
             const layout_item_t *it = &s_layout.pages[pg].items[i];
+            if (it->kind == LAYOUT_BUTTONS) { fetch_button(pg, i); continue; }
+            if (it->kind != LAYOUT_VALUES) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
             read_entity(it, text, unit, name);
             if (s_sensor_cb) s_sensor_cb(pg, i, text, unit, name);
@@ -449,8 +446,8 @@ static void fetch_button(int pg, int row)
 /* Toggle / run / activate the tapped button's entity */
 static bool press_button(int pg, int row)
 {
-    if (pg < 0 || pg >= s_layout.count || s_layout.pages[pg].kind != LAYOUT_BUTTONS ||
-        row < 0 || row >= s_layout.pages[pg].count) return false;
+    if (pg < 0 || pg >= s_layout.count || row < 0 || row >= s_layout.pages[pg].count ||
+        s_layout.pages[pg].items[row].kind != LAYOUT_BUTTONS) return false;
     const layout_item_t *it = &s_layout.pages[pg].items[row];
     if (it->action != LAYOUT_ACT_TOGGLE) { ESP_LOGW(TAG, "%s: tap action not supported", it->entity); return false; }
     const char *svc = is_domain(it->entity, "script") ? "/api/services/script/turn_on"
@@ -618,8 +615,8 @@ static void ha_task(void *arg)
         }
         bool fetched = fetch_state();
         for (int pg = 0; pg < s_layout.count; pg++)
-            if (s_layout.pages[pg].kind == LAYOUT_GRAPH)
-                for (int i = 0; i < s_layout.pages[pg].count; i++) fetch_graph(pg, i);
+            for (int i = 0; i < s_layout.pages[pg].count; i++)
+                if (s_layout.pages[pg].items[i].kind == LAYOUT_GRAPH) fetch_graph(pg, i);
         if (b & REFRESH_BIT) ok &= fetched;
         if (updated) {
             ESP_LOGI(TAG, "update %s", ok ? "succeeded" : "FAILED");

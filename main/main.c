@@ -210,7 +210,7 @@ void app_main(void)
 #define SWIPE_MIN  40                    /* drag distance that flips the page */
 static ha_layout_t s_layout;                  /* pages from the HA dashboard (LVGL lock) */
 #define PAGE_COUNT (s_layout.count)
-#define IS_GRAPH(pg) (s_layout.pages[pg].kind == LAYOUT_GRAPH)
+#define KIND(pg, i)  (s_layout.pages[pg].items[i].kind)   /* each card is its own block */
 #define ROWS(pg)     (s_layout.pages[pg].count)
 
 /* Where row i's value goes: portrait = rows stacked, landscape = side-by-side columns.
@@ -276,15 +276,12 @@ static int name_width(const char *txt, void *ctx)
 static void graph_block(int gi, lv_area_t *a);
 #define GRAPH_X 10   /* left margin of a graph's name and value inside its block */
 
-/* Widest a name may be: its graph block, its column in landscape, the screen otherwise */
-static lv_coord_t name_max_w(int pg)
+/* Widest a name may be: its block (row/column) minus the margins */
+static lv_coord_t name_max_w(int pg, int i)
 {
-    if (IS_GRAPH(pg)) {
-        lv_area_t b;
-        graph_block(GI(pg, 0), &b);
-        return lv_area_get_width(&b) - 2 * GRAPH_X;
-    }
-    return (s_landscape ? SCR_W / LV_MAX(ROWS(pg), 1) : SCR_W) - 8;
+    lv_area_t b;
+    graph_block(GI(pg, i), &b);
+    return lv_area_get_width(&b) - (KIND(pg, i) == LAYOUT_GRAPH ? 2 * GRAPH_X : 8);
 }
 
 /* Text centred on cx below the value; ends in "..." if it still doesn't fit */
@@ -305,23 +302,35 @@ static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_co
 static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y);
 static void page_names_update(int pg)
 {
-    char n[LAYOUT_MAX_ROWS][32];
-    for (int i = 0; i < ROWS(pg); i++) strcpy(n[i], s_full[pg][i]);
-    lv_coord_t max_w = name_max_w(pg);
-    names_abbreviate(n, ROWS(pg), max_w, name_width, NULL);
     int saved_gi = s_gi;
-    for (int i = 0; i < ROWS(pg); i++) {
-        lv_coord_t cx, y;
-        if (IS_GRAPH(pg)) {   /* left-aligned at the top of each graph block */
-            s_gi = GI(pg, i);
-            if (!s_g_name) continue;
-            graph_name_pos(&cx, &y);
-            set_name_label(s_g_name, n[i], max_w, cx, y - NAME_DY, true);
-            continue;
+    /* tiles and graphs are shortened as separate groups (shared words within each kind) */
+    static const uint8_t kinds[] = { LAYOUT_VALUES, LAYOUT_GRAPH };
+    for (int k = 0; k < 2; k++) {
+        char n[LAYOUT_MAX_ROWS][32];
+        int idx[LAYOUT_MAX_ROWS], cnt = 0;
+        lv_coord_t max_w = LV_COORD_MAX;
+        for (int i = 0; i < ROWS(pg); i++) {
+            if (KIND(pg, i) != kinds[k]) continue;
+            strcpy(n[cnt], s_full[pg][i]);
+            idx[cnt++] = i;
+            max_w = LV_MIN(max_w, name_max_w(pg, i));
         }
-        if (!s_name[pg][i]) continue;
-        value_pos(pg, i, &cx, &y);
-        set_name_label(s_name[pg][i], n[i], max_w, cx, y, false);
+        if (!cnt) continue;
+        names_abbreviate(n, cnt, max_w, name_width, NULL);
+        for (int c = 0; c < cnt; c++) {
+            int i = idx[c];
+            lv_coord_t cx, y;
+            if (kinds[k] == LAYOUT_GRAPH) {   /* left-aligned at the top of the graph block */
+                s_gi = GI(pg, i);
+                if (!s_g_name) continue;
+                graph_name_pos(&cx, &y);
+                set_name_label(s_g_name, n[c], name_max_w(pg, i), cx, y - NAME_DY, true);
+            } else {
+                if (!s_name[pg][i]) continue;
+                value_pos(pg, i, &cx, &y);
+                set_name_label(s_name[pg][i], n[c], name_max_w(pg, i), cx, y, false);
+            }
+        }
     }
     s_gi = saved_gi;
 }
@@ -361,7 +370,7 @@ static void place_value(int pg, int row)
     lv_coord_t cx, y;
     value_pos(pg, row, &cx, &y);
     place_pair(s_val[pg][row], s_unit[pg][row], cx, y, false);
-    if (s_unit[pg][ROWS(pg) - 1]) page_relayout(pg);   /* once the page is complete */
+    page_relayout(pg);
 }
 
 /* Sensor text and page dot colours for the current theme. LVGL lock must be held. */
@@ -430,57 +439,51 @@ static void btn_flash(int pg, int i, uint32_t color)
     lv_timer_set_repeat_count(t, 1);
 }
 
-static void create_button_page(lv_obj_t *page, int pg)
+/* Button card: a rounded translucent rectangle filling its block */
+static void create_button(lv_obj_t *page, int pg, int i)
 {
-    const int n = ROWS(pg), gap = 8, m = 8;
-    const lv_coord_t top = STATUS_H + 4, h_all = SCR_H - DOTS_H - top - 4;
-    for (int i = 0; i < n; i++) {
-        lv_obj_t *b = lv_obj_create(page);
-        lv_obj_remove_style_all(b);
-        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_radius(b, 14, 0);
-        lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
-        if (s_landscape) {   /* side by side */
-            lv_coord_t w = (SCR_W - 2 * m - (n - 1) * gap) / n;
-            lv_obj_set_size(b, w, h_all);
-            lv_obj_set_pos(b, m + i * (w + gap), top);
-        } else {             /* stacked */
-            lv_coord_t h = (h_all - (n - 1) * gap) / n;
-            lv_obj_set_size(b, SCR_W - 2 * m, h);
-            lv_obj_set_pos(b, m, top + i * (h + gap));
-        }
-        lv_obj_update_layout(b);
-        lv_coord_t inner = lv_obj_get_width(b) - 16;
-        const layout_item_t *it = &s_layout.pages[pg].items[i];
-        s_btn_name[pg][i] = lv_label_create(b);
-        lv_obj_set_style_text_font(s_btn_name[pg][i], &lv_font_latin_16, 0);
-        lv_label_set_long_mode(s_btn_name[pg][i], LV_LABEL_LONG_DOT);
-        lv_obj_set_width(s_btn_name[pg][i], inner);
-        lv_obj_set_height(s_btn_name[pg][i], lv_font_latin_16.line_height);   /* one line, "..." */
-        lv_obj_set_style_text_align(s_btn_name[pg][i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(s_btn_name[pg][i], it->name[0] ? it->name : it->entity);
-        lv_obj_align(s_btn_name[pg][i], LV_ALIGN_CENTER, 0, -10);
-        s_btn_state[pg][i] = lv_label_create(b);
-        lv_obj_set_style_text_font(s_btn_state[pg][i], &lv_font_latin_14, 0);
-        lv_obj_align(s_btn_state[pg][i], LV_ALIGN_CENTER, 0, 12);
-        s_btn[pg][i] = b;
-        btn_paint(pg, i);
-    }
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    lv_obj_t *b = lv_obj_create(page);
+    lv_obj_remove_style_all(b);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(b, 14, 0);
+    lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
+    lv_obj_set_size(b, lv_area_get_width(&blk) - 8, lv_area_get_height(&blk) - 8);
+    lv_obj_set_pos(b, blk.x1 + 4, blk.y1 + 4);
+    lv_obj_update_layout(b);
+    lv_coord_t inner = lv_obj_get_width(b) - 16;
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    s_btn_name[pg][i] = lv_label_create(b);
+    lv_obj_set_style_text_font(s_btn_name[pg][i], &lv_font_latin_16, 0);
+    lv_label_set_long_mode(s_btn_name[pg][i], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_btn_name[pg][i], inner);
+    lv_obj_set_height(s_btn_name[pg][i], lv_font_latin_16.line_height);   /* one line, "..." */
+    lv_obj_set_style_text_align(s_btn_name[pg][i], LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_btn_name[pg][i], it->name[0] ? it->name : it->entity);
+    lv_obj_align(s_btn_name[pg][i], LV_ALIGN_CENTER, 0, -10);
+    s_btn_state[pg][i] = lv_label_create(b);
+    lv_obj_set_style_text_font(s_btn_state[pg][i], &lv_font_latin_14, 0);
+    lv_obj_align(s_btn_state[pg][i], LV_ALIGN_CENTER, 0, 12);
+    s_btn[pg][i] = b;
+    btn_paint(pg, i);
 }
 
 /* ---- Clock pages: the board's time (set from HA's responses), updated every second ---- */
-static lv_obj_t *s_clk_time[LAYOUT_MAX_PAGES], *s_clk_small[LAYOUT_MAX_PAGES];   /* no date, like HA's card */
-static lv_obj_t *s_clk_bg[LAYOUT_MAX_PAGES];   /* card background (unless no_background) */
+/* one set per block, indexed GI(page, row) */
+static lv_obj_t *s_clk_time[GRAPHS], *s_clk_small[GRAPHS];   /* no date, like HA's card */
+static lv_obj_t *s_clk_bg[GRAPHS];   /* card background (unless no_background) */
 static lv_timer_t *s_clk_timer;
 
-static void clock_update(int pg)
+static void clock_update(int gi)
 {
-    if (!s_clk_time[pg]) return;
-    uint8_t fl = s_layout.pages[pg].items[0].flags;
+    if (!s_clk_time[gi]) return;
+    const layout_item_t *it = &s_layout.pages[GPG(gi)].items[GROW(gi)];
+    uint8_t fl = it->flags;
     time_t now = time(NULL);
     struct tm t;
     /* the card's time_zone, else the board's (HA_TIMEZONE) */
-    const char *zone = s_layout.pages[pg].items[0].entity[0] ? tz_posix(s_layout.pages[pg].items[0].entity) : NULL;
+    const char *zone = it->entity[0] ? tz_posix(it->entity) : NULL;
     if (zone) { setenv("TZ", zone, 1); tzset(); }
     localtime_r(&now, &t);
     if (zone) { setenv("TZ", HA_TIMEZONE, 1); tzset(); }
@@ -496,30 +499,33 @@ static void clock_update(int pg)
         if (fl & LAYOUT_CLOCK_SECONDS) n = snprintf(small, sizeof(small), ":%02d", t.tm_sec);
         if (fl & LAYOUT_CLOCK_12H) snprintf(small + n, sizeof(small) - n, "%s%s", n ? " " : "", t.tm_hour < 12 ? "AM" : "PM");
     }
-    lv_label_set_text(s_clk_time[pg], hm);
-    lv_label_set_text(s_clk_small[pg], small);
-    /* centre time + seconds/AM-PM together */
-    lv_obj_update_layout(s_clk_time[pg]);
-    lv_obj_update_layout(s_clk_small[pg]);
-    lv_coord_t tw = lv_obj_get_width(s_clk_time[pg]), sw = small[0] ? lv_obj_get_width(s_clk_small[pg]) + 4 : 0;
-    lv_coord_t th = lv_obj_get_height(s_clk_time[pg]);
-    lv_coord_t y = STATUS_H + (SCR_H - STATUS_H - DOTS_H - th) / 2;
-    lv_obj_set_pos(s_clk_time[pg], (SCR_W - tw - sw) / 2, y);
-    lv_obj_align_to(s_clk_small[pg], s_clk_time[pg], LV_ALIGN_OUT_RIGHT_BOTTOM, 4,
-                    -(lv_obj_get_style_text_font(s_clk_time[pg], 0)->base_line -
-                      lv_obj_get_style_text_font(s_clk_small[pg], 0)->base_line));
+    lv_label_set_text(s_clk_time[gi], hm);
+    lv_label_set_text(s_clk_small[gi], small);
+    /* centre time + seconds/AM-PM together in the block */
+    lv_area_t blk;
+    graph_block(gi, &blk);
+    lv_obj_update_layout(s_clk_time[gi]);
+    lv_obj_update_layout(s_clk_small[gi]);
+    lv_coord_t tw = lv_obj_get_width(s_clk_time[gi]), sw = small[0] ? lv_obj_get_width(s_clk_small[gi]) + 4 : 0;
+    lv_coord_t th = lv_obj_get_height(s_clk_time[gi]);
+    lv_obj_set_pos(s_clk_time[gi], blk.x1 + (lv_area_get_width(&blk) - tw - sw) / 2,
+                   blk.y1 + (lv_area_get_height(&blk) - th) / 2);
+    lv_obj_align_to(s_clk_small[gi], s_clk_time[gi], LV_ALIGN_OUT_RIGHT_BOTTOM, 4,
+                    -(lv_obj_get_style_text_font(s_clk_time[gi], 0)->base_line -
+                      lv_obj_get_style_text_font(s_clk_small[gi], 0)->base_line));
 }
 
 static void clock_tick(lv_timer_t *t)
 {
     (void)t;
     for (int pg = 0; pg < PAGE_COUNT; pg++)
-        if (s_layout.pages[pg].kind == LAYOUT_CLOCK) clock_update(pg);
+        for (int i = 0; i < ROWS(pg); i++)
+            if (KIND(pg, i) == LAYOUT_CLOCK) clock_update(GI(pg, i));
 }
 
-/* clock_size small/medium/large = 36/48/72 px digits, one step smaller while the time
- * doesn't fit the width */
-static const lv_font_t *clock_font(uint8_t flags)
+/* clock_size small/medium/large = 36/48/72 px digits, smaller while the time doesn't fit
+ * its block */
+static const lv_font_t *clock_font(uint8_t flags, lv_coord_t max_w, lv_coord_t max_h)
 {
     static const lv_font_t *const fonts[] = { &lv_font_montserrat_36, &lv_font_clock_48, &lv_font_clock_72 };
     int i = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 2 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 1 : 0;
@@ -531,42 +537,46 @@ static const lv_font_t *clock_font(uint8_t flags)
     for (; i > 0; i--) {
         lv_point_t sz;
         lv_txt_get_size(&sz, "00:00", fonts[i], 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        if (sz.x + (extra.x ? extra.x + 4 : 0) <= SCR_W - 32) break;
+        if (sz.x + (extra.x ? extra.x + 4 : 0) <= max_w && fonts[i]->line_height <= max_h) break;
     }
     return fonts[i];
 }
 
-static void create_clock_page(lv_obj_t *page, int pg)
+static void create_clock(lv_obj_t *page, int pg, int i)
 {
-    const layout_item_t *it = &s_layout.pages[pg].items[0];
+    int gi = GI(pg, i);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    lv_area_t blk;
+    graph_block(gi, &blk);
     if (!(it->flags & LAYOUT_CLOCK_NO_BG)) {   /* translucent card panel */
         lv_obj_t *bg = lv_obj_create(page);
         lv_obj_remove_style_all(bg);
         lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_radius(bg, 14, 0);
         lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);     /* 60 % transparent, like the buttons */
-        lv_obj_set_size(bg, SCR_W - 16, SCR_H - STATUS_H - DOTS_H - 8);
-        lv_obj_set_pos(bg, 8, STATUS_H + 4);
-        s_clk_bg[pg] = bg;
+        lv_obj_set_size(bg, lv_area_get_width(&blk) - 8, lv_area_get_height(&blk) - 8);
+        lv_obj_set_pos(bg, blk.x1 + 4, blk.y1 + 4);
+        s_clk_bg[gi] = bg;
     }
     if (it->entity[0] && !tz_posix(it->entity))
         ESP_LOGW("clock", "time zone '%s' not known, using the board's", it->entity);
-    s_clk_time[pg] = lv_label_create(page);
-    lv_obj_set_style_text_font(s_clk_time[pg], clock_font(it->flags), 0);
-    s_clk_small[pg] = lv_label_create(page);
-    lv_obj_set_style_text_font(s_clk_small[pg], &lv_font_latin_22, 0);
+    s_clk_time[gi] = lv_label_create(page);
+    lv_obj_set_style_text_font(s_clk_time[gi], clock_font(it->flags, lv_area_get_width(&blk) - 24,
+                                                          lv_area_get_height(&blk) - 8), 0);
+    s_clk_small[gi] = lv_label_create(page);
+    lv_obj_set_style_text_font(s_clk_small[gi], &lv_font_latin_22, 0);
     if (!s_clk_timer) s_clk_timer = lv_timer_create(clock_tick, 1000, NULL);
-    clock_update(pg);
+    clock_update(gi);
 }
 
 /* A tap on a button page: toggle at once (optimistic), HA confirms on the next poll */
 static bool button_tap(lv_point_t p)
 {
     int pg = s_page;
-    if (pg >= PAGE_COUNT || s_layout.pages[pg].kind != LAYOUT_BUTTONS) return false;
+    if (pg >= PAGE_COUNT) return false;
     for (int i = 0; i < ROWS(pg); i++) {
         lv_area_t a;
-        if (!s_btn[pg][i]) continue;
+        if (KIND(pg, i) != LAYOUT_BUTTONS || !s_btn[pg][i]) continue;
         lv_obj_get_coords(s_btn[pg][i], &a);
         if (p.x < a.x1 || p.x > a.x2 || p.y < a.y1 || p.y > a.y2) continue;
         ha_btn_state_t st = s_btn_st[pg][i];
@@ -581,15 +591,15 @@ static bool button_tap(lv_point_t p)
         ha_client_press(pg, i);
         return true;
     }
-    return true;   /* taps between buttons do nothing */
+    return false;   /* not on a button: other blocks handle the tap */
 }
 
 /* Network task: state of one button (a poll confirms or corrects a pending tap) */
 static void ha_button_changed(int page, int row, ha_btn_state_t state, const char *name)
 {
     if (!lvgl_port_lock(0)) return;
-    if (page >= 0 && page < PAGE_COUNT && s_layout.pages[page].kind == LAYOUT_BUTTONS && row >= 0 &&
-        row < ROWS(page) && s_btn[page][row]) {
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_BUTTONS &&
+        s_btn[page][row]) {
         s_btn_st[page][row] = state;
         s_btn_pending[page][row] = false;
         if (strcmp(lv_label_get_text(s_btn_name[page][row]), name)) lv_label_set_text(s_btn_name[page][row], name);
@@ -602,8 +612,8 @@ static void ha_button_changed(int page, int row, ha_btn_state_t state, const cha
 static void ha_button_pressed(int page, int row, bool ok)
 {
     if (!lvgl_port_lock(0)) return;
-    if (!ok && page >= 0 && page < PAGE_COUNT && s_layout.pages[page].kind == LAYOUT_BUTTONS && row >= 0 &&
-        row < ROWS(page) && s_btn[page][row]) {
+    if (!ok && page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_BUTTONS &&
+        s_btn[page][row]) {
         ha_btn_state_t st = s_btn_st[page][row];
         if (s_btn_pending[page][row]) s_btn_st[page][row] = st == HA_BTN_ON ? HA_BTN_OFF : HA_BTN_ON;
         s_btn_pending[page][row] = false;
@@ -638,10 +648,13 @@ static void apply_temp_theme(bool light)
     s_gi = 0;
     for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++) {
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++) btn_paint(pg, i);
-        if (s_clk_bg[pg]) lv_obj_set_style_bg_color(s_clk_bg[pg], lv_color_hex(light ? 0xD5DAE0 : 0x3A3F47), 0);
-        if (s_clk_time[pg]) {
-            lv_obj_set_style_text_color(s_clk_time[pg], val, 0);
-            lv_obj_set_style_text_color(s_clk_small[pg], sub, 0);
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++) {
+            int gi = GI(pg, i);
+            if (s_clk_bg[gi]) lv_obj_set_style_bg_color(s_clk_bg[gi], lv_color_hex(light ? 0xD5DAE0 : 0x3A3F47), 0);
+            if (s_clk_time[gi]) {
+                lv_obj_set_style_text_color(s_clk_time[gi], val, 0);
+                lv_obj_set_style_text_color(s_clk_small[gi], sub, 0);
+            }
         }
     }
     if (s_page_title) lv_obj_set_style_text_color(s_page_title, fg, 0);
@@ -677,10 +690,10 @@ static void show_page(int page)
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name)
 {
     if (!lvgl_port_lock(0)) return;
-    if (page >= 0 && page < PAGE_COUNT && !IS_GRAPH(page) && row >= 0 && row < ROWS(page) && s_val[page][row]) {
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_VALUES && s_val[page][row]) {
         lv_label_set_text(s_val[page][row], value);
         lv_label_set_text(s_unit[page][row], unit);
-        fit_value(s_val[page][row], s_unit[page][row], name_max_w(page));
+        fit_value(s_val[page][row], s_unit[page][row], name_max_w(page, row));
         if (strncmp(s_full[page][row], name, 31)) {
             snprintf(s_full[page][row], sizeof(s_full[page][row]), "%s", name);
             page_names_update(page);
@@ -696,7 +709,7 @@ static void ha_graph_changed(int graph, int row, const char *latest, const char 
                              const float *pts, int n, int64_t end, int hours, bool zero_based)
 {
     if (!lvgl_port_lock(0)) return;
-    if (graph < 0 || graph >= PAGE_COUNT || !IS_GRAPH(graph) || row < 0 || row >= ROWS(graph)) {
+    if (graph < 0 || graph >= PAGE_COUNT || row < 0 || row >= ROWS(graph) || KIND(graph, row) != LAYOUT_GRAPH) {
         lvgl_port_unlock();
         return;
     }
@@ -895,14 +908,6 @@ static void create_graph(lv_obj_t *page)
     lv_chart_set_all_value(s_chart, s_chart_ser, LV_CHART_POINT_NONE);
 }
 
-static void create_graph_page(lv_obj_t *page, int pg)
-{
-    for (int i = 0; i < ROWS(pg); i++) {
-        s_gi = GI(pg, i);
-        create_graph(page);
-    }
-    page_names_update(pg);   /* names fit their block (shared words dropped, else "...") */
-}
 
 static void create_pages(lv_obj_t *scr)
 {
@@ -923,21 +928,12 @@ static void create_pages(lv_obj_t *scr)
     lv_obj_clear_flag(s_strip, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
-        if (IS_GRAPH(pg)) {
-            create_graph_page(make_page(pg), pg);
-            continue;
-        }
-        if (s_layout.pages[pg].kind == LAYOUT_BUTTONS) {
-            create_button_page(make_page(pg), pg);
-            continue;
-        }
-        if (s_layout.pages[pg].kind == LAYOUT_CLOCK) {
-            create_clock_page(make_page(pg), pg);
-            continue;
-        }
         lv_obj_t *page = make_page(pg);
-        for (int i = 0; i < ROWS(pg); i++) {
+        for (int i = 0; i < ROWS(pg); i++) {   /* one block per card, any mix of kinds */
             const layout_item_t *it = &s_layout.pages[pg].items[i];
+            if (it->kind == LAYOUT_GRAPH) { s_gi = GI(pg, i); create_graph(page); continue; }
+            if (it->kind == LAYOUT_BUTTONS) { create_button(page, pg, i); continue; }
+            if (it->kind == LAYOUT_CLOCK) { create_clock(page, pg, i); continue; }
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
@@ -992,14 +988,13 @@ static void group_objs(int g, lv_obj_t *o[3])
 {
     int pg = g / LAYOUT_MAX_ROWS, row = g % LAYOUT_MAX_ROWS;
     o[0] = o[1] = o[2] = NULL;
-    if (pg >= PAGE_COUNT) return;
-    if (IS_GRAPH(pg)) {
-        if (row >= ROWS(pg)) return;
+    if (pg >= PAGE_COUNT || row >= ROWS(pg)) return;
+    if (KIND(pg, row) == LAYOUT_GRAPH) {
         int gi = GI(pg, row);   /* index directly: s_gi belongs to the caller */
         o[0] = s_g_val_[gi]; o[1] = s_g_unit_[gi]; o[2] = s_g_name_[gi];
         return;
     }
-    if (row >= ROWS(pg)) return;
+    if (KIND(pg, row) != LAYOUT_VALUES) return;   /* buttons and clocks don't grow */
     o[0] = s_val[pg][row]; o[1] = s_unit[pg][row]; o[2] = s_name[pg][row];
 }
 
@@ -1029,7 +1024,7 @@ static void group_area(int g, lv_area_t *a)
 {
     group_area_n(g, 3, a);
     int pg = group_page(g);
-    if (pg < PAGE_COUNT && IS_GRAPH(pg) && s_chart_[g]) {   /* g == GI(page, row) */
+    if (pg < PAGE_COUNT && GROW(g) < ROWS(pg) && KIND(pg, GROW(g)) == LAYOUT_GRAPH && s_chart_[g]) {   /* g == GI(page, row) */
         lv_area_t c;
         lv_obj_get_coords(s_chart_[g], &c);
         a->x1 = LV_MIN(a->x1, c.x1);
@@ -1065,13 +1060,17 @@ static void page_relayout(int pg)
             lv_area_move(ar[i], -lv_obj_get_style_translate_x(o[k][i], 0), -lv_obj_get_style_translate_y(o[k][i], 0));
         }
     }
-    bool cols = s_landscape && !IS_GRAPH(pg);
+    /* a page of only tiles keeps the old behaviour (rows/columns make room for a grown value);
+     * on mixed pages every value stays inside its own block */
+    bool pure = true;
+    for (int i = 0; i < ROWS(pg); i++) pure &= KIND(pg, i) == LAYOUT_VALUES;
+    bool cols = s_landscape && pure;
     lv_coord_t right_bound = SCR_W - 2;
     const lv_font_t *vf = VFONT;
     for (int k = 0; k < n; k++) {
         /* push away from the neighbours' growth */
         float shift = 0;
-        for (int j = 0; j < n && !IS_GRAPH(pg); j++) {   /* graphs have their own blocks */
+        for (int j = 0; j < n && pure; j++) {
             if (j == k) continue;
             float ext = cols ? lv_area_get_width(&va[j]) * f[j] : lv_area_get_height(&va[j]) * f[j];
             shift += (j < k ? ext : -ext) / 2;
@@ -1081,7 +1080,7 @@ static void page_relayout(int pg)
         lv_coord_t gw = (lv_coord_t)(w * f[k]), gh = (lv_coord_t)(h * f[k]);
         /* graphs: the value grows from its top-left corner (away from the name above it and
          * the status bar); rows: about its centre */
-        bool corner = IS_GRAPH(pg);
+        bool corner = KIND(pg, GROW(gs[k])) == LAYOUT_GRAPH;
         lv_coord_t udx = corner ? gw : gw / 2;
         lv_coord_t udy = (lv_coord_t)(((vf->line_height - vf->base_line) - (corner ? 0 : h / 2)) * f[k]);
         /* keep the whole element on screen */
@@ -1091,7 +1090,7 @@ static void page_relayout(int pg)
         lv_coord_t left = LV_MIN(va[k].x1 - (corner ? 0 : gw / 2), na[k].x1) + tx - pa.x1;
         lv_coord_t right = LV_MAX(LV_MAX(va[k].x2 + (corner ? gw : gw / 2), ua[k].x2 + udx), na[k].x2) + tx - pa.x1;
         lv_coord_t lo = 2, hi = right_bound;
-        if (corner) {                     /* stay inside the graph's block */
+        if (!pure) {                      /* stay inside the card's block */
             lv_area_t blk;
             graph_block(gs[k], &blk);
             lo = blk.x1 + 2;
@@ -1352,6 +1351,7 @@ static void create_ui(void)
     memset(s_clk_time, 0, sizeof(s_clk_time));
     memset(s_clk_small, 0, sizeof(s_clk_small));
     memset(s_clk_bg, 0, sizeof(s_clk_bg));
+    memset(s_full, 0, sizeof(s_full));
     s_err_box = s_err_label = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
