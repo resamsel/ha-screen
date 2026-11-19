@@ -358,14 +358,17 @@ static void fetch_graph(int pg)
     time_t t0 = (time_t)(s_now - (int64_t)page->hours * 3600);
     struct tm g;
     gmtime_r(&t0, &g);
-    char start[32];
+    char start[32], stop[32];
     strftime(start, sizeof(start), "%Y-%m-%dT%H:%M:%S%%2B00:00", &g);
+    time_t t1 = (time_t)s_now;   /* without end_time HA returns only one day */
+    gmtime_r(&t1, &g);
+    strftime(stop, sizeof(stop), "%Y-%m-%dT%H:%M:%S%%2B00:00", &g);
     s_hist_hours = page->hours;
     memset(s_hist_has, 0, sizeof(s_hist_has));
     s_hist_len = 0;
     s_hist_mode = true;
-    snprintf(path, sizeof(path), "/api/history/period/%s?filter_entity_id=%s&minimal_response&no_attributes",
-             start, page->items[0].entity);
+    snprintf(path, sizeof(path), "/api/history/period/%s?end_time=%s&filter_entity_id=%s&minimal_response&no_attributes",
+             start, stop, page->items[0].entity);
     int st = ha_request(HTTP_METHOD_GET, path, NULL, NULL);
     s_hist_mode = false;
     if (st != 200) return;
@@ -381,7 +384,7 @@ static void fetch_graph(int pg)
         if (s_hist_has[i]) { pts[i] = s_hist_bucket[i]; carry = s_hist_last[i]; known++; }
         else pts[i] = carry;
     }
-    ESP_LOGD(TAG, "history: %d of %d buckets with data", known, HA_GRAPH_POINTS);
+    ESP_LOGD(TAG, "history %dh: %d of %d buckets with data", page->hours, known, HA_GRAPH_POINTS);
     if (s_graph_cb) s_graph_cb(pg, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, page->hours, zero_based);
 }
 
@@ -415,11 +418,15 @@ static void use_layout(const ha_layout_t *l)
 static void refresh_layout(void)
 {
     static ha_layout_t l;
+    static uint32_t raw_hash;             /* parsed but unfiltered: skip the entity checks when unchanged */
     char *json = dash_fetch_config();
     if (!json) return;
     int n = layout_parse(json, HA_VIEW, &l);
     free(json);
+    if (n && layout_hash(&l) == raw_hash && s_layout.count) return;
+    uint32_t h = layout_hash(&l);
     if (n) n = layout_filter(&l, entity_usable, NULL);
+    if (n) raw_hash = h;
     s_err[0] = 0;                         /* validation errors are not shown */
     if (!n) { ESP_LOGW(TAG, "dashboard has no usable pages, keeping the current layout"); return; }
     if (layout_hash(&l) == s_layout_hash) return;
@@ -448,7 +455,9 @@ static void ha_task(void *arg)
         /* wait for a tap, or poll the state every HA_POLL_INTERVAL_MS */
         EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
         s_err[0] = 0;
-        if (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)) {
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT);
+        /* not while a tap waits: the dashboard check can take seconds */
+        if (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS))) {
             refresh_layout();
             layout_at = xTaskGetTickCount();
             layout_read = true;
@@ -513,7 +522,7 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    xTaskCreate(ha_task, "ha", 8192, NULL, 3, NULL);
+    xTaskCreate(ha_task, "ha", 8192, NULL, 3, NULL);   /* also rebuilds the UI: 8 pages measured ~3.7 KB peak */
 }
 
 void ha_client_toggle(void)

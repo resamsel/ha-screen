@@ -147,6 +147,25 @@ uint32_t layout_hash(const ha_layout_t *l)
     return h;
 }
 
+bool layout_sanitize(ha_layout_t *l)
+{
+    bool ok = l->count >= 1 && l->count <= LAYOUT_MAX_PAGES;
+    for (int p = 0; ok && p < l->count; p++) {
+        layout_page_t *pg = &l->pages[p];
+        if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
+        if (pg->kind != LAYOUT_GRAPH) pg->kind = LAYOUT_VALUES;
+        if (pg->hours < 1) pg->hours = LAYOUT_HOURS_DEFAULT;
+        if (pg->hours > LAYOUT_HOURS_MAX) pg->hours = LAYOUT_HOURS_MAX;
+        pg->title[sizeof(pg->title) - 1] = 0;
+        for (int i = 0; i < pg->count; i++) {
+            pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
+            pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
+        }
+    }
+    if (!ok) memset(l, 0, sizeof(*l));
+    return ok;
+}
+
 int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, void *ctx), void *ctx)
 {
     int np = 0;

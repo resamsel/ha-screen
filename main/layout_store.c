@@ -13,20 +13,11 @@ bool layout_store_load(ha_layout_t *out)
     size_t n = sizeof(*out);
     esp_err_t err = nvs_get_blob(h, KEY, out, &n);
     nvs_close(h);
-    if (err != ESP_OK || n != sizeof(*out) || out->count < 1 || out->count > LAYOUT_MAX_PAGES) {
+    if (err != ESP_OK || n != sizeof(*out)) {
         memset(out, 0, sizeof(*out));
         return false;
     }
-    for (int p = 0; p < out->count; p++) {   /* never trust stored sizes blindly */
-        layout_page_t *pg = &out->pages[p];
-        if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { memset(out, 0, sizeof(*out)); return false; }
-        pg->title[sizeof(pg->title) - 1] = 0;
-        for (int i = 0; i < pg->count; i++) {
-            pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
-            pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
-        }
-    }
-    return true;
+    return layout_sanitize(out);   /* never trust stored values blindly */
 }
 
 void layout_store_save(const ha_layout_t *l)

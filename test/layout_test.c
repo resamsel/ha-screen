@@ -155,8 +155,27 @@ static void test_filter(void)
     assert(!strcmp(l.pages[1].items[0].entity, "sensor.g"));
 }
 
+static void test_sanitize(void)
+{
+    ha_layout_t l;
+    parse_sections("[" SEC(GRAPH("sensor.g")) "," SEC(TILE("sensor.a")) "]", &l);
+    assert(layout_sanitize(&l));
+    l.pages[0].hours = 0;
+    l.pages[1].kind = 7;
+    assert(layout_sanitize(&l));
+    assert(l.pages[0].hours == LAYOUT_HOURS_DEFAULT);
+    assert(l.pages[1].kind == LAYOUT_VALUES);
+    l.pages[0].hours = 9999;
+    assert(layout_sanitize(&l) && l.pages[0].hours == LAYOUT_HOURS_MAX);
+    l.pages[1].count = 9;
+    assert(!layout_sanitize(&l) && l.count == 0);
+    l.count = 42;
+    assert(!layout_sanitize(&l));
+}
+
 int main(void)
 {
+    test_sanitize();
     test_fixture();
     test_name();
     test_hours();

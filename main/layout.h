@@ -36,5 +36,9 @@ int layout_parse(const char *json, const char *view_path, ha_layout_t *out);
 /* FNV-1a over the whole struct; layouts from layout_parse compare equal when identical. */
 uint32_t layout_hash(const ha_layout_t *l);
 
+/* Repairs a layout from an untrusted source (NVS): clamps hours and kind, terminates strings.
+ * Returns false (and zeroes *l) when counts are out of range. */
+bool layout_sanitize(ha_layout_t *l);
+
 /* Removes items whose entity keep() rejects, and pages left empty. Returns the page count. */
 int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, void *ctx), void *ctx);
