@@ -252,8 +252,25 @@ static void test_filter_kind(void)
     assert(s_seen_kind == LAYOUT_BUTTONS);
 }
 
+static void test_clock(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC(HEAD("Zeit") "," "{\"type\":\"clock\",\"clock_size\":\"large\",\"show_seconds\":true,\"time_format\":\"12\"}" ","
+                                  TILE("sensor.t")) "," SEC("{\"type\":\"clock\"}") "]", &l) == 2);
+    assert(l.pages[0].kind == LAYOUT_CLOCK && l.pages[0].count == 1);
+    assert(!strcmp(l.pages[0].title, "Zeit"));
+    assert(l.pages[0].items[0].flags == (LAYOUT_CLOCK_SECONDS | LAYOUT_CLOCK_12H));
+    assert(l.pages[0].items[0].entity[0] == 0);
+    assert(l.pages[1].kind == LAYOUT_CLOCK && l.pages[1].items[0].flags == 0);
+    /* filter never drops a clock (no entity to check) */
+    assert(layout_filter(&l, keep_not_x, NULL) == 2);
+    uint32_t h = layout_hash(&l);
+    assert(layout_sanitize(&l) && layout_hash(&l) == h);
+}
+
 int main(void)
 {
+    test_clock();
     test_buttons();
     test_filter_kind();
     test_sanitize();

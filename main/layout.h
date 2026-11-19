@@ -8,7 +8,11 @@
 #define LAYOUT_HOURS_DEFAULT 24
 #define LAYOUT_HOURS_MAX     168
 
-typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS } layout_kind_t;
+typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK } layout_kind_t;
+
+/* clock card options (layout_item_t.flags) */
+#define LAYOUT_CLOCK_SECONDS 0x01
+#define LAYOUT_CLOCK_12H     0x02
 
 /* what a tap on a button does: toggle/run/activate, or nothing (other tap_action types) */
 typedef enum { LAYOUT_ACT_TOGGLE, LAYOUT_ACT_NONE } layout_action_t;
@@ -18,6 +22,7 @@ typedef struct {
     char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
     uint8_t action;         /* layout_action_t, button pages */
     uint16_t hours;         /* graph span (graph pages) */
+    uint8_t flags;          /* LAYOUT_CLOCK_* (clock pages) */
     char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
                              * entity, text:<text>; resolved by the network task */
 } layout_item_t;

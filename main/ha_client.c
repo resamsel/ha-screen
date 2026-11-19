@@ -7,6 +7,7 @@ static void add_error(const char *fmt, ...);
 #include <strings.h>
 #include <math.h>
 #include <time.h>
+#include <sys/time.h>
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -166,7 +167,15 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
     resp_t *r = s_resp;
     if (evt->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(evt->header_key, "Date") == 0) {
         int64_t t = parse_http_date(evt->header_value);
-        if (t) s_now = t;
+        if (t) {
+            s_now = t;
+            /* HA's clock is the board's clock (for the clock page); adjust when off by > 2 s */
+            time_t cur = time(NULL);
+            if (cur < t - 2 || cur > t + 2) {
+                struct timeval tv = { .tv_sec = (time_t)t };
+                settimeofday(&tv, NULL);
+            }
+        }
     }
     if (evt->event_id == HTTP_EVENT_ON_DATA && s_hist_mode) {
         hist_feed(evt->data, evt->data_len);

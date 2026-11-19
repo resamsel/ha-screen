@@ -107,6 +107,24 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             if (h && !pg->title[0]) copy(pg->title, sizeof(pg->title), h);
             continue;
         }
+        if (ct && !strcmp(ct, "clock")) {   /* no entity: the board's own time */
+            if (kind_set) {
+                LOGW("section %d: clock only as the first card of a section, skipped", idx);
+                continue;
+            }
+            pg->kind = LAYOUT_CLOCK;
+            kind_set = true;
+            layout_item_t *it = &pg->items[pg->count++];
+            const cJSON *sec_ = cJSON_GetObjectItemCaseSensitive(card, "show_seconds");
+            const char *tf = str(card, "time_format");
+            if (cJSON_IsTrue(sec_)) it->flags |= LAYOUT_CLOCK_SECONDS;
+            if (tf && !strcmp(tf, "12")) it->flags |= LAYOUT_CLOCK_12H;
+            continue;
+        }
+        if (pg->kind == LAYOUT_CLOCK && kind_set) {
+            LOGW("section %d: clock page shows only the clock, card '%s' skipped", idx, ct ? ct : "?");
+            continue;
+        }
         bool graph = is_graph(card), tile = is_tile(card), button = is_button(card);
         if (!graph && !tile && !button) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
@@ -254,13 +272,14 @@ bool layout_sanitize(ha_layout_t *l)
     for (int p = 0; ok && p < l->count; p++) {
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
-        if (pg->kind != LAYOUT_GRAPH && pg->kind != LAYOUT_BUTTONS) pg->kind = LAYOUT_VALUES;
+        if (pg->kind > LAYOUT_CLOCK) pg->kind = LAYOUT_VALUES;
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
             pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
             pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
+            pg->items[i].flags &= LAYOUT_CLOCK_SECONDS | LAYOUT_CLOCK_12H;
             uint16_t *h = &pg->items[i].hours;
             if (pg->kind != LAYOUT_GRAPH) *h = 0;   /* unused; as layout_parse leaves it */
             else if (*h < 1) *h = LAYOUT_HOURS_DEFAULT;
@@ -278,7 +297,7 @@ int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t
         layout_page_t pg = l->pages[p];
         int n = 0;
         for (int i = 0; i < pg.count; i++)
-            if (keep(pg.items[i].entity, pg.kind, ctx)) pg.items[n++] = pg.items[i];
+            if (pg.kind == LAYOUT_CLOCK || keep(pg.items[i].entity, pg.kind, ctx)) pg.items[n++] = pg.items[i];
         for (int i = n; i < LAYOUT_MAX_ROWS; i++) memset(&pg.items[i], 0, sizeof(layout_item_t));
         pg.count = n;
         if (n) l->pages[np++] = pg;
