@@ -114,6 +114,16 @@ static lv_obj_t *s_orient_btn = NULL;
 static bool s_landscape = false;   /* orientation, kept in NVS */
 static void orient_cb(lv_event_t *e);
 static void apply_rotation(void);
+
+extern const lv_img_dsc_t bg_dark;
+extern const lv_img_dsc_t bg_light;
+
+/* Theme background image (centred 320x320, covers both orientations). */
+static void set_screen_bg(lv_obj_t *scr, bool light)
+{
+    lv_obj_set_style_bg_color(scr, light ? lv_color_white() : lv_color_black(), 0);
+    lv_obj_set_style_bg_img_src(scr, light ? &bg_light : &bg_dark, 0);
+}
 static void ha_landscape_changed(bool landscape);
 static lv_obj_t *s_ha_btn = NULL;
 
@@ -919,7 +929,7 @@ static void create_ui(void)
     memset(s_chart_, 0, sizeof(s_chart_));
     s_err_box = s_err_label = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
-    lv_obj_set_style_bg_color(scr, s_light ? lv_color_white() : lv_color_black(), 0);
+    set_screen_bg(scr, s_light);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(scr, edge_swipe_cb, LV_EVENT_ALL, NULL);
 
@@ -1071,9 +1081,9 @@ static void set_busy(bool busy)
 static void show_status(ha_state_t state)
 {
     /* darker shades on the light background for contrast */
-    const uint32_t ok  = s_light ? 0x1B7F3B : 0x2ECC71;
-    const uint32_t bad = s_light ? 0xC62828 : 0xE74C3C;
-    const uint32_t off = s_light ? 0x5F6368 : 0x8A8F98;
+    const uint32_t ok  = s_light ? 0x0B4D22 : 0x2ECC71;
+    const uint32_t bad = s_light ? 0x8E0E0E : 0xE74C3C;
+    const uint32_t off = s_light ? 0x2B2E33 : 0x8A8F98;
     bool wifi = state != HA_STATE_OFFLINE;
     uint32_t ha = (wifi && state != HA_STATE_ERROR) ? ok : bad;
     for (int i = 0; i < 2; i++) {
@@ -1151,7 +1161,7 @@ static void ha_state_changed(ha_state_t state)
     lv_obj_t *label = lv_obj_get_child(s_ha_btn, 0);
     bool light = s_light;
     /* Light: white background, dark button, darker slider. Dark: black background. */
-    lv_obj_set_style_bg_color(lv_scr_act(), light ? lv_color_white() : lv_color_black(), 0);
+    set_screen_bg(lv_scr_act(), light);
     lv_obj_set_style_bg_color(s_ha_btn,
         light ? lv_color_hex(0x2C3440) : lv_color_hex(0x5E5E6E), 0);
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
