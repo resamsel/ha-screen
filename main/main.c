@@ -533,12 +533,13 @@ static void clock_tick(lv_timer_t *t)
 
 /* clock_size small/medium/large = 22/48/72 px digits, smaller (72, 48, 36, 22) while the
  * time doesn't fit its block */
-/* digits-only clock fonts (tools/make_fonts.py), ascending */
+/* clock fonts, ascending: the text fonts below 24 px, then digits-only fonts (tools/make_fonts.py) */
 static const lv_font_t *const CLOCK_FONTS[] = {
+    &lv_font_latin_12, &lv_font_latin_14, &lv_font_latin_16, &lv_font_latin_22,   /* small steps */
     &lv_font_clock_24, &lv_font_clock_28, &lv_font_clock_32, &lv_font_clock_36, &lv_font_clock_40,
     &lv_font_clock_44, &lv_font_clock_48, &lv_font_clock_56, &lv_font_clock_64, &lv_font_clock_72,
 };
-static const uint8_t CLOCK_PX[] = { 24, 28, 32, 36, 40, 44, 48, 56, 64, 72 };
+static const uint8_t CLOCK_PX[] = { 12, 14, 16, 22, 24, 28, 32, 36, 40, 44, 48, 56, 64, 72 };
 #define CLOCK_N (int)(sizeof(CLOCK_PX) / sizeof(CLOCK_PX[0]))
 
 /* seconds / AM-PM beside the time, scaled with it */
