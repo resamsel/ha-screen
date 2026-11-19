@@ -24,6 +24,12 @@
 /* Backlight brightness, shown and set by the slider (uses the entity's min/max) */
 #define HA_BRIGHTNESS_ENTITY "input_number.dev_brightness"
 
+/* Dashboard that defines the main-screen pages: each section of this view is one page
+ * (tiles = value rows, a line-graph sensor card = graph page). Re-read every interval. */
+#define HA_DASHBOARD          "esp32-c6-dev"
+#define HA_VIEW               "main"
+#define HA_LAYOUT_INTERVAL_MS 60000
+
 /* Main screen pages, switched by dragging left or right. Each page has one row per floor,
  * top to bottom, all sharing the row names below. */
 #define HA_SENSOR_PAGES  2      /* temperature, humidity; the graph pages come after */

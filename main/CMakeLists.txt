@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "ha_client.c" "bg_dark.c" "bg_light.c" "layout.c"
+idf_component_register(SRCS "main.c" "ha_client.c" "bg_dark.c" "bg_light.c" "layout.c" "layout_store.c" "dash_fetch.c"
                     INCLUDE_DIRS ".")
 
 # Secrets come from environment variables at build time (see gen_secrets.cmake)
