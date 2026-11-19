@@ -32,6 +32,7 @@ static const char *TAG = "ha";
 #define SETBRI_BIT  BIT2
 #define WAKE_BIT    BIT3  /* Wi-Fi just came up: check HA right away */
 #define REFRESH_BIT BIT4  /* user asked for a refresh */
+#define PRESS_BIT   BIT5  /* a dashboard button was tapped */
 
 static volatile float s_set_value;
 
@@ -47,6 +48,11 @@ static bool s_force_report;
 static ha_layout_cb_t s_layout_cb;
 void ha_client_set_layout_cb(ha_layout_cb_t cb) { s_layout_cb = cb; }
 static ha_busy_cb_t s_busy_cb;
+static ha_button_cb_t s_button_cb;
+static ha_press_cb_t s_press_cb;
+void ha_client_set_button_cb(ha_button_cb_t cb) { s_button_cb = cb; }
+void ha_client_set_press_cb(ha_press_cb_t cb) { s_press_cb = cb; }
+static volatile int s_press_page = -1, s_press_row = -1;   /* last tapped button */
 void ha_client_set_busy_cb(ha_busy_cb_t cb) { s_busy_cb = cb; }
 static ha_layout_t s_layout;              /* current layout, used only by the network task */
 static uint32_t s_layout_hash;
@@ -267,6 +273,7 @@ static bool json_num(const char *json, const char *key, float *out)
 
 static float read_entity(const layout_item_t *it, char text[24], char unit[8], char name[32]);
 static void utf8_trim(char *s);
+static void fetch_button(int pg, int row);
 
 static bool fetch_state(void)
 {
@@ -301,6 +308,10 @@ static bool fetch_state(void)
     }
 
     for (int pg = 0; pg < s_layout.count; pg++) {
+        if (s_layout.pages[pg].kind == LAYOUT_BUTTONS) {
+            for (int i = 0; i < s_layout.pages[pg].count; i++) fetch_button(pg, i);
+            continue;
+        }
         if (s_layout.pages[pg].kind != LAYOUT_VALUES) continue;
         for (int i = 0; i < s_layout.pages[pg].count; i++) {
             const layout_item_t *it = &s_layout.pages[pg].items[i];
@@ -391,9 +402,54 @@ static void fetch_graph(int pg)
     if (s_graph_cb) s_graph_cb(pg, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, page->hours, zero_based);
 }
 
-/* An entity is usable unless HA says it doesn't exist or its state can never be a number.
- * unavailable/unknown keep their row ("--"); network errors keep it too. */
-static bool entity_usable(const char *entity, void *ctx)
+static bool is_domain(const char *entity, const char *domain)
+{
+    size_t n = strlen(domain);
+    return !strncmp(entity, domain, n) && entity[n] == '.';
+}
+
+/* Button state and display name */
+static void fetch_button(int pg, int row)
+{
+    static resp_t r;
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    char path[96], state[24] = "", name[32];
+    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    snprintf(path, sizeof(path), "/api/states/%s", it->entity);
+    ha_btn_state_t bs = HA_BTN_UNAVAILABLE;
+    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+        if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+        json_str(r.buf, "\"state\":\"", state, sizeof(state));
+        if (!strcmp(state, "unavailable")) bs = HA_BTN_UNAVAILABLE;
+        else if (is_domain(it->entity, "script")) bs = HA_BTN_SCRIPT;
+        else if (is_domain(it->entity, "scene")) bs = HA_BTN_SCENE;
+        else if (!strcmp(state, "on")) bs = HA_BTN_ON;
+        else if (!strcmp(state, "off")) bs = HA_BTN_OFF;
+    }
+    if (s_button_cb) s_button_cb(pg, row, bs, name);
+}
+
+/* Toggle / run / activate the tapped button's entity */
+static bool press_button(int pg, int row)
+{
+    if (pg < 0 || pg >= s_layout.count || s_layout.pages[pg].kind != LAYOUT_BUTTONS ||
+        row < 0 || row >= s_layout.pages[pg].count) return false;
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    if (it->action != LAYOUT_ACT_TOGGLE) { ESP_LOGW(TAG, "%s: tap action not supported", it->entity); return false; }
+    const char *svc = is_domain(it->entity, "script") ? "/api/services/script/turn_on"
+                    : is_domain(it->entity, "scene")  ? "/api/services/scene/turn_on"
+                    : "/api/services/homeassistant/toggle";
+    char body[96];
+    snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", it->entity);
+    ESP_LOGI(TAG, "press %s -> %s", it->entity, svc);
+    int st = ha_request(HTTP_METHOD_POST, svc, body, NULL);
+    return st >= 200 && st < 300;
+}
+
+/* Value/graph entities must be numeric (or unavailable/unknown); button entities must be
+ * on/off (or unavailable/unknown), or a script or scene. Missing entities are dropped;
+ * network errors keep the entity. */
+static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
 {
     (void)ctx;
     static resp_t r;
@@ -402,9 +458,16 @@ static bool entity_usable(const char *entity, void *ctx)
     int st = ha_request(HTTP_METHOD_GET, path, NULL, &r);
     if (st == 404) { ESP_LOGW(TAG, "layout: %s does not exist, skipped", entity); return false; }
     if (st != 200 || !json_str(r.buf, "\"state\":\"", state, sizeof(state))) return true;
+    if (!strcmp(state, "unavailable") || !strcmp(state, "unknown")) return true;
+    if (kind == LAYOUT_BUTTONS) {
+        if (is_domain(entity, "script") || is_domain(entity, "scene") ||
+            !strcmp(state, "on") || !strcmp(state, "off")) return true;
+        ESP_LOGW(TAG, "layout: %s can't be switched ('%s'), skipped", entity, state);
+        return false;
+    }
     char *end;
     strtof(state, &end);
-    if (end != state || !strcmp(state, "unavailable") || !strcmp(state, "unknown")) return true;
+    if (end != state) return true;
     ESP_LOGW(TAG, "layout: %s is not numeric ('%s'), skipped", entity, state);
     return false;
 }
@@ -493,10 +556,10 @@ static void ha_task(void *arg)
     for (;;) {
         xEventGroupWaitBits(s_events, WIFI_UP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
         /* wait for a tap, or poll the state every HA_POLL_INTERVAL_MS */
-        EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
+        EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT | PRESS_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
         s_err[0] = 0;
         if (s_busy_cb) s_busy_cb(true);
-        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT);
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
         if (refresh || (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)))) {
@@ -523,6 +586,12 @@ static void ha_task(void *arg)
             ESP_LOGI(TAG, "toggle %s", HA_THEME_ENTITY);
             int st = ha_request(HTTP_METHOD_POST, path, body, NULL);
             ok &= st >= 200 && st < 300;
+        }
+        if (b & PRESS_BIT) {
+            int pg = s_press_page, row = s_press_row;
+            bool pok = press_button(pg, row);
+            if (s_press_cb) s_press_cb(pg, row, pok);
+            vTaskDelay(pdMS_TO_TICKS(300)); /* let HA switch before the state is re-read */
         }
         if (updated) {
             vTaskDelay(pdMS_TO_TICKS(300)); /* give HA a moment to update the state */
@@ -566,6 +635,13 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
     ESP_ERROR_CHECK(esp_wifi_start());
 
     xTaskCreate(ha_task, "ha", 8192, NULL, 3, NULL);   /* also rebuilds the UI: 8 pages measured ~3.7 KB peak */
+}
+
+void ha_client_press(int page, int row)
+{
+    s_press_page = page;
+    s_press_row = row;
+    if (s_events) xEventGroupSetBits(s_events, PRESS_BIT);
 }
 
 void ha_client_toggle(void)

@@ -25,6 +25,16 @@ typedef void (*ha_done_cb_t)(bool ok);
 typedef void (*ha_layout_cb_t)(const ha_layout_t *layout);
 void ha_client_set_layout_cb(ha_layout_cb_t cb);  /* call before ha_client_start */
 
+/* Button page row: state for display; name = card name or friendly_name */
+typedef enum { HA_BTN_UNAVAILABLE, HA_BTN_OFF, HA_BTN_ON, HA_BTN_SCRIPT, HA_BTN_SCENE } ha_btn_state_t;
+typedef void (*ha_button_cb_t)(int page, int row, ha_btn_state_t state, const char *name);
+void ha_client_set_button_cb(ha_button_cb_t cb);  /* call before ha_client_start */
+
+/* Tap on a button: toggle / run / activate its entity. The result comes back as press_cb. */
+typedef void (*ha_press_cb_t)(int page, int row, bool ok);
+void ha_client_set_press_cb(ha_press_cb_t cb);    /* call before ha_client_start */
+void ha_client_press(int page, int row);
+
 /* true while the network task talks to HA (a poll, a tap, the dashboard check), then false */
 typedef void (*ha_busy_cb_t)(bool busy);
 void ha_client_set_busy_cb(ha_busy_cb_t cb);      /* call before ha_client_start */

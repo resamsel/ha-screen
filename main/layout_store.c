@@ -4,7 +4,7 @@
 #include "esp_log.h"
 
 #define NS  "layout"
-#define KEY "v2"   /* bump when ha_layout_t changes */
+#define KEY "v3"   /* bump when ha_layout_t changes */
 
 bool layout_store_load(ha_layout_t *out)
 {
@@ -24,7 +24,10 @@ void layout_store_save(const ha_layout_t *l)
 {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
-    if (nvs_set_blob(h, KEY, l, sizeof(*l)) != ESP_OK || nvs_commit(h) != ESP_OK)
-        ESP_LOGW("layout", "could not save layout to NVS");
+    nvs_erase_key(h, "v1");   /* older layout formats: free their space */
+    nvs_erase_key(h, "v2");
+    esp_err_t err = nvs_set_blob(h, KEY, l, sizeof(*l));
+    if (err == ESP_OK) err = nvs_commit(h);
+    if (err != ESP_OK) ESP_LOGW("layout", "could not save layout to NVS (%u bytes): %s", (unsigned)sizeof(*l), esp_err_to_name(err));
     nvs_close(h);
 }

@@ -71,6 +71,8 @@ static void ha_toggle_cb(lv_event_t *e);
 static void set_busy(bool busy);
 static void show_status(ha_state_t state);
 static void ha_busy(bool busy);
+static void ha_button_changed(int page, int row, ha_btn_state_t state, const char *name);
+static void ha_button_pressed(int page, int row, bool ok);
 static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
@@ -175,6 +177,8 @@ void app_main(void)
     ha_client_set_landscape_cb(ha_landscape_changed);
     ha_client_set_layout_cb(ha_layout_changed);
     ha_client_set_busy_cb(ha_busy);
+    ha_client_set_button_cb(ha_button_changed);
+    ha_client_set_press_cb(ha_button_pressed);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -320,6 +324,163 @@ static void place_value(int pg, int row)
 }
 
 /* Sensor text and page dot colours for the current theme. LVGL lock must be held. */
+/* ---- Button pages ---- */
+static lv_obj_t *s_btn[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_btn_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_btn_state[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static ha_btn_state_t s_btn_st[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static bool s_btn_pending[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];   /* tapped, waiting for HA */
+#define BTN_ON_COLOR 0xFFC107   /* HA's amber for "on" */
+#define BTN_OPA      LV_OPA_60 /* buttons are 40 % transparent */
+
+static void btn_pulse_cb(void *obj, int32_t v) { lv_obj_set_style_bg_opa(obj, (lv_opa_t)v, 0); }
+
+/* Colours and text for one button from its state; pending buttons pulse */
+static void btn_paint(int pg, int i)
+{
+    lv_obj_t *b = s_btn[pg][i];
+    if (!b) return;
+    ha_btn_state_t st = s_btn_st[pg][i];
+    lv_color_t text = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
+    lv_color_t bg = lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47);
+    const char *label = "--";
+    switch (st) {
+    case HA_BTN_ON:     bg = lv_color_hex(BTN_ON_COLOR); text = lv_color_hex(0x1C1C1E); label = "On"; break;
+    case HA_BTN_OFF:    label = "Off"; break;
+    case HA_BTN_SCRIPT: label = "Run"; break;
+    case HA_BTN_SCENE:  label = "Activate"; break;
+    default: break;
+    }
+    lv_obj_set_style_bg_color(b, bg, 0);
+    lv_obj_set_style_opa(b, st == HA_BTN_UNAVAILABLE ? LV_OPA_50 : LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_btn_name[pg][i], text, 0);
+    lv_obj_set_style_text_color(s_btn_state[pg][i], text, 0);
+    lv_label_set_text(s_btn_state[pg][i], label);
+    bool running = lv_anim_get(b, btn_pulse_cb) != NULL;
+    if (s_btn_pending[pg][i] && !running) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, b);
+        lv_anim_set_exec_cb(&a, btn_pulse_cb);
+        lv_anim_set_values(&a, BTN_OPA, LV_OPA_20);
+        lv_anim_set_time(&a, 400);
+        lv_anim_set_playback_time(&a, 400);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(&a);
+    } else if (!s_btn_pending[pg][i] && running) {
+        lv_anim_del(b, btn_pulse_cb);
+        lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
+    }
+}
+
+/* Short colour flash (scripts/scenes, or red when HA refused a tap) */
+static void btn_flash_end(lv_timer_t *t)
+{
+    int idx = (int)(intptr_t)t->user_data;
+    btn_paint(idx / LAYOUT_MAX_ROWS, idx % LAYOUT_MAX_ROWS);
+    lv_timer_del(t);
+}
+
+static void btn_flash(int pg, int i, uint32_t color)
+{
+    if (!s_btn[pg][i]) return;
+    lv_obj_set_style_bg_color(s_btn[pg][i], lv_color_hex(color), 0);
+    lv_timer_t *t = lv_timer_create(btn_flash_end, 400, (void *)(intptr_t)(pg * LAYOUT_MAX_ROWS + i));
+    lv_timer_set_repeat_count(t, 1);
+}
+
+static void create_button_page(lv_obj_t *page, int pg)
+{
+    const int n = ROWS(pg), gap = 8, m = 8;
+    const lv_coord_t top = STATUS_H + 4, h_all = SCR_H - DOTS_H - top - 4;
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *b = lv_obj_create(page);
+        lv_obj_remove_style_all(b);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(b, 14, 0);
+        lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
+        if (s_landscape) {   /* side by side */
+            lv_coord_t w = (SCR_W - 2 * m - (n - 1) * gap) / n;
+            lv_obj_set_size(b, w, h_all);
+            lv_obj_set_pos(b, m + i * (w + gap), top);
+        } else {             /* stacked */
+            lv_coord_t h = (h_all - (n - 1) * gap) / n;
+            lv_obj_set_size(b, SCR_W - 2 * m, h);
+            lv_obj_set_pos(b, m, top + i * (h + gap));
+        }
+        lv_obj_update_layout(b);
+        lv_coord_t inner = lv_obj_get_width(b) - 16;
+        const layout_item_t *it = &s_layout.pages[pg].items[i];
+        s_btn_name[pg][i] = lv_label_create(b);
+        lv_obj_set_style_text_font(s_btn_name[pg][i], &lv_font_latin_16, 0);
+        lv_label_set_long_mode(s_btn_name[pg][i], LV_LABEL_LONG_DOT);
+        lv_obj_set_width(s_btn_name[pg][i], inner);
+        lv_obj_set_style_text_align(s_btn_name[pg][i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_btn_name[pg][i], it->name[0] ? it->name : it->entity);
+        lv_obj_align(s_btn_name[pg][i], LV_ALIGN_CENTER, 0, -10);
+        s_btn_state[pg][i] = lv_label_create(b);
+        lv_obj_set_style_text_font(s_btn_state[pg][i], &lv_font_latin_14, 0);
+        lv_obj_set_style_text_opa(s_btn_state[pg][i], LV_OPA_80, 0);
+        lv_obj_align(s_btn_state[pg][i], LV_ALIGN_CENTER, 0, 12);
+        s_btn[pg][i] = b;
+        btn_paint(pg, i);
+    }
+}
+
+/* A tap on a button page: toggle at once (optimistic), HA confirms on the next poll */
+static bool button_tap(lv_point_t p)
+{
+    int pg = s_page;
+    if (pg >= PAGE_COUNT || s_layout.pages[pg].kind != LAYOUT_BUTTONS) return false;
+    for (int i = 0; i < ROWS(pg); i++) {
+        lv_area_t a;
+        if (!s_btn[pg][i]) continue;
+        lv_obj_get_coords(s_btn[pg][i], &a);
+        if (p.x < a.x1 || p.x > a.x2 || p.y < a.y1 || p.y > a.y2) continue;
+        ha_btn_state_t st = s_btn_st[pg][i];
+        if (st == HA_BTN_UNAVAILABLE || s_layout.pages[pg].items[i].action != LAYOUT_ACT_TOGGLE) return true;
+        if (st == HA_BTN_ON || st == HA_BTN_OFF) {
+            s_btn_st[pg][i] = st == HA_BTN_ON ? HA_BTN_OFF : HA_BTN_ON;
+            s_btn_pending[pg][i] = true;
+            btn_paint(pg, i);
+        } else {
+            btn_flash(pg, i, BTN_ON_COLOR);
+        }
+        ha_client_press(pg, i);
+        return true;
+    }
+    return true;   /* taps between buttons do nothing */
+}
+
+/* Network task: state of one button (a poll confirms or corrects a pending tap) */
+static void ha_button_changed(int page, int row, ha_btn_state_t state, const char *name)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page >= 0 && page < PAGE_COUNT && s_layout.pages[page].kind == LAYOUT_BUTTONS && row >= 0 &&
+        row < ROWS(page) && s_btn[page][row]) {
+        s_btn_st[page][row] = state;
+        s_btn_pending[page][row] = false;
+        if (strcmp(lv_label_get_text(s_btn_name[page][row]), name)) lv_label_set_text(s_btn_name[page][row], name);
+        btn_paint(page, row);
+    }
+    lvgl_port_unlock();
+}
+
+/* Network task: HA's answer to a tap; a refused toggle flips back and flashes red */
+static void ha_button_pressed(int page, int row, bool ok)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (!ok && page >= 0 && page < PAGE_COUNT && s_layout.pages[page].kind == LAYOUT_BUTTONS && row >= 0 &&
+        row < ROWS(page) && s_btn[page][row]) {
+        ha_btn_state_t st = s_btn_st[page][row];
+        if (s_btn_pending[page][row]) s_btn_st[page][row] = st == HA_BTN_ON ? HA_BTN_OFF : HA_BTN_ON;
+        s_btn_pending[page][row] = false;
+        btn_paint(page, row);
+        btn_flash(page, row, 0xE74C3C);
+    }
+    lvgl_port_unlock();
+}
+
 static void apply_temp_theme(bool light)
 {
     lv_color_t fg = light ? lv_color_hex(0x1C1C1E) : lv_color_white();
@@ -340,6 +501,8 @@ static void apply_temp_theme(bool light)
         lv_chart_set_series_color(s_chart, s_chart_ser, lv_color_hex(light ? 0x2A8BD0 : 0x0E6FA8));   /* like HA's sensor card */
     }
     s_gi = 0;
+    for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++) btn_paint(pg, i);
     if (s_page_title) lv_obj_set_style_text_color(s_page_title, fg, 0);
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
         if (!s_dot[pg]) continue;
@@ -595,6 +758,10 @@ static void create_pages(lv_obj_t *scr)
             create_graph_page(make_page(pg));
             continue;
         }
+        if (s_layout.pages[pg].kind == LAYOUT_BUTTONS) {
+            create_button_page(make_page(pg), pg);
+            continue;
+        }
         lv_obj_t *page = make_page(pg);
         for (int i = 0; i < ROWS(pg); i++) {
             const layout_item_t *it = &s_layout.pages[pg].items[i];
@@ -798,6 +965,7 @@ static void value_select(int g)
 /* A tap on the main screen: select the value under the finger, or none */
 static void value_tap(lv_point_t p)
 {
+    if (button_tap(p)) return;
     for (int g = 0; g < GROUPS; g++) {
         if (group_page(g) != s_page) continue;
         lv_obj_t *o[3];
@@ -996,6 +1164,11 @@ static void create_ui(void)
     memset(s_g_unit_, 0, sizeof(s_g_unit_));
     memset(s_g_name_, 0, sizeof(s_g_name_));
     memset(s_chart_, 0, sizeof(s_chart_));
+    memset(s_btn, 0, sizeof(s_btn));
+    memset(s_btn_name, 0, sizeof(s_btn_name));
+    memset(s_btn_state, 0, sizeof(s_btn_state));
+    memset(s_btn_pending, 0, sizeof(s_btn_pending));
+    memset(s_btn_st, 0, sizeof(s_btn_st));   /* "--" until the first poll */
     s_err_box = s_err_label = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
