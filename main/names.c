@@ -1,5 +1,6 @@
 #include "names.h"
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #define MAX_WORDS 12
@@ -69,4 +70,15 @@ void names_abbreviate(char names[][32], int n, int max_w, int (*width)(const cha
     for (int i = 1; i < n; i++) all_equal &= !strcmp(out[0], out[i]);
     if (all_equal) return;
     for (int i = 0; i < n; i++) strcpy(names[i], out[i]);
+}
+
+void state_text(const char *raw, char *out, int n)
+{
+    if (!raw[0]) { snprintf(out, n, "--"); return; }
+    int i = 0;
+    for (; raw[i] && i < n - 1; i++) out[i] = raw[i] == '_' ? ' ' : raw[i];
+    /* don't end in the middle of a UTF-8 sequence */
+    if (raw[i]) while (i > 0 && ((unsigned char)raw[i] & 0xC0) == 0x80) i--;
+    out[i] = 0;
+    if (out[0] >= 'a' && out[0] <= 'z') out[0] -= 'a' - 'A';
 }

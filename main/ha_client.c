@@ -19,6 +19,7 @@ static void add_error(const char *fmt, ...);
 #include "ha_client.h"
 #include "dash_fetch.h"
 #include "layout_store.h"
+#include "names.h"
 
 #include "config.h"
 
@@ -349,10 +350,17 @@ static float read_entity(const layout_item_t *it, char text[24], char unit[8], c
     if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
         if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, 32)) utf8_trim(name);
         json_str(r.buf, "\"unit_of_measurement\":\"", unit, 8);
-        if (json_num(r.buf, "\"state\":\"", &v))
+        char st[48];
+        if (json_num(r.buf, "\"state\":\"", &v)) {
             snprintf(text, 24, "%.*f", fabsf(v) < 100 ? 1 : 0, (double)v);   /* 1 decimal below 100 */
-        else
+        } else {
             v = NAN;
+            /* text states ("not_charging" -> "Not charging"); no unit for them */
+            if (json_str(r.buf, "\"state\":\"", st, sizeof(st)) && strcmp(st, "unavailable") && strcmp(st, "unknown")) {
+                state_text(st, text, 24);
+                unit[0] = 0;
+            }
+        }
     }
     return v;
 }
@@ -446,7 +454,8 @@ static bool press_button(int pg, int row)
     return st >= 200 && st < 300;
 }
 
-/* Value/graph entities must be numeric (or unavailable/unknown); button entities must be
+/* Value entities may be anything (text states are shown as text); graph entities must be
+ * numeric (or unavailable/unknown); button entities must be
  * on/off (or unavailable/unknown), or a script or scene. Missing entities are dropped;
  * network errors keep the entity. */
 static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
@@ -465,10 +474,11 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
         ESP_LOGW(TAG, "layout: %s can't be switched ('%s'), skipped", entity, state);
         return false;
     }
+    if (kind == LAYOUT_VALUES) return true;   /* text states are shown as text */
     char *end;
     strtof(state, &end);
     if (end != state) return true;
-    ESP_LOGW(TAG, "layout: %s is not numeric ('%s'), skipped", entity, state);
+    ESP_LOGW(TAG, "layout: %s is not numeric ('%s'), no graph", entity, state);
     return false;
 }
 

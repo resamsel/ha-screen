@@ -322,6 +322,19 @@ static void page_names_update(int pg)
     s_gi = saved_gi;
 }
 
+/* A value plus its unit wider than max_w (long text states) ends in "..." on one line */
+static void fit_value(lv_obj_t *val, lv_obj_t *unit, lv_coord_t max_w)
+{
+    lv_point_t vs, us;
+    lv_txt_get_size(&vs, lv_label_get_text(val), VFONT, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_txt_get_size(&us, lv_label_get_text(unit), UFONT, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_coord_t room = max_w - (us.x ? us.x + 3 : 0);
+    bool fits = vs.x <= room;
+    lv_label_set_long_mode(val, fits ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
+    lv_obj_set_width(val, fits ? LV_SIZE_CONTENT : LV_MAX(room, 20));
+    lv_obj_set_height(val, fits ? LV_SIZE_CONTENT : ((const lv_font_t *)VFONT)->line_height);
+}
+
 /* Value centred on cx with the unit hanging off its right side, same baseline */
 static void page_relayout(int pg);
 /* left = false: value centred on x; left = true: value's left edge at x */
@@ -566,6 +579,7 @@ static void ha_sensor_changed(int page, int row, const char *value, const char *
     if (page >= 0 && page < PAGE_COUNT && !IS_GRAPH(page) && row >= 0 && row < ROWS(page) && s_val[page][row]) {
         lv_label_set_text(s_val[page][row], value);
         lv_label_set_text(s_unit[page][row], unit);
+        fit_value(s_val[page][row], s_unit[page][row], name_max_w(page));
         if (strncmp(s_full[page][row], name, 31)) {
             snprintf(s_full[page][row], sizeof(s_full[page][row]), "%s", name);
             page_names_update(page);

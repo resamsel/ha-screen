@@ -65,8 +65,29 @@ static void test_single_and_dedupe_spaces(void)
     assert(!strcmp(n[0], "FRITZ!Box 7590 AX Download"));
 }
 
+static void test_state_text(void)
+{
+    char o[24];
+    state_text("not_charging", o, sizeof(o));
+    assert(!strcmp(o, "Not charging"));
+    state_text("middle", o, sizeof(o));
+    assert(!strcmp(o, "Middle"));
+    state_text("on", o, sizeof(o));
+    assert(!strcmp(o, "On"));
+    state_text("", o, sizeof(o));
+    assert(!strcmp(o, "--"));
+    state_text("a_very_long_state_value_that_does_not_fit", o, sizeof(o));
+    assert(strlen(o) == sizeof(o) - 1);
+    state_text("\xc3\xa4_x", o, sizeof(o));   /* non-ASCII first letter stays as is */
+    assert(!strcmp(o, "\xc3\xa4 x"));
+    char o4[4];
+    state_text("ab\xc3\xa4", o4, sizeof(o4));   /* "ä" would be cut in half: dropped */
+    assert(!strcmp(o4, "Ab"));
+}
+
 int main(void)
 {
+    test_state_text();
     test_fits_unchanged();
     test_common_prefix();
     test_common_suffix_and_prefix();

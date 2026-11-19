@@ -6,3 +6,7 @@
  * left alone when that would empty one of them or make them all equal. Anything still too
  * wide is left for the label's own ellipsis. */
 void names_abbreviate(char names[][32], int n, int max_w, int (*width)(const char *s, void *ctx), void *ctx);
+
+/* Raw HA state as display text: underscores to spaces, first letter upper case
+ * ("not_charging" -> "Not charging"); "" -> "--". Cut to fit n (UTF-8 is not split). */
+void state_text(const char *raw, char *out, int n);
