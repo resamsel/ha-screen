@@ -3,16 +3,20 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define LAYOUT_MAX_PAGES 8
+#define LAYOUT_MAX_PAGES 12
 #define LAYOUT_MAX_ROWS  4
 #define LAYOUT_HOURS_DEFAULT 24
 #define LAYOUT_HOURS_MAX     168
 
-typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH } layout_kind_t;
+typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS } layout_kind_t;
+
+/* what a tap on a button does: toggle/run/activate, or nothing (other tap_action types) */
+typedef enum { LAYOUT_ACT_TOGGLE, LAYOUT_ACT_NONE } layout_action_t;
 
 typedef struct {
     char entity[64];
     char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
+    uint8_t action;         /* layout_action_t, button pages */
     char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
                              * entity, text:<text>; resolved by the network task */
 } layout_item_t;
@@ -47,4 +51,4 @@ bool layout_name_template(const layout_item_t *it, char *out, int n);
 bool layout_sanitize(ha_layout_t *l);
 
 /* Removes items whose entity keep() rejects, and pages left empty. Returns the page count. */
-int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, void *ctx), void *ctx);
+int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t kind, void *ctx), void *ctx);

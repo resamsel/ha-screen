@@ -30,6 +30,7 @@ static int parse_sections(const char *sections, ha_layout_t *l)
 #define TILE(e) "{\"type\":\"tile\",\"entity\":\"" e "\"}"
 #define HEAD(t) "{\"type\":\"heading\",\"heading\":\"" t "\"}"
 #define GRAPH(e) "{\"type\":\"sensor\",\"graph\":\"line\",\"entity\":\"" e "\"}"
+#define BTN(e) "{\"type\":\"button\",\"entity\":\"" e "\"}"
 #define SEC(...) "{\"type\":\"grid\",\"cards\":[" __VA_ARGS__ "]}"
 
 static void test_fixture(void)
@@ -135,9 +136,9 @@ static void test_limits(void)
     ha_layout_t l;
     const char *s = SEC(TILE("sensor.a"));
     char buf[4096] = "[";
-    for (int i = 0; i < 10; i++) { strcat(buf, s); if (i < 9) strcat(buf, ","); }
+    for (int i = 0; i < 14; i++) { strcat(buf, s); if (i < 13) strcat(buf, ","); }
     strcat(buf, "]");
-    assert(parse_sections(buf, &l) == 8);
+    assert(parse_sections(buf, &l) == 12);   /* 14 sections, limit 12 */
     assert(parse_sections("[" SEC(TILE("sensor.1") "," TILE("sensor.2") "," TILE("sensor.3") "," TILE("sensor.4") ","
                                   TILE("sensor.5") "," TILE("sensor.6")) "]", &l) == 1);
     assert(l.pages[0].count == 4);
@@ -164,9 +165,10 @@ static void test_hash(void)
     assert(layout_hash(&a) != layout_hash(&b));
 }
 
-static bool keep_not_x(const char *entity, void *ctx)
+static bool keep_not_x(const char *entity, layout_kind_t kind, void *ctx)
 {
     (void)ctx;
+    (void)kind;
     return strcmp(entity, "sensor.x") != 0;
 }
 
@@ -202,8 +204,48 @@ static void test_sanitize(void)
     assert(!layout_sanitize(&l));
 }
 
+static void test_buttons(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC(HEAD("Knöpfe") "," BTN("switch.a") "," TILE("sensor.t") ","
+                                  "{\"type\":\"button\",\"entity\":\"script.s\",\"tap_action\":{\"action\":\"more-info\"}}" ","
+                                  "{\"type\":\"button\",\"entity\":\"scene.x\",\"tap_action\":{\"action\":\"toggle\"}}" ","
+                                  "{\"type\":\"button\"}") "]", &l) == 1);
+    assert(l.pages[0].kind == LAYOUT_BUTTONS);
+    assert(l.pages[0].count == 3);                       /* tile and entity-less button skipped */
+    assert(!strcmp(l.pages[0].items[0].entity, "switch.a"));
+    assert(l.pages[0].items[0].action == LAYOUT_ACT_TOGGLE);
+    assert(l.pages[0].items[1].action == LAYOUT_ACT_NONE);
+    assert(l.pages[0].items[2].action == LAYOUT_ACT_TOGGLE);
+    /* a tile section with a button: button skipped */
+    assert(parse_sections("[" SEC(TILE("sensor.t") "," BTN("switch.a")) "]", &l) == 1);
+    assert(l.pages[0].kind == LAYOUT_VALUES && l.pages[0].count == 1);
+    /* sanitize keeps button pages */
+    parse_sections("[" SEC(BTN("switch.a")) "]", &l);
+    uint32_t h = layout_hash(&l);
+    assert(layout_sanitize(&l) && layout_hash(&l) == h && l.pages[0].kind == LAYOUT_BUTTONS);
+}
+
+static layout_kind_t s_seen_kind;
+static bool keep_record(const char *entity, layout_kind_t kind, void *ctx)
+{
+    (void)entity; (void)ctx;
+    s_seen_kind = kind;
+    return true;
+}
+
+static void test_filter_kind(void)
+{
+    ha_layout_t l;
+    parse_sections("[" SEC(BTN("switch.a")) "]", &l);
+    layout_filter(&l, keep_record, NULL);
+    assert(s_seen_kind == LAYOUT_BUTTONS);
+}
+
 int main(void)
 {
+    test_buttons();
+    test_filter_kind();
     test_sanitize();
     test_fixture();
     test_name();

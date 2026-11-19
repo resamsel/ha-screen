@@ -30,6 +30,12 @@ static bool is_graph(const cJSON *card)
     return type && graph && !strcmp(type, "sensor") && !strcmp(graph, "line");
 }
 
+static bool is_button(const cJSON *card)
+{
+    const char *type = str(card, "type");
+    return type && !strcmp(type, "button");
+}
+
 static bool is_tile(const cJSON *card)
 {
     const char *type = str(card, "type");
@@ -101,8 +107,8 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             if (h && !pg->title[0]) copy(pg->title, sizeof(pg->title), h);
             continue;
         }
-        bool graph = is_graph(card), tile = is_tile(card);
-        if (!graph && !tile) {
+        bool graph = is_graph(card), tile = is_tile(card), button = is_button(card);
+        if (!graph && !tile && !button) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
             continue;
         }
@@ -111,7 +117,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             continue;
         }
         if (!kind_set) {
-            pg->kind = graph ? LAYOUT_GRAPH : LAYOUT_VALUES;
+            pg->kind = graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : LAYOUT_VALUES;
             kind_set = true;
         }
         if (pg->kind == LAYOUT_GRAPH) {
@@ -122,9 +128,18 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             const cJSON *h = cJSON_GetObjectItemCaseSensitive(card, "hours_to_show");
             int hours = cJSON_IsNumber(h) ? (int)h->valuedouble : 0;
             pg->hours = hours < 1 ? LAYOUT_HOURS_DEFAULT : hours > LAYOUT_HOURS_MAX ? LAYOUT_HOURS_MAX : hours;
+        } else if (pg->kind == LAYOUT_BUTTONS) {
+            if (!button) {
+                LOGW("section %d: only buttons on a button page, card skipped", idx);
+                continue;
+            }
+            if (pg->count == LAYOUT_MAX_ROWS) {
+                LOGW("section %d: more than %d buttons, extra skipped", idx, LAYOUT_MAX_ROWS);
+                continue;
+            }
         } else {
             if (!tile) {
-                LOGW("section %d: graph in a tile section skipped", idx);
+                LOGW("section %d: only tiles on a value page, card skipped", idx);
                 continue;
             }
             if (pg->count == LAYOUT_MAX_ROWS) {
@@ -132,7 +147,14 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
                 continue;
             }
         }
-        set_item(&pg->items[pg->count++], card);
+        layout_item_t *it = &pg->items[pg->count++];
+        set_item(it, card);
+        if (button) {
+            const cJSON *ta = cJSON_GetObjectItemCaseSensitive(card, "tap_action");
+            const char *act = cJSON_IsObject(ta) ? str(ta, "action") : NULL;
+            it->action = !act || !strcmp(act, "toggle") ? LAYOUT_ACT_TOGGLE : LAYOUT_ACT_NONE;
+            if (it->action == LAYOUT_ACT_NONE) LOGW("section %d: tap action '%s' not supported, button only shows state", idx, act);
+        }
     }
     return pg->count > 0;
 }
@@ -227,7 +249,7 @@ bool layout_sanitize(ha_layout_t *l)
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
         if (pg->kind != LAYOUT_GRAPH) {
-            pg->kind = LAYOUT_VALUES;
+            if (pg->kind != LAYOUT_BUTTONS) pg->kind = LAYOUT_VALUES;
             pg->hours = 0;                    /* unused; as layout_parse leaves it */
         } else if (pg->hours < 1) {
             pg->hours = LAYOUT_HOURS_DEFAULT;
@@ -239,20 +261,21 @@ bool layout_sanitize(ha_layout_t *l)
             pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
             pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
+            if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
         }
     }
     if (!ok) memset(l, 0, sizeof(*l));
     return ok;
 }
 
-int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, void *ctx), void *ctx)
+int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t kind, void *ctx), void *ctx)
 {
     int np = 0;
     for (int p = 0; p < l->count; p++) {
         layout_page_t pg = l->pages[p];
         int n = 0;
         for (int i = 0; i < pg.count; i++)
-            if (keep(pg.items[i].entity, ctx)) pg.items[n++] = pg.items[i];
+            if (keep(pg.items[i].entity, pg.kind, ctx)) pg.items[n++] = pg.items[i];
         for (int i = n; i < LAYOUT_MAX_ROWS; i++) memset(&pg.items[i], 0, sizeof(layout_item_t));
         pg.count = n;
         if (n) l->pages[np++] = pg;
