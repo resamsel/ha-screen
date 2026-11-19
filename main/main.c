@@ -508,21 +508,24 @@ static void ha_button_pressed(int page, int row, bool ok)
 static void apply_temp_theme(bool light)
 {
     lv_color_t fg = light ? lv_color_hex(0x1C1C1E) : lv_color_white();
-    lv_color_t sub = lv_color_hex(light ? 0x4A5058 : 0x9AA0A8);
+    /* name, value and unit colours of HA's sensor card (unit = name colour) */
+    lv_color_t sub = lv_color_hex(light ? 0x3B4A58 : 0xB1B8BE);   /* light: darker than HA for contrast */
+    lv_color_t val = lv_color_hex(light ? 0x2D4152 : 0xC7C7C7);
+    lv_color_t unit = sub;
     for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++) {
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++) {
             if (!s_val[pg][i]) continue;
             lv_obj_set_style_text_color(s_name[pg][i], sub, 0);
-            lv_obj_set_style_text_color(s_val[pg][i], fg, 0);
-            lv_obj_set_style_text_color(s_unit[pg][i], fg, 0);
+            lv_obj_set_style_text_color(s_val[pg][i], val, 0);
+            lv_obj_set_style_text_color(s_unit[pg][i], unit, 0);
         }
     }
     for (s_gi = 0; s_gi < GRAPHS; s_gi++) {
         if (!s_chart) continue;
         lv_obj_set_style_text_color(s_g_name, sub, 0);
-        lv_obj_set_style_text_color(s_g_val, fg, 0);
-        lv_obj_set_style_text_color(s_g_unit, fg, 0);
-        lv_chart_set_series_color(s_chart, s_chart_ser, lv_color_hex(light ? 0x2A8BD0 : 0x0E6FA8));   /* like HA's sensor card */
+        lv_obj_set_style_text_color(s_g_val, val, 0);
+        lv_obj_set_style_text_color(s_g_unit, unit, 0);
+        lv_chart_set_series_color(s_chart, s_chart_ser, lv_color_hex(light ? 0x2D8EC7 : 0x0E6FA8));   /* like HA's sensor card */
     }
     s_gi = 0;
     for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++)
