@@ -352,7 +352,7 @@ static void btn_paint(int pg, int i)
     default: break;
     }
     lv_obj_set_style_bg_color(b, bg, 0);
-    lv_obj_set_style_opa(b, st == HA_BTN_UNAVAILABLE ? LV_OPA_50 : LV_OPA_COVER, 0);
+    if (st == HA_BTN_UNAVAILABLE) text = lv_color_hex(s_light ? 0x7A808A : 0x8A8F98);   /* greyed text, opaque */
     lv_obj_set_style_text_color(s_btn_name[pg][i], text, 0);
     lv_obj_set_style_text_color(s_btn_state[pg][i], text, 0);
     lv_label_set_text(s_btn_state[pg][i], label);
@@ -420,7 +420,6 @@ static void create_button_page(lv_obj_t *page, int pg)
         lv_obj_align(s_btn_name[pg][i], LV_ALIGN_CENTER, 0, -10);
         s_btn_state[pg][i] = lv_label_create(b);
         lv_obj_set_style_text_font(s_btn_state[pg][i], &lv_font_latin_14, 0);
-        lv_obj_set_style_text_opa(s_btn_state[pg][i], LV_OPA_80, 0);
         lv_obj_align(s_btn_state[pg][i], LV_ALIGN_CENTER, 0, 12);
         s_btn[pg][i] = b;
         btn_paint(pg, i);
