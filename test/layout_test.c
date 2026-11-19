@@ -56,9 +56,36 @@ static void test_name(void)
 {
     ha_layout_t l;
     assert(parse_sections("[" SEC("{\"type\":\"tile\",\"entity\":\"sensor.a\",\"name\":{\"type\":\"device\"}}" ","
-                                  "{\"type\":\"tile\",\"entity\":\"sensor.b\",\"name\":\"Ping\"}") "]", &l) == 1);
+                                  "{\"type\":\"tile\",\"entity\":\"sensor.b\",\"name\":\"Ping\"}" ","
+                                  "{\"type\":\"tile\",\"entity\":\"sensor.c\",\"name\":[{\"type\":\"floor\"},{\"type\":\"text\",\"text\":\"x\"},{\"type\":\"entity\"},7]}" ","
+                                  "{\"type\":\"tile\",\"entity\":\"sensor.d\",\"name\":{\"type\":\"text\",\"text\":\"Hi\"}}") "]", &l) == 1);
     assert(!strcmp(l.pages[0].items[0].name, ""));
+    assert(!strcmp(l.pages[0].items[0].name_type, "device"));
     assert(!strcmp(l.pages[0].items[1].name, "Ping"));
+    assert(!strcmp(l.pages[0].items[1].name_type, ""));
+    assert(!strcmp(l.pages[0].items[2].name_type, "floor|text:x|entity"));
+    assert(!strcmp(l.pages[0].items[3].name, "Hi"));
+    assert(!strcmp(l.pages[0].items[3].name_type, ""));
+}
+
+static void test_name_template(void)
+{
+    layout_item_t it = { .entity = "sensor.a", .name_type = "floor" };
+    char t[1024];
+    assert(layout_name_template(&it, t, sizeof(t)));
+    assert(strstr(t, "floor_name('sensor.a')"));
+    strcpy(it.name_type, "area|device");
+    assert(layout_name_template(&it, t, sizeof(t)));
+    assert(strstr(t, "area_name('sensor.a')") && strstr(t, "device_attr('sensor.a', 'name')"));
+    strcpy(it.name_type, "entity");
+    assert(layout_name_template(&it, t, sizeof(t)));
+    assert(strstr(t, "friendly_name"));
+    strcpy(it.name_type, "text:Hallo");
+    assert(layout_name_template(&it, t, sizeof(t)) && strstr(t, "Hallo"));
+    strcpy(it.name_type, "bogus");
+    assert(!layout_name_template(&it, t, sizeof(t)));   /* nothing known: no template */
+    strcpy(it.name_type, "");
+    assert(!layout_name_template(&it, t, sizeof(t)));
 }
 
 static void test_hours(void)
@@ -178,6 +205,7 @@ int main(void)
     test_sanitize();
     test_fixture();
     test_name();
+    test_name_template();
     test_hours();
     test_skips_unknown();
     test_no_heading();

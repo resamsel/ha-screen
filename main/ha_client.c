@@ -264,6 +264,7 @@ static bool json_num(const char *json, const char *key, float *out)
 }
 
 static float read_entity(const layout_item_t *it, char text[24], char unit[8], char name[32]);
+static void utf8_trim(char *s);
 
 static bool fetch_state(void)
 {
@@ -333,7 +334,7 @@ static float read_entity(const layout_item_t *it, char text[24], char unit[8], c
     snprintf(name, 32, "%.31s", it->name[0] ? it->name : it->entity);
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
     if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
-        if (!it->name[0]) json_str(r.buf, "\"friendly_name\":\"", name, 32);
+        if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, 32)) utf8_trim(name);
         json_str(r.buf, "\"unit_of_measurement\":\"", unit, 8);
         if (json_num(r.buf, "\"state\":\"", &v))
             snprintf(text, 24, "%.*f", fabsf(v) < 100 ? 1 : 0, (double)v);   /* 1 decimal below 100 */
@@ -406,6 +407,41 @@ static bool entity_usable(const char *entity, void *ctx)
     return false;
 }
 
+/* Drop a UTF-8 sequence cut off at the end of s by truncation */
+static void utf8_trim(char *s)
+{
+    int n = strlen(s), i = n;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) i--;   /* continuation bytes */
+    if (i == 0) return;
+    unsigned char lead = s[i - 1];
+    int need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+    if (n - (i - 1) < need) s[i - 1] = 0;
+}
+
+/* Card names given as types (floor, device, entity, ...): rendered once per dashboard
+ * change with HA's template API. Empty or failed results fall back to friendly_name. */
+static void resolve_names(ha_layout_t *l)
+{
+    static resp_t r;
+    static char tpl[1024], body[1200];
+    for (int p = 0; p < l->count; p++) {
+        for (int i = 0; i < l->pages[p].count; i++) {
+            layout_item_t *it = &l->pages[p].items[i];
+            if (it->name[0] || !layout_name_template(it, tpl, sizeof(tpl))) continue;
+            int n = snprintf(body, sizeof(body), "{\"template\":\"");
+            for (const char *c = tpl; *c && n < (int)sizeof(body) - 4; c++) {
+                if (*c == '"' || *c == '\\') body[n++] = '\\';
+                body[n++] = *c;
+            }
+            snprintf(body + n, sizeof(body) - n, "\"}");
+            if (ha_request(HTTP_METHOD_POST, "/api/template", body, &r) != 200) continue;
+            snprintf(it->name, sizeof(it->name), "%.31s", r.buf);
+            utf8_trim(it->name);
+            ESP_LOGI(TAG, "name %s -> '%s'", it->entity, it->name);
+        }
+    }
+}
+
 static void use_layout(const ha_layout_t *l)
 {
     s_layout = *l;
@@ -426,6 +462,7 @@ static void refresh_layout(void)
     if (n && layout_hash(&l) == raw_hash && s_layout.count) return;
     uint32_t h = layout_hash(&l);
     if (n) n = layout_filter(&l, entity_usable, NULL);
+    if (n) resolve_names(&l);
     if (n) raw_hash = h;
     s_err[0] = 0;                         /* validation errors are not shown */
     if (!n) { ESP_LOGW(TAG, "dashboard has no usable pages, keeping the current layout"); return; }

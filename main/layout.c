@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L   /* strtok_r on the host build */
+#include <stdio.h>
 #include "layout.h"
 #include <string.h>
 #include "cJSON.h"
@@ -34,11 +36,47 @@ static bool is_tile(const cJSON *card)
     return type && !strcmp(type, "tile");
 }
 
+static bool known_part(const char *t)
+{
+    return !strcmp(t, "floor") || !strcmp(t, "area") || !strcmp(t, "device") || !strcmp(t, "entity");
+}
+
+/* One name part {"type":"floor"} / {"type":"text","text":"x"} appended to name_type */
+static void add_part(layout_item_t *it, const cJSON *part)
+{
+    const char *t = str(part, "type");
+    char buf[48];
+    if (!t) return;
+    if (!strcmp(t, "text")) {
+        const char *x = str(part, "text");
+        if (!x) return;
+        snprintf(buf, sizeof(buf), "text:%s", x);
+    } else if (known_part(t)) {
+        snprintf(buf, sizeof(buf), "%s", t);
+    } else {
+        LOGW("name type '%s' not supported, skipped", t);
+        return;
+    }
+    size_t n = strlen(it->name_type);
+    if (n + strlen(buf) + 2 > sizeof(it->name_type)) return;
+    if (n) strcat(it->name_type, "|");
+    strcat(it->name_type, buf);
+}
+
 static void set_item(layout_item_t *it, const cJSON *card)
 {
     copy(it->entity, sizeof(it->entity), str(card, "entity"));
-    const char *name = str(card, "name");  /* objects like {"type":"device"} are ignored */
-    copy(it->name, sizeof(it->name), name ? name : "");
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(card, "name");
+    if (cJSON_IsString(name)) {
+        copy(it->name, sizeof(it->name), name->valuestring);
+    } else if (cJSON_IsObject(name)) {
+        const char *t = str(name, "type"), *x = str(name, "text");
+        if (t && !strcmp(t, "text") && x) copy(it->name, sizeof(it->name), x);   /* plain text */
+        else add_part(it, name);
+    } else if (cJSON_IsArray(name)) {
+        const cJSON *p;
+        cJSON_ArrayForEach(p, name) if (cJSON_IsObject(p)) add_part(it, p);
+    }
 }
 
 /* Fills *pg from one section; returns false if nothing usable. */
@@ -147,6 +185,41 @@ uint32_t layout_hash(const ha_layout_t *l)
     return h;
 }
 
+bool layout_name_template(const layout_item_t *it, char *out, int n)
+{
+    const char *e = it->entity;
+    int len = snprintf(out, n, "{{ [");
+    bool any = false;
+    char types[sizeof(it->name_type)];
+    copy(types, sizeof(types), it->name_type);
+    for (char *save = NULL, *t = strtok_r(types, "|", &save); t; t = strtok_r(NULL, "|", &save)) {
+        char part[400];
+        if (!strncmp(t, "text:", 5)) {
+            char txt[48];
+            int k = 0;
+            for (const char *c = t + 5; *c && k < (int)sizeof(txt) - 1; c++) if (*c != '\'' && *c != '\\') txt[k++] = *c;
+            txt[k] = 0;
+            snprintf(part, sizeof(part), "'%s'", txt);
+        } else if (!strcmp(t, "floor")) {
+            snprintf(part, sizeof(part), "floor_name('%s')", e);
+        } else if (!strcmp(t, "area")) {
+            snprintf(part, sizeof(part), "area_name('%s')", e);
+        } else if (!strcmp(t, "device")) {
+            snprintf(part, sizeof(part), "(device_attr('%s', 'name_by_user') or device_attr('%s', 'name'))", e, e);
+        } else if (!strcmp(t, "entity")) {
+            /* the entity's own name: friendly_name without the device name in front */
+            snprintf(part, sizeof(part), "(state_attr('%s', 'friendly_name') or '') | replace("
+                     "(device_attr('%s', 'name_by_user') or device_attr('%s', 'name') or '~~') ~ ' ', '', 1)", e, e, e);
+        } else {
+            continue;
+        }
+        len += snprintf(out + len, len < n ? n - len : 0, "%s%s", any ? ", " : "", part);
+        any = true;
+    }
+    len += snprintf(out + len, len < n ? n - len : 0, "] | select | join(' ') }}");
+    return any && len < n;
+}
+
 bool layout_sanitize(ha_layout_t *l)
 {
     bool ok = l->count >= 1 && l->count <= LAYOUT_MAX_PAGES;
@@ -160,6 +233,7 @@ bool layout_sanitize(ha_layout_t *l)
         for (int i = 0; i < pg->count; i++) {
             pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
             pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
+            pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
         }
     }
     if (!ok) memset(l, 0, sizeof(*l));

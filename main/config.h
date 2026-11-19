@@ -34,7 +34,7 @@
 /* Line smoothing: Gaussian blur width in points (pixels); 0 = raw data, higher = smoother.
  * Write decimals with a point (3.0f or 3, not 3f). */
 #define HA_GRAPH_SMOOTHING   6.0f
-#define HA_GRAPH_LINE_WIDTH  2       /* graph line thickness in pixels */
+#define HA_GRAPH_LINE_WIDTH  4       /* graph line thickness in pixels */
 #define HA_GRAPH_POINTS      168     /* horizontal resolution (1 px per point) */
 
 /* A tapped value (with its unit and name) grows by this factor; 1.2 = 20 % bigger */

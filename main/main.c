@@ -30,6 +30,12 @@ static void button_init(void);
 
 #include "demos/lv_demos.h"
 
+/* Montserrat with umlauts etc. (tools/make_fonts.py); symbols fall back to the built-ins */
+LV_FONT_DECLARE(lv_font_latin_12)
+LV_FONT_DECLARE(lv_font_latin_14)
+LV_FONT_DECLARE(lv_font_latin_16)
+LV_FONT_DECLARE(lv_font_latin_22)
+
 
 // #include "lvgl_ui.h"
 
@@ -106,7 +112,7 @@ static void create_status_icons(lv_obj_t *parent, int set)
     lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -10, 14);
     lv_obj_t *wifi = lv_label_create(parent);
     lv_label_set_text(wifi, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_font(wifi, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(wifi, &lv_font_latin_14, 0);
     lv_obj_align_to(wifi, dot, LV_ALIGN_OUT_LEFT_MID, -6, 0);
     s_ha_icon[set] = dot;
     s_wifi_icon[set] = wifi;
@@ -180,13 +186,14 @@ void app_main(void)
 #include "nvs.h"
 #include "names.h"
 
+
 /* Screen size in the current orientation (portrait 172x320, landscape 320x172) */
 #define SCR_W  lv_disp_get_hor_res(NULL)
 #define SCR_H  lv_disp_get_ver_res(NULL)
 /* value / unit / name fonts: smaller in landscape, where three values share one row */
 #define VFONT  (s_landscape ? &lv_font_montserrat_28 : &lv_font_montserrat_36)
-#define UFONT  (s_landscape ? &lv_font_montserrat_16 : &lv_font_montserrat_22)
-#define NFONT  (s_landscape ? &lv_font_montserrat_14 : &lv_font_montserrat_16)
+#define UFONT  (s_landscape ? &lv_font_latin_16 : &lv_font_latin_22)
+#define NFONT  (s_landscape ? &lv_font_latin_14 : &lv_font_latin_16)
 #define NAME_DY (s_landscape ? 34 : 44)       /* name label below the value's top */
 #define GRAPH_LW 112                          /* landscape graph page: value column width */
 
@@ -596,17 +603,17 @@ static void create_graph_page(lv_obj_t *page)
 
     s_ymax = lv_label_create(page);
     lv_label_set_text(s_ymax, "");
-    lv_obj_set_style_text_font(s_ymax, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_ymax, &lv_font_latin_12, 0);
     lv_obj_align_to(s_ymax, s_chart, LV_ALIGN_TOP_LEFT, 4, 0);
     s_ymin = lv_label_create(page);
     lv_label_set_text(s_ymin, "");
-    lv_obj_set_style_text_font(s_ymin, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_ymin, &lv_font_latin_12, 0);
     lv_obj_align_to(s_ymin, s_chart, LV_ALIGN_BOTTOM_LEFT, 4, 0);
     lv_obj_add_flag(s_ymin, LV_OBJ_FLAG_HIDDEN);
 
     for (int i = 0; i < AXIS_MAX; i++) {
         s_axis[i] = lv_label_create(page);
-        lv_obj_set_style_text_font(s_axis[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(s_axis[i], &lv_font_latin_12, 0);
         lv_obj_add_flag(s_axis[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
@@ -616,7 +623,7 @@ static void create_pages(lv_obj_t *scr)
     if (!PAGE_COUNT) {   /* nothing from HA or the cache yet */
         lv_obj_t *l = lv_label_create(scr);
         lv_label_set_text(l, "Loading layout...");
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(l, &lv_font_latin_16, 0);
         lv_obj_set_style_text_color(l, s_light ? lv_color_hex(0x1C1C1E) : lv_color_white(), 0);
         lv_obj_center(l);
         s_strip = NULL;
@@ -673,9 +680,9 @@ static void create_pages(lv_obj_t *scr)
     }
 
     s_page_title = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_page_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_page_title, &lv_font_latin_16, 0);
     /* vertically centred on the status icons (HA dot centre is at y = 14 + 10/2) */
-    lv_obj_align(s_page_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_montserrat_16.line_height / 2);
+    lv_obj_align(s_page_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_latin_16.line_height / 2);
     lv_label_set_text(s_page_title, s_layout.pages[s_page].title);
     apply_temp_theme(s_light);
 }
@@ -845,7 +852,7 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colo
     lv_obj_set_style_radius(btn, 12, 0);
     lv_obj_t *label = lv_label_create(btn);
     lv_label_set_text(label, text);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(label, &lv_font_latin_16, 0);
     lv_obj_center(label);
     return btn; /* no event callback: the buttons do nothing */
 }
@@ -1069,7 +1076,7 @@ static void create_ui(void)
 
     s_bri_caption = lv_label_create(cp[0]);
     lv_label_set_text(s_bri_caption, "Brightness");
-    lv_obj_set_style_text_font(s_bri_caption, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_bri_caption, &lv_font_latin_14, 0);
     if (s_landscape) lv_obj_set_pos(s_bri_caption, SCR_W / 2 + (SCR_W / 2 - 148) / 2, 40);
     else lv_obj_align_to(s_bri_caption, btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 36);
 
@@ -1104,7 +1111,7 @@ static void create_ui(void)
     s_err_label = lv_label_create(s_err_box);
     lv_label_set_long_mode(s_err_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_err_label, lv_pct(100));
-    lv_obj_set_style_text_font(s_err_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_err_label, &lv_font_latin_14, 0);
     lv_label_set_text(s_err_label, NO_ERRORS);
 
     /* Page dots at the bottom of the panel */

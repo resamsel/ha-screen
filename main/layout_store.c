@@ -4,7 +4,7 @@
 #include "esp_log.h"
 
 #define NS  "layout"
-#define KEY "v1"   /* bump when ha_layout_t changes */
+#define KEY "v2"   /* bump when ha_layout_t changes */
 
 bool layout_store_load(ha_layout_t *out)
 {

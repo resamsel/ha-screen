@@ -12,7 +12,9 @@ typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH } layout_kind_t;
 
 typedef struct {
     char entity[64];
-    char name[32];          /* "" = use the entity's friendly_name */
+    char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
+    char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
+                             * entity, text:<text>; resolved by the network task */
 } layout_item_t;
 
 typedef struct {
@@ -35,6 +37,10 @@ int layout_parse(const char *json, const char *view_path, ha_layout_t *out);
 
 /* FNV-1a over the whole struct; layouts from layout_parse compare equal when identical. */
 uint32_t layout_hash(const ha_layout_t *l);
+
+/* Jinja template that renders the item's name_type with HA's /api/template.
+ * Returns false when name_type holds nothing usable. */
+bool layout_name_template(const layout_item_t *it, char *out, int n);
 
 /* Repairs a layout from an untrusted source (NVS): clamps hours and kind, terminates strings.
  * Returns false (and zeroes *l) when counts are out of range. */
