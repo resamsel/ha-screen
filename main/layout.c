@@ -119,6 +119,12 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             const char *tf = str(card, "time_format");
             if (cJSON_IsTrue(sec_)) it->flags |= LAYOUT_CLOCK_SECONDS;
             if (tf && !strcmp(tf, "12")) it->flags |= LAYOUT_CLOCK_12H;
+            const char *sz = str(card, "clock_size");
+            if (sz && !strcmp(sz, "medium")) it->flags |= LAYOUT_CLOCK_MEDIUM;
+            else if (sz && !strcmp(sz, "large")) it->flags |= LAYOUT_CLOCK_LARGE;
+            if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(card, "no_background"))) it->flags |= LAYOUT_CLOCK_NO_BG;
+            const char *tz = str(card, "time_zone");
+            if (tz) copy(it->entity, sizeof(it->entity), tz);
             continue;
         }
         if (pg->kind == LAYOUT_CLOCK && kind_set) {
@@ -279,7 +285,8 @@ bool layout_sanitize(ha_layout_t *l)
             pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
-            pg->items[i].flags &= LAYOUT_CLOCK_SECONDS | LAYOUT_CLOCK_12H;
+            pg->items[i].flags &= LAYOUT_CLOCK_FLAGS;
+            if ((pg->items[i].flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_SIZE) pg->items[i].flags &= ~LAYOUT_CLOCK_SIZE;
             uint16_t *h = &pg->items[i].hours;
             if (pg->kind != LAYOUT_GRAPH) *h = 0;   /* unused; as layout_parse leaves it */
             else if (*h < 1) *h = LAYOUT_HOURS_DEFAULT;

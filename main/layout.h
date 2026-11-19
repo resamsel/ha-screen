@@ -13,12 +13,18 @@ typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK } layou
 /* clock card options (layout_item_t.flags) */
 #define LAYOUT_CLOCK_SECONDS 0x01
 #define LAYOUT_CLOCK_12H     0x02
+#define LAYOUT_CLOCK_SIZE    0x0C   /* clock_size: */
+#define LAYOUT_CLOCK_SMALL   0x00
+#define LAYOUT_CLOCK_MEDIUM  0x04
+#define LAYOUT_CLOCK_LARGE   0x08
+#define LAYOUT_CLOCK_NO_BG   0x10   /* no_background */
+#define LAYOUT_CLOCK_FLAGS   0x1F
 
 /* what a tap on a button does: toggle/run/activate, or nothing (other tap_action types) */
 typedef enum { LAYOUT_ACT_TOGGLE, LAYOUT_ACT_NONE } layout_action_t;
 
 typedef struct {
-    char entity[64];
+    char entity[64];        /* clock pages: the card's time_zone (IANA name), "" = default */
     char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
     uint8_t action;         /* layout_action_t, button pages */
     uint16_t hours;         /* graph span (graph pages) */

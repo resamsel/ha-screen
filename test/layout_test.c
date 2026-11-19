@@ -259,9 +259,16 @@ static void test_clock(void)
                                   TILE("sensor.t")) "," SEC("{\"type\":\"clock\"}") "]", &l) == 2);
     assert(l.pages[0].kind == LAYOUT_CLOCK && l.pages[0].count == 1);
     assert(!strcmp(l.pages[0].title, "Zeit"));
-    assert(l.pages[0].items[0].flags == (LAYOUT_CLOCK_SECONDS | LAYOUT_CLOCK_12H));
+    assert(l.pages[0].items[0].flags == (LAYOUT_CLOCK_SECONDS | LAYOUT_CLOCK_12H | LAYOUT_CLOCK_LARGE));
     assert(l.pages[0].items[0].entity[0] == 0);
     assert(l.pages[1].kind == LAYOUT_CLOCK && l.pages[1].items[0].flags == 0);
+    assert(parse_sections("[" SEC("{\"type\":\"clock\",\"clock_size\":\"large\",\"no_background\":true,\"time_zone\":\"Europe/London\"}")
+                          "," SEC("{\"type\":\"clock\",\"clock_size\":\"medium\"}") "]", &l) == 2);
+    assert((l.pages[0].items[0].flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE);
+    assert(l.pages[0].items[0].flags & LAYOUT_CLOCK_NO_BG);
+    assert(!strcmp(l.pages[0].items[0].entity, "Europe/London"));   /* clock: time zone */
+    assert((l.pages[1].items[0].flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM);
+    assert(!(l.pages[1].items[0].flags & LAYOUT_CLOCK_NO_BG) && !l.pages[1].items[0].entity[0]);
     /* filter never drops a clock (no entity to check) */
     assert(layout_filter(&l, keep_not_x, NULL) == 2);
     uint32_t h = layout_hash(&l);

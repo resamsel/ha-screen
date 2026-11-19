@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "names.h"
+#include "tz.h"
 
 static int w10(const char *s, void *ctx) { (void)ctx; return (int)strlen(s) * 10; }
 
@@ -85,8 +86,19 @@ static void test_state_text(void)
     assert(!strcmp(o4, "Ab"));
 }
 
+static void test_tz(void)
+{
+    assert(!strcmp(tz_posix("Europe/Vienna"), "CET-1CEST,M3.5.0,M10.5.0/3"));
+    assert(!strcmp(tz_posix("Europe/London"), "GMT0BST,M3.5.0/1,M10.5.0"));
+    assert(!strcmp(tz_posix("America/New_York"), "EST5EDT,M3.2.0,M11.1.0"));
+    assert(!strcmp(tz_posix("UTC"), "UTC0"));
+    assert(tz_posix("Mars/Olympus") == NULL);
+    assert(tz_posix("") == NULL);
+}
+
 int main(void)
 {
+    test_tz();
     test_state_text();
     test_fits_unchanged();
     test_common_prefix();

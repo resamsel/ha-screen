@@ -187,6 +187,8 @@ void app_main(void)
 #include "config.h"
 #include "nvs.h"
 #include "names.h"
+#include "tz.h"
+#include "esp_log.h"
 
 
 /* Screen size in the current orientation (portrait 172x320, landscape 320x172) */
@@ -468,6 +470,7 @@ static void create_button_page(lv_obj_t *page, int pg)
 
 /* ---- Clock pages: the board's time (set from HA's responses), updated every second ---- */
 static lv_obj_t *s_clk_time[LAYOUT_MAX_PAGES], *s_clk_small[LAYOUT_MAX_PAGES], *s_clk_date[LAYOUT_MAX_PAGES];
+static lv_obj_t *s_clk_bg[LAYOUT_MAX_PAGES];   /* card background (unless no_background) */
 static lv_timer_t *s_clk_timer;
 
 static void clock_update(int pg)
@@ -476,7 +479,11 @@ static void clock_update(int pg)
     uint8_t fl = s_layout.pages[pg].items[0].flags;
     time_t now = time(NULL);
     struct tm t;
+    /* the card's time_zone, else the board's (HA_TIMEZONE) */
+    const char *zone = s_layout.pages[pg].items[0].entity[0] ? tz_posix(s_layout.pages[pg].items[0].entity) : NULL;
+    if (zone) { setenv("TZ", zone, 1); tzset(); }
     localtime_r(&now, &t);
+    if (zone) { setenv("TZ", HA_TIMEZONE, 1); tzset(); }
     char hm[8], small[8] = "", date[16] = "";
     if (t.tm_year < 120) {                 /* before 2020: no time from HA yet */
         strcpy(hm, "--:--");
@@ -513,10 +520,42 @@ static void clock_tick(lv_timer_t *t)
         if (s_layout.pages[pg].kind == LAYOUT_CLOCK) clock_update(pg);
 }
 
+/* clock_size small/medium/large = 36/48/72 px digits, one step smaller while the time
+ * doesn't fit the width */
+static const lv_font_t *clock_font(uint8_t flags)
+{
+    static const lv_font_t *const fonts[] = { &lv_font_montserrat_36, &lv_font_clock_48, &lv_font_clock_72 };
+    int i = (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_LARGE ? 2 : (flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_MEDIUM ? 1 : 0;
+    /* seconds and AM/PM are drawn small beside the time */
+    lv_point_t extra = { 0, 0 };
+    const char *small = (flags & LAYOUT_CLOCK_SECONDS) && (flags & LAYOUT_CLOCK_12H) ? ":00 PM"
+                      : flags & LAYOUT_CLOCK_SECONDS ? ":00" : flags & LAYOUT_CLOCK_12H ? "PM" : "";
+    if (small[0]) lv_txt_get_size(&extra, small, &lv_font_latin_22, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    for (; i > 0; i--) {
+        lv_point_t sz;
+        lv_txt_get_size(&sz, "00:00", fonts[i], 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        if (sz.x + (extra.x ? extra.x + 4 : 0) <= SCR_W - 32) break;
+    }
+    return fonts[i];
+}
+
 static void create_clock_page(lv_obj_t *page, int pg)
 {
+    const layout_item_t *it = &s_layout.pages[pg].items[0];
+    if (!(it->flags & LAYOUT_CLOCK_NO_BG)) {   /* translucent card panel, like the buttons */
+        lv_obj_t *bg = lv_obj_create(page);
+        lv_obj_remove_style_all(bg);
+        lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(bg, 14, 0);
+        lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);
+        lv_obj_set_size(bg, SCR_W - 16, SCR_H - STATUS_H - DOTS_H - 8);
+        lv_obj_set_pos(bg, 8, STATUS_H + 4);
+        s_clk_bg[pg] = bg;
+    }
+    if (it->entity[0] && !tz_posix(it->entity))
+        ESP_LOGW("clock", "time zone '%s' not known, using the board's", it->entity);
     s_clk_time[pg] = lv_label_create(page);
-    lv_obj_set_style_text_font(s_clk_time[pg], s_landscape ? &lv_font_clock_72 : &lv_font_clock_48, 0);
+    lv_obj_set_style_text_font(s_clk_time[pg], clock_font(it->flags), 0);
     s_clk_small[pg] = lv_label_create(page);
     lv_obj_set_style_text_font(s_clk_small[pg], &lv_font_latin_22, 0);
     s_clk_date[pg] = lv_label_create(page);
@@ -604,6 +643,7 @@ static void apply_temp_theme(bool light)
     s_gi = 0;
     for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++) {
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++) btn_paint(pg, i);
+        if (s_clk_bg[pg]) lv_obj_set_style_bg_color(s_clk_bg[pg], lv_color_hex(light ? 0xD5DAE0 : 0x3A3F47), 0);
         if (s_clk_time[pg]) {
             lv_obj_set_style_text_color(s_clk_time[pg], val, 0);
             lv_obj_set_style_text_color(s_clk_small[pg], sub, 0);
@@ -1318,6 +1358,7 @@ static void create_ui(void)
     memset(s_clk_time, 0, sizeof(s_clk_time));
     memset(s_clk_small, 0, sizeof(s_clk_small));
     memset(s_clk_date, 0, sizeof(s_clk_date));
+    memset(s_clk_bg, 0, sizeof(s_clk_bg));
     s_err_box = s_err_label = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
