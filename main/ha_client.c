@@ -358,18 +358,18 @@ static float read_entity(const layout_item_t *it, char text[24], char unit[8], c
 }
 
 /* Graph page: latest value every poll, then the history over the page's span */
-static void fetch_graph(int pg)
+static void fetch_graph(int pg, int row)
 {
-    const layout_page_t *page = &s_layout.pages[pg];
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
     char latest[24], unit[8], name[32], path[256];
-    read_entity(&page->items[0], latest, unit, name);
+    read_entity(it, latest, unit, name);
     bool zero_based = !strcmp(unit, "%");
-    if (s_graph_cb) s_graph_cb(pg, latest, unit, name, NULL, 0, 0, page->hours, zero_based);
+    if (s_graph_cb) s_graph_cb(pg, row, latest, unit, name, NULL, 0, 0, it->hours, zero_based);
 
     if (!s_now) return;                   /* need the server time to place points */
 
     /* start time = now - span, as "2026-11-19T13:05:12+00:00" */
-    time_t t0 = (time_t)(s_now - (int64_t)page->hours * 3600);
+    time_t t0 = (time_t)(s_now - (int64_t)it->hours * 3600);
     struct tm g;
     gmtime_r(&t0, &g);
     char start[32], stop[32];
@@ -377,12 +377,12 @@ static void fetch_graph(int pg)
     time_t t1 = (time_t)s_now;   /* without end_time HA returns only one day */
     gmtime_r(&t1, &g);
     strftime(stop, sizeof(stop), "%Y-%m-%dT%H:%M:%S%%2B00:00", &g);
-    s_hist_hours = page->hours;
+    s_hist_hours = it->hours;
     memset(s_hist_has, 0, sizeof(s_hist_has));
     s_hist_len = 0;
     s_hist_mode = true;
     snprintf(path, sizeof(path), "/api/history/period/%s?end_time=%s&filter_entity_id=%s&minimal_response&no_attributes",
-             start, stop, page->items[0].entity);
+             start, stop, it->entity);
     int st = ha_request(HTTP_METHOD_GET, path, NULL, NULL);
     s_hist_mode = false;
     if (st != 200) return;
@@ -398,8 +398,8 @@ static void fetch_graph(int pg)
         if (s_hist_has[i]) { pts[i] = s_hist_bucket[i]; carry = s_hist_last[i]; known++; }
         else pts[i] = carry;
     }
-    ESP_LOGD(TAG, "history %dh: %d of %d buckets with data", page->hours, known, HA_GRAPH_POINTS);
-    if (s_graph_cb) s_graph_cb(pg, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, page->hours, zero_based);
+    ESP_LOGD(TAG, "history %dh: %d of %d buckets with data", it->hours, known, HA_GRAPH_POINTS);
+    if (s_graph_cb) s_graph_cb(pg, row, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, it->hours, zero_based);
 }
 
 static bool is_domain(const char *entity, const char *domain)
@@ -599,7 +599,8 @@ static void ha_task(void *arg)
         }
         bool fetched = fetch_state();
         for (int pg = 0; pg < s_layout.count; pg++)
-            if (s_layout.pages[pg].kind == LAYOUT_GRAPH) fetch_graph(pg);
+            if (s_layout.pages[pg].kind == LAYOUT_GRAPH)
+                for (int i = 0; i < s_layout.pages[pg].count; i++) fetch_graph(pg, i);
         if (b & REFRESH_BIT) ok &= fetched;
         if (updated) {
             ESP_LOGI(TAG, "update %s", ok ? "succeeded" : "FAILED");

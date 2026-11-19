@@ -121,13 +121,14 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             kind_set = true;
         }
         if (pg->kind == LAYOUT_GRAPH) {
-            if (!graph || pg->count) {
-                LOGW("section %d: graph page uses only its first graph, extra card skipped", idx);
+            if (!graph) {
+                LOGW("section %d: only graphs on a graph page, card skipped", idx);
                 continue;
             }
-            const cJSON *h = cJSON_GetObjectItemCaseSensitive(card, "hours_to_show");
-            int hours = cJSON_IsNumber(h) ? (int)h->valuedouble : 0;
-            pg->hours = hours < 1 ? LAYOUT_HOURS_DEFAULT : hours > LAYOUT_HOURS_MAX ? LAYOUT_HOURS_MAX : hours;
+            if (pg->count == LAYOUT_MAX_ROWS) {
+                LOGW("section %d: more than %d graphs, extra skipped", idx, LAYOUT_MAX_ROWS);
+                continue;
+            }
         } else if (pg->kind == LAYOUT_BUTTONS) {
             if (!button) {
                 LOGW("section %d: only buttons on a button page, card skipped", idx);
@@ -149,6 +150,11 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
         }
         layout_item_t *it = &pg->items[pg->count++];
         set_item(it, card);
+        if (graph) {
+            const cJSON *h = cJSON_GetObjectItemCaseSensitive(card, "hours_to_show");
+            int hours = cJSON_IsNumber(h) ? (int)h->valuedouble : 0;
+            it->hours = hours < 1 ? LAYOUT_HOURS_DEFAULT : hours > LAYOUT_HOURS_MAX ? LAYOUT_HOURS_MAX : hours;
+        }
         if (button) {
             const cJSON *ta = cJSON_GetObjectItemCaseSensitive(card, "tap_action");
             const char *act = cJSON_IsObject(ta) ? str(ta, "action") : NULL;
@@ -248,20 +254,17 @@ bool layout_sanitize(ha_layout_t *l)
     for (int p = 0; ok && p < l->count; p++) {
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
-        if (pg->kind != LAYOUT_GRAPH) {
-            if (pg->kind != LAYOUT_BUTTONS) pg->kind = LAYOUT_VALUES;
-            pg->hours = 0;                    /* unused; as layout_parse leaves it */
-        } else if (pg->hours < 1) {
-            pg->hours = LAYOUT_HOURS_DEFAULT;
-        } else if (pg->hours > LAYOUT_HOURS_MAX) {
-            pg->hours = LAYOUT_HOURS_MAX;
-        }
+        if (pg->kind != LAYOUT_GRAPH && pg->kind != LAYOUT_BUTTONS) pg->kind = LAYOUT_VALUES;
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
             pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
             pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
+            uint16_t *h = &pg->items[i].hours;
+            if (pg->kind != LAYOUT_GRAPH) *h = 0;   /* unused; as layout_parse leaves it */
+            else if (*h < 1) *h = LAYOUT_HOURS_DEFAULT;
+            else if (*h > LAYOUT_HOURS_MAX) *h = LAYOUT_HOURS_MAX;
         }
     }
     if (!ok) memset(l, 0, sizeof(*l));

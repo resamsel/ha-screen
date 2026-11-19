@@ -42,10 +42,10 @@ void ha_client_set_busy_cb(ha_busy_cb_t cb);      /* call before ha_client_start
 /* Value page row: page/row index into the current layout; name = card name or friendly_name. */
 typedef void (*ha_sensor_cb_t)(int page, int row, const char *value, const char *unit, const char *name);
 
-/* Graph page `page`: `latest`/`unit`/`name` = current value (points NULL), or `points` = n history
+/* Graph `row` on graph page `page`: `latest`/`unit`/`name` = current value (points NULL), or `points` = n history
  * buckets oldest first, NAN where no data yet (latest NULL), with `end` = the UTC time (s) of
  * the right edge; the left edge is `hours` earlier. zero_based = y axis starts at 0. */
-typedef void (*ha_graph_cb_t)(int page, const char *latest, const char *unit, const char *name,
+typedef void (*ha_graph_cb_t)(int page, int row, const char *latest, const char *unit, const char *name,
                               const float *points, int n, int64_t end, int hours, bool zero_based);
 
 /* Called after every poll with the errors it hit, one per line; "" = none. */

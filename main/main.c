@@ -77,8 +77,8 @@ static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
 
-static void ha_graph_changed(int graph, const char *latest, const char *unit, const char *name, const float *pts,
-                             int n, int64_t end, int hours, bool zero_based);
+static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
+                             const float *pts, int n, int64_t end, int hours, bool zero_based);
 static void place_graph_value(void);
 static float nice_ceil(float x);
 static void ha_state_changed(ha_state_t state);
@@ -227,16 +227,21 @@ static int s_page = 0;
 static lv_obj_t *s_page_title = NULL;               /* page name, left side of the status line */
 
 /* graph page */
-/* graph pages: one set per page index; s_gi (a page index) selects which one the s_g_* / s_chart names mean */
+/* graphs: one set per page and row; s_gi = GI(page, row) selects which one the s_g_* / s_chart
+ * names mean */
+#define GI(pg, row)  ((pg) * LAYOUT_MAX_ROWS + (row))
+#define GPG(gi)      ((gi) / LAYOUT_MAX_ROWS)
+#define GROW(gi)     ((gi) % LAYOUT_MAX_ROWS)
+#define GRAPHS       (LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS)
 static int s_gi = 0;
-static lv_obj_t *s_g_name_[LAYOUT_MAX_PAGES], *s_g_val_[LAYOUT_MAX_PAGES], *s_g_unit_[LAYOUT_MAX_PAGES], *s_chart_[LAYOUT_MAX_PAGES];
-static lv_chart_series_t *s_chart_ser_[LAYOUT_MAX_PAGES];
+static lv_obj_t *s_g_name_[GRAPHS], *s_g_val_[GRAPHS], *s_g_unit_[GRAPHS], *s_chart_[GRAPHS];
+static lv_chart_series_t *s_chart_ser_[GRAPHS];
 #define s_g_name    s_g_name_[s_gi]
 #define s_g_val     s_g_val_[s_gi]
 #define s_g_unit    s_g_unit_[s_gi]
 #define s_chart     s_chart_[s_gi]
 #define s_chart_ser s_chart_ser_[s_gi]
-static bool s_zero_[LAYOUT_MAX_PAGES];     /* y axis from 0 */
+static bool s_zero_[GRAPHS];               /* y axis from 0 */
 
 
 /* Centre the value horizontally in its row and hang the unit off its right side,
@@ -264,10 +269,17 @@ static int name_width(const char *txt, void *ctx)
     return sz.x;
 }
 
-/* Widest a name may be: its column in landscape, the screen (or value column) otherwise */
+static void graph_block(int gi, lv_area_t *a);
+#define GRAPH_X 10   /* left margin of a graph's name and value inside its block */
+
+/* Widest a name may be: its graph block, its column in landscape, the screen otherwise */
 static lv_coord_t name_max_w(int pg)
 {
-    if (IS_GRAPH(pg)) return SCR_W - 2 * 10;
+    if (IS_GRAPH(pg)) {
+        lv_area_t b;
+        graph_block(GI(pg, 0), &b);
+        return lv_area_get_width(&b) - 2 * GRAPH_X;
+    }
     return (s_landscape ? SCR_W / LV_MAX(ROWS(pg), 1) : SCR_W) - 8;
 }
 
@@ -284,6 +296,7 @@ static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_co
 }
 
 /* Re-apply all row names of value page pg, dropping words they all share if one is too wide */
+static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y);
 static void page_names_update(int pg)
 {
     char n[LAYOUT_MAX_ROWS][32];
@@ -291,8 +304,15 @@ static void page_names_update(int pg)
     lv_coord_t max_w = name_max_w(pg);
     names_abbreviate(n, ROWS(pg), max_w, name_width, NULL);
     for (int i = 0; i < ROWS(pg); i++) {
-        if (!s_name[pg][i]) continue;
         lv_coord_t cx, y;
+        if (IS_GRAPH(pg)) {   /* left-aligned at the top of each graph block */
+            s_gi = GI(pg, i);
+            if (!s_g_name) continue;
+            graph_name_pos(&cx, &y);
+            set_name_label(s_g_name, n[i], max_w, cx, y - NAME_DY, true);
+            continue;
+        }
+        if (!s_name[pg][i]) continue;
         value_pos(pg, i, &cx, &y);
         set_name_label(s_name[pg][i], n[i], max_w, cx, y, false);
     }
@@ -492,7 +512,7 @@ static void apply_temp_theme(bool light)
             lv_obj_set_style_text_color(s_unit[pg][i], fg, 0);
         }
     }
-    for (s_gi = 0; s_gi < LAYOUT_MAX_PAGES; s_gi++) {
+    for (s_gi = 0; s_gi < GRAPHS; s_gi++) {
         if (!s_chart) continue;
         lv_obj_set_style_text_color(s_g_name, sub, 0);
         lv_obj_set_style_text_color(s_g_val, fg, 0);
@@ -549,20 +569,22 @@ static void ha_sensor_changed(int page, int row, const char *value, const char *
 
 /* Network task: graph page value, or a fresh set of history points */
 static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y);
-static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y);
-static void ha_graph_changed(int graph, const char *latest, const char *unit, const char *name, const float *pts,
-                             int n, int64_t end, int hours, bool zero_based)
+static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
+                             const float *pts, int n, int64_t end, int hours, bool zero_based)
 {
     if (!lvgl_port_lock(0)) return;
-    if (graph < 0 || graph >= PAGE_COUNT || !IS_GRAPH(graph)) { lvgl_port_unlock(); return; }
-    s_gi = graph;
+    if (graph < 0 || graph >= PAGE_COUNT || !IS_GRAPH(graph) || row < 0 || row >= ROWS(graph)) {
+        lvgl_port_unlock();
+        return;
+    }
+    s_gi = GI(graph, row);
     if (!s_chart) { lvgl_port_unlock(); return; }
     (void)hours; (void)end;
     s_zero_[s_gi] = zero_based;
-    if (name && strcmp(lv_label_get_text(s_g_name), name)) {
-        lv_coord_t cx, y;
-        graph_name_pos(&cx, &y);
-        set_name_label(s_g_name, name, name_max_w(s_gi), cx, y - NAME_DY, true);
+    if (name && strncmp(s_full[graph][row], name, 31)) {
+        snprintf(s_full[graph][row], sizeof(s_full[graph][row]), "%s", name);
+        page_names_update(graph);
+        s_gi = GI(graph, row);
     }
     if (latest) {
         lv_label_set_text(s_g_val, latest);
@@ -635,12 +657,27 @@ static float nice_ceil(float x)
     return 10 * mag;
 }
 
-/* Graph page, both orientations: name at the top, value below it, chart under both */
-#define GRAPH_X 10   /* left margin of the graph page's name and value */
+/* Area of graph gi on its page: graphs stacked in portrait, side by side in landscape */
+static void graph_block(int gi, lv_area_t *a)
+{
+    int pg = GPG(gi), r = GROW(gi), n = LV_MAX(ROWS(pg), 1);
+    lv_coord_t top = STATUS_H, bottom = SCR_H - DOTS_H;
+    if (s_landscape) {
+        lv_coord_t w = SCR_W / n;
+        a->x1 = r * w; a->x2 = a->x1 + w - 1; a->y1 = top; a->y2 = bottom - 1;
+    } else {
+        lv_coord_t h = (bottom - top) / n;
+        a->x1 = 0; a->x2 = SCR_W - 1; a->y1 = top + r * h; a->y2 = a->y1 + h - 1;
+    }
+}
+
+/* Each graph block: name at the top, value below it, chart under both */
 static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y)
 {
-    *cx = GRAPH_X;
-    *y = STATUS_H + 2;
+    lv_area_t b;
+    graph_block(s_gi, &b);
+    *cx = b.x1 + GRAPH_X;
+    *y = b.y1 + 2;
 }
 
 static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y)
@@ -654,7 +691,7 @@ static void place_graph_value(void)
     lv_coord_t cx, y;
     graph_value_pos(&cx, &y);
     place_pair(s_g_val, s_g_unit, cx, y, true);
-    if (s_g_name) page_relayout(s_gi);
+    if (s_g_name) page_relayout(GPG(s_gi));
 }
 
 /* Fills the area under each line segment down to the chart's bottom edge, in the line's
@@ -689,9 +726,9 @@ static lv_obj_t *make_page(int pg)
     return page;
 }
 
-static void create_graph_page(lv_obj_t *page)
+static void create_graph(lv_obj_t *page)
 {
-    /* name on top, value (unit beside it) below, chart filling the rest */
+    /* name on top, value (unit beside it) below, chart filling the rest of the block */
     lv_coord_t cx, y, ny;
     graph_value_pos(&cx, &y);
     graph_name_pos(&cx, &ny);
@@ -704,15 +741,18 @@ static void create_graph_page(lv_obj_t *page)
     lv_obj_set_style_text_opa(s_g_unit, LV_OPA_80, 0);
     place_graph_value();
     s_g_name = lv_label_create(page);
-    const layout_item_t *it = &s_layout.pages[s_gi].items[0];
+    const layout_item_t *it = &s_layout.pages[GPG(s_gi)].items[GROW(s_gi)];
     lv_obj_set_style_text_font(s_g_name, NFONT, 0);
-    set_name_label(s_g_name, it->name[0] ? it->name : it->entity, name_max_w(s_gi), cx, ny - NAME_DY, true);
+    snprintf(s_full[GPG(s_gi)][GROW(s_gi)], 32, "%.31s", it->name[0] ? it->name : it->entity);
+    (void)ny;
 
-    /* line chart below the value down to the page dots, full width, no axes or grid */
+    /* line chart below the value to the bottom of the block, no axes or grid */
+    lv_area_t b;
+    graph_block(s_gi, &b);
     s_chart = lv_chart_create(page);
     lv_coord_t top = y + ((const lv_font_t *)VFONT)->line_height + 2;
-    lv_obj_set_size(s_chart, PAGE_W, SCR_H - DOTS_H - top);
-    lv_obj_set_pos(s_chart, 0, top);
+    lv_obj_set_size(s_chart, lv_area_get_width(&b), LV_MAX(b.y2 + 1 - top, 10));
+    lv_obj_set_pos(s_chart, b.x1, top);
     lv_obj_clear_flag(s_chart, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(s_chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chart, 0, 0);
@@ -730,7 +770,15 @@ static void create_graph_page(lv_obj_t *page)
     s_chart_ser = lv_chart_add_series(s_chart, lv_color_hex(0x18BCF2), LV_CHART_AXIS_PRIMARY_Y);
     lv_obj_add_event_cb(s_chart, chart_fill_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
     lv_chart_set_all_value(s_chart, s_chart_ser, LV_CHART_POINT_NONE);
+}
 
+static void create_graph_page(lv_obj_t *page, int pg)
+{
+    for (int i = 0; i < ROWS(pg); i++) {
+        s_gi = GI(pg, i);
+        create_graph(page);
+    }
+    page_names_update(pg);   /* names fit their block (shared words dropped, else "...") */
 }
 
 static void create_pages(lv_obj_t *scr)
@@ -753,8 +801,7 @@ static void create_pages(lv_obj_t *scr)
 
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
         if (IS_GRAPH(pg)) {
-            s_gi = pg;
-            create_graph_page(make_page(pg));
+            create_graph_page(make_page(pg), pg);
             continue;
         }
         if (s_layout.pages[pg].kind == LAYOUT_BUTTONS) {
@@ -820,8 +867,8 @@ static void group_objs(int g, lv_obj_t *o[3])
     o[0] = o[1] = o[2] = NULL;
     if (pg >= PAGE_COUNT) return;
     if (IS_GRAPH(pg)) {
-        if (row) return;
-        s_gi = pg;
+        if (row >= ROWS(pg)) return;
+        s_gi = GI(pg, row);
         o[0] = s_g_val; o[1] = s_g_unit; o[2] = s_g_name;
         return;
     }
@@ -897,7 +944,7 @@ static void page_relayout(int pg)
     for (int k = 0; k < n; k++) {
         /* push away from the neighbours' growth */
         float shift = 0;
-        for (int j = 0; j < n; j++) {
+        for (int j = 0; j < n && !IS_GRAPH(pg); j++) {   /* graphs have their own blocks */
             if (j == k) continue;
             float ext = cols ? lv_area_get_width(&va[j]) * f[j] : lv_area_get_height(&va[j]) * f[j];
             shift += (j < k ? ext : -ext) / 2;
@@ -916,8 +963,15 @@ static void page_relayout(int pg)
         lv_obj_get_coords(lv_obj_get_parent(o[k][0]), &pa);
         lv_coord_t left = LV_MIN(va[k].x1 - (corner ? 0 : gw / 2), na[k].x1) + tx - pa.x1;
         lv_coord_t right = LV_MAX(LV_MAX(va[k].x2 + (corner ? gw : gw / 2), ua[k].x2 + udx), na[k].x2) + tx - pa.x1;
-        if (right > right_bound) tx -= right - right_bound;
-        else if (left < 2) tx += 2 - left;
+        lv_coord_t lo = 2, hi = right_bound;
+        if (corner) {                     /* stay inside the graph's block */
+            lv_area_t blk;
+            graph_block(gs[k], &blk);
+            lo = blk.x1 + 2;
+            hi = blk.x2 - 2;
+        }
+        if (right > hi) tx -= right - hi;
+        else if (left < lo) tx += lo - left;
         lv_obj_set_style_transform_pivot_x(o[k][0], corner ? 0 : w / 2, 0);
         lv_obj_set_style_transform_pivot_y(o[k][0], corner ? 0 : h / 2, 0);
         lv_obj_set_style_transform_zoom(o[k][0], (lv_coord_t)(256 + f[k] * 256 + 0.5f), 0);

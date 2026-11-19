@@ -17,6 +17,7 @@ typedef struct {
     char entity[64];
     char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
     uint8_t action;         /* layout_action_t, button pages */
+    uint16_t hours;         /* graph span (graph pages) */
     char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
                              * entity, text:<text>; resolved by the network task */
 } layout_item_t;
@@ -24,7 +25,6 @@ typedef struct {
 typedef struct {
     layout_kind_t kind;
     char title[32];         /* section heading, "" if none */
-    int hours;              /* graph span (graph pages) */
     int count;
     layout_item_t items[LAYOUT_MAX_ROWS];
 } layout_page_t;

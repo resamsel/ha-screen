@@ -47,7 +47,7 @@ static void test_fixture(void)
     assert(l.pages[2].kind == LAYOUT_GRAPH);
     assert(!strcmp(l.pages[2].title, "Paketverlust"));
     assert(l.pages[2].count == 1);
-    assert(l.pages[2].hours == 24);
+    assert(l.pages[2].items[0].hours == 24);
     assert(!strcmp(l.pages[4].title, "New section"));
     assert(!strcmp(l.pages[4].items[0].entity, "sensor.fritz_box_7590_ax_download_geschwindigkeit"));
     free(j);
@@ -96,10 +96,10 @@ static void test_hours(void)
                           "," SEC("{\"type\":\"sensor\",\"graph\":\"line\",\"entity\":\"sensor.a\",\"hours_to_show\":0}")
                           "," SEC("{\"type\":\"sensor\",\"graph\":\"line\",\"entity\":\"sensor.a\",\"hours_to_show\":\"x\"}")
                           "," SEC("{\"type\":\"sensor\",\"graph\":\"line\",\"entity\":\"sensor.a\",\"hours_to_show\":500}") "]", &l) == 4);
-    assert(l.pages[0].hours == 6);
-    assert(l.pages[1].hours == 24);
-    assert(l.pages[2].hours == 24);
-    assert(l.pages[3].hours == 168);
+    assert(l.pages[0].items[0].hours == 6);
+    assert(l.pages[1].items[0].hours == 24);
+    assert(l.pages[2].items[0].hours == 24);
+    assert(l.pages[3].items[0].hours == 168);
 }
 
 static void test_skips_unknown(void)
@@ -129,6 +129,16 @@ static void test_graph_first_wins(void)
     assert(l.pages[0].count == 1);
     assert(!strcmp(l.pages[0].items[0].entity, "sensor.g"));
     assert(parse_sections("[" SEC("{\"type\":\"sensor\",\"entity\":\"sensor.s\"}") "]", &l) == 0);
+}
+
+static void test_several_graphs(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC(HEAD("Netz") "," GRAPH("sensor.a") "," TILE("sensor.t") ","
+                                  "{\"type\":\"sensor\",\"graph\":\"line\",\"entity\":\"sensor.b\",\"hours_to_show\":6}") "]", &l) == 1);
+    assert(l.pages[0].kind == LAYOUT_GRAPH && l.pages[0].count == 2);
+    assert(!strcmp(l.pages[0].items[1].entity, "sensor.b"));
+    assert(l.pages[0].items[0].hours == 24 && l.pages[0].items[1].hours == 6);
 }
 
 static void test_limits(void)
@@ -191,13 +201,13 @@ static void test_sanitize(void)
     uint32_t before = layout_hash(&l);
     assert(layout_sanitize(&l));
     assert(layout_hash(&l) == before);   /* a valid layout comes back unchanged (cache hit) */
-    l.pages[0].hours = 0;
+    l.pages[0].items[0].hours = 0;
     l.pages[1].kind = 7;
     assert(layout_sanitize(&l));
-    assert(l.pages[0].hours == LAYOUT_HOURS_DEFAULT);
+    assert(l.pages[0].items[0].hours == LAYOUT_HOURS_DEFAULT);
     assert(l.pages[1].kind == LAYOUT_VALUES);
-    l.pages[0].hours = 9999;
-    assert(layout_sanitize(&l) && l.pages[0].hours == LAYOUT_HOURS_MAX);
+    l.pages[0].items[0].hours = 9999;
+    assert(layout_sanitize(&l) && l.pages[0].items[0].hours == LAYOUT_HOURS_MAX);
     l.pages[1].count = 9;
     assert(!layout_sanitize(&l) && l.count == 0);
     l.count = 42;
@@ -254,6 +264,7 @@ int main(void)
     test_skips_unknown();
     test_no_heading();
     test_graph_first_wins();
+    test_several_graphs();
     test_limits();
     test_bad_input();
     test_hash();
