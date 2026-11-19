@@ -453,7 +453,8 @@ static void use_layout(const ha_layout_t *l)
 
 /* Re-read the dashboard; switch to it if it is usable and differs from the current one.
  * Failures keep the current layout and never reach the error box. */
-static void refresh_layout(void)
+/* force: re-check entities and names even if the dashboard itself is unchanged */
+static void refresh_layout(bool force)
 {
     static ha_layout_t l;
     static uint32_t raw_hash;             /* parsed but unfiltered: skip the entity checks when unchanged */
@@ -461,7 +462,7 @@ static void refresh_layout(void)
     if (!json) return;
     int n = layout_parse(json, HA_VIEW, &l);
     free(json);
-    if (n && layout_hash(&l) == raw_hash && s_layout.count) return;
+    if (!force && n && layout_hash(&l) == raw_hash && s_layout.count) return;
     uint32_t h = layout_hash(&l);
     if (n) n = layout_filter(&l, entity_usable, NULL);
     if (n) resolve_names(&l);
@@ -495,10 +496,11 @@ static void ha_task(void *arg)
         EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
         s_err[0] = 0;
         if (s_busy_cb) s_busy_cb(true);
-        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT);
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT);
+        bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
-        if (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS))) {
-            refresh_layout();
+        if (refresh || (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)))) {
+            refresh_layout(refresh);
             layout_at = xTaskGetTickCount();
             layout_read = true;
         }
