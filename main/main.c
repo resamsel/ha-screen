@@ -544,7 +544,7 @@ static void create_clock_page(lv_obj_t *page, int pg)
         lv_obj_remove_style_all(bg);
         lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_radius(bg, 14, 0);
-        lv_obj_set_style_bg_opa(bg, LV_OPA_20, 0);   /* 80 % transparent */
+        lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);     /* 60 % transparent, like the buttons */
         lv_obj_set_size(bg, SCR_W - 16, SCR_H - STATUS_H - DOTS_H - 8);
         lv_obj_set_pos(bg, 8, STATUS_H + 4);
         s_clk_bg[pg] = bg;
