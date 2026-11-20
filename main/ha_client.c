@@ -513,6 +513,13 @@ static void utf8_trim(char *s);
 static void fetch_weather(int pg, int row);
 static void fetch_button(int pg, int row);
 
+/* A tap/toggle is waiting: background reads (graph history, pictures, the rest of a poll)
+ * stop so it reaches HA at once; they are picked up again on the next poll */
+static bool user_waiting(void)
+{
+    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT);
+}
+
 static bool fetch_state(void)
 {
     static resp_t r;
@@ -550,8 +557,8 @@ static bool fetch_state(void)
         }
     }
 
-    for (int pg = 0; pg < s_layout.count; pg++) {
-        for (int i = 0; i < s_layout.pages[pg].count; i++) {
+    for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++) {
+        for (int i = 0; i < s_layout.pages[pg].count && !user_waiting(); i++) {
             const layout_item_t *it = &s_layout.pages[pg].items[i];
             if (it->kind == LAYOUT_BUTTONS) { fetch_button(pg, i); continue; }
             if (it->kind == LAYOUT_WEATHER) { fetch_weather(pg, i); continue; }
@@ -1346,11 +1353,11 @@ static void ha_task(void *arg)
                 saved_at = now;
             }
         }
-        for (int pg = 0; pg < s_layout.count; pg++)
-            for (int i = 0; i < s_layout.pages[pg].count; i++)
+        for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++)
+            for (int i = 0; i < s_layout.pages[pg].count && !user_waiting(); i++)
                 if (s_layout.pages[pg].items[i].kind == LAYOUT_GRAPH) fetch_graph(pg, i);
         bool pic_force = b & (PIC_BIT | REFRESH_BIT);
-        if (pic_force || xTaskGetTickCount() - pic_at >= pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS)) {
+        if (!user_waiting() && (pic_force || xTaskGetTickCount() - pic_at >= pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS))) {
             fetch_pictures(pic_force);
             pic_at = xTaskGetTickCount();
         }

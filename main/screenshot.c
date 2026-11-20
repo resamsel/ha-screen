@@ -37,6 +37,8 @@ static void dump_flush(lv_disp_drv_t *drv, const lv_area_t *a, lv_color_t *px)
 
 static void (*s_touch)(void);
 static void (*s_page)(int);
+static void (*s_tap)(int, int);
+void screenshot_set_tap_cb(void (*cb)(int, int)) { s_tap = cb; }
 void screenshot_set_page_cb(void (*cb)(int)) { s_page = cb; }
 void screenshot_set_touch_cb(void (*cb)(void)) { s_touch = cb; }
 
@@ -70,6 +72,14 @@ static void task(void *arg)
         if (usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY) != 1) continue;
         else if (c == 's' || c == 'S') take(c == 'S');
         else if (c >= '0' && c <= '9' && s_page && lvgl_port_lock(0)) { s_page(c - '0'); lvgl_port_unlock(); }
+        else if (c == 'T') {
+            char buf[16];
+            int n = 0;
+            while (n < (int)sizeof(buf) - 1 && usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(500)) == 1 && c != '\n') buf[n++] = c;
+            buf[n] = 0;
+            int x, y;
+            if (s_tap && sscanf(buf, "%d,%d", &x, &y) == 2 && lvgl_port_lock(0)) { s_tap(x, y); lvgl_port_unlock(); }
+        }
 }
 
 void screenshot_start(void)

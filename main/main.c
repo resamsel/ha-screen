@@ -93,6 +93,7 @@ static void ha_layout_changed(const ha_layout_t *layout);
 static void ha_icon_changed(int page, int row, const char *icon);
 static void dots_show(void);
 static void show_page(int page);
+static void test_tap(int x, int y);
 
 static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
                              const float *pts, int n, int64_t end, int hours, bool zero_based);
@@ -202,6 +203,7 @@ void app_main(void)
     screenshot_start();
     screenshot_set_touch_cb(dots_show);
     screenshot_set_page_cb(show_page);
+    screenshot_set_tap_cb(test_tap);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -1873,6 +1875,14 @@ static void value_select(int g)
     s_sel = g;                            /* first: an animation applies its start value at once */
     if (old >= 0) group_animate(old, 256);
     if (g >= 0) group_animate(g, ZOOM_BIG);
+}
+
+static void value_tap(lv_point_t p);
+/* screenshot tool: a tap without a finger */
+static void test_tap(int x, int y)
+{
+    ESP_LOGI(TAG, "test tap %d,%d", x, y);
+    value_tap((lv_point_t){ x, y });
 }
 
 /* A tap on the main screen: select the value under the finger, or none */
