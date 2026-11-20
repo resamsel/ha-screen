@@ -906,9 +906,13 @@ static void use_layout(const ha_layout_t *l)
 /* Re-read the dashboard; switch to it if it is usable and differs from the current one.
  * Failures keep the current layout and never reach the error box. */
 /* force: re-check entities and names even if the dashboard itself is unchanged */
+/* one scratch layout for the boot cache and every dashboard re-read (~12 KB of RAM) */
+static ha_layout_t s_scratch;
+
 static void refresh_layout(bool force)
 {
-    static ha_layout_t l;
+    ha_layout_t *lp = &s_scratch;
+#define l (*lp)
     static uint32_t raw_hash;             /* parsed but unfiltered: skip the entity checks when unchanged */
     if (s_http) {                         /* two TLS sessions at once don't fit in RAM */
         esp_http_client_cleanup(s_http);
@@ -940,6 +944,7 @@ static void refresh_layout(bool force)
     ESP_LOGI(TAG, "new layout: %d pages", n);
     layout_store_save(&l);
     use_layout(&l);
+#undef l
 }
 
 #define PIC_MAX1(x) ((x) > 1 ? (x) : 1)
@@ -1307,9 +1312,8 @@ static void ha_task(void *arg)
     const char *body = "{\"entity_id\":\"" HA_THEME_ENTITY "\"}";
 
     {   /* start with the cached layout, if any */
-        static ha_layout_t cached;
-        if (layout_store_load(&cached)) {
-            use_layout(&cached);
+        if (layout_store_load(&s_scratch)) {
+            use_layout(&s_scratch);
             cache_replay();               /* the last data, until HA answers */
         }
     }
