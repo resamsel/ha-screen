@@ -39,6 +39,7 @@ typedef struct {
     uint8_t flags;          /* LAYOUT_CLOCK_* (clock cards), LAYOUT_PIC_* (pictures) */
     uint8_t kind;           /* layout_kind_t of this card: each card is its own block */
     uint8_t image;          /* pictures: 1-based index into ha_layout_t.images, 0 = the entity itself */
+    char icon[40];          /* card icon ("mdi:..."); "" = the entity's own; "-" = none (show_icon: false) */
     char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
                              * entity, text:<text>; resolved by the network task */
 } layout_item_t;
@@ -46,6 +47,7 @@ typedef struct {
 typedef struct {
     layout_kind_t kind;     /* kind of the first card (pages may mix kinds: see items[].kind) */
     char title[32];         /* section heading, "" if none */
+    char title_icon[40];    /* the heading's icon ("mdi:..."), "" if none */
     int count;
     layout_item_t items[LAYOUT_MAX_ROWS];
 } layout_page_t;

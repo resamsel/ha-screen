@@ -7,3 +7,5 @@ gcc -std=c11 -Wall -Werror -DLAYOUT_HOST -I main -I $J main/layout.c $J/cJSON.c 
 /tmp/layout_test
 gcc -std=c11 -Wall -Werror -I main main/names.c main/tz.c test/names_test.c -o /tmp/names_test
 /tmp/names_test
+gcc -std=c11 -Wall -Werror -I main main/icon_rule.c test/icon_rule_test.c -o /tmp/icon_rule_test
+/tmp/icon_rule_test

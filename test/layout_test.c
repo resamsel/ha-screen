@@ -319,6 +319,25 @@ static void test_picture(void)
     assert(layout_sanitize(&l) && l.pages[0].items[0].flags == LAYOUT_PIC_FLAGS);
 }
 
+static void test_icons(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"tile\",\"entity\":\"sensor.a\",\"icon\":\"mdi:fire\"}" ","
+                                  "{\"type\":\"button\",\"entity\":\"switch.b\",\"show_icon\":false,\"icon\":\"mdi:fire\"}" ","
+                                  "{\"type\":\"tile\",\"entity\":\"sensor.c\"}") "]", &l) == 1);
+    assert(!strcmp(l.pages[0].items[0].icon, "mdi:fire"));
+    assert(!strcmp(l.pages[0].items[1].icon, "-"));
+    assert(!l.pages[0].items[2].icon[0]);
+}
+
+static void test_heading_icon(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"heading\",\"heading\":\"Wetter\",\"icon\":\"mdi:weather-cloudy\"}" ","
+                                  "{\"type\":\"tile\",\"entity\":\"sensor.a\"}") "]", &l) == 1);
+    assert(!strcmp(l.pages[0].title, "Wetter") && !strcmp(l.pages[0].title_icon, "mdi:weather-cloudy"));
+}
+
 static void test_weather(void)
 {
     ha_layout_t l;
@@ -332,6 +351,8 @@ int main(void)
 {
     test_picture();
     test_weather();
+    test_icons();
+    test_heading_icon();
     test_clock();
     test_buttons();
     test_filter_kind();

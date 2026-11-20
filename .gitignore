@@ -70,3 +70,9 @@ dkms.conf
 
 # superpowers execution scratch
 .superpowers/
+
+# Material Design Icons package (tools/make_icons.py input)
+.mdi/
+
+# board screenshots (tools/screenshot.py)
+shots/

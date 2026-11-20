@@ -1,3 +1,4 @@
+#include "screenshot.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -89,6 +90,7 @@ static void ha_weather_changed(int page, int row, const char *cond, const char *
 static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
+static void ha_icon_changed(int page, int row, const char *icon);
 
 static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
                              const float *pts, int n, int64_t end, int hours, bool zero_based);
@@ -194,6 +196,8 @@ void app_main(void)
     ha_client_set_press_cb(ha_button_pressed);
     ha_client_set_picture_cb(ha_picture_changed);
     ha_client_set_weather_cb(ha_weather_changed);
+    ha_client_set_icon_cb(ha_icon_changed);
+    screenshot_start();
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -201,6 +205,7 @@ void app_main(void)
 #include "nvs.h"
 #include "names.h"
 #include "tz.h"
+#include "icons.h"
 #include "esp_log.h"
 
 
@@ -296,7 +301,7 @@ static void dots_show(void)
     lv_timer_resume(s_dots_timer);
 }
 static int s_page = 0;
-static lv_obj_t *s_page_title = NULL;               /* page name, left side of the status line */
+/* s_page_title, s_title_icon: page name and its icon, left side of the status line */
 
 /* graph page */
 /* graphs: one set per page and row; s_gi = GI(page, row) selects which one the s_g_* / s_chart
@@ -316,6 +321,124 @@ static lv_chart_series_t *s_chart_ser_[GRAPHS];
 static bool s_zero_[GRAPHS];               /* y axis from 0 */
 
 
+/* ---- Card icons (values, graphs, buttons): Material Design Icons from HA ---- */
+static lv_obj_t *s_icon[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_img_dsc_t s_icon_dsc[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static uint8_t *s_icon_px[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];   /* resampled bitmap (not 24 px), owned */
+static uint8_t s_icon_sz[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static char s_icon_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][48];   /* kept across UI rebuilds */
+#define ICON_GAP 6
+/* the card has room set aside for an icon (unless show_icon: false) */
+static bool icon_slot(int pg, int i)
+{
+    uint8_t k = KIND(pg, i);
+    return (k == LAYOUT_VALUES || k == LAYOUT_GRAPH || k == LAYOUT_BUTTONS) && s_layout.pages[pg].items[i].icon[0] != '-';
+}
+/* portrait tiles: icon on the left of the value, which moves right by this much */
+#define ICON_SHIFT(pg, i) (!s_landscape && KIND(pg, i) == LAYOUT_VALUES && icon_slot(pg, i) ? (ICON_SIZE + ICON_GAP) / 2 : 0)
+
+static void icon_show(int pg, int i)
+{
+    lv_obj_t *o = s_icon[pg][i];
+    if (!o) return;
+    const uint8_t *bm = icon_bitmap(s_icon_name[pg][i]);
+    if (!bm) { lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); return; }
+    int n = s_icon_sz[pg][i] ? s_icon_sz[pg][i] : ICON_SIZE;
+    if (n != ICON_SIZE) {                 /* LVGL can't zoom alpha-only images: resample */
+        if (!s_icon_px[pg][i]) s_icon_px[pg][i] = malloc(n * n / 2);
+        if (!s_icon_px[pg][i]) { lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); return; }
+        icon_scale(bm, s_icon_px[pg][i], n);
+        bm = s_icon_px[pg][i];
+    }
+    lv_img_dsc_t *d = &s_icon_dsc[pg][i];
+    d->header.always_zero = 0;
+    d->header.cf = LV_IMG_CF_ALPHA_4BIT;
+    d->header.w = n;
+    d->header.h = n;
+    d->data_size = n * n / 2;
+    d->data = bm;
+    lv_img_cache_invalidate_src(d);
+    lv_img_set_src(o, d);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void icons_free(void)
+{
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++) { free(s_icon_px[p][i]); s_icon_px[p][i] = NULL; }
+    memset(s_icon_sz, 0, sizeof(s_icon_sz));
+}
+
+static lv_obj_t *icon_create(lv_obj_t *parent, int pg, int i, lv_color_t color, int size)
+{
+    lv_obj_t *o = lv_img_create(parent);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(o, size, size);
+    s_icon_sz[pg][i] = size;
+    lv_obj_set_style_img_recolor(o, color, 0);
+    lv_obj_set_style_img_recolor_opa(o, LV_OPA_COVER, 0);
+    s_icon[pg][i] = o;
+    icon_show(pg, i);
+    return o;
+}
+
+/* Page title in the status line, with the heading's icon in front when it has one */
+static lv_obj_t *s_page_title, *s_title_icon;
+static lv_img_dsc_t s_title_icon_dsc;
+#define TITLE_ICON 20   /* px (even: 4 bpp rows), a bit bigger than the Wi-Fi symbol */
+static void title_update(void)
+{
+    if (!s_page_title) return;
+    const layout_page_t *p = &s_layout.pages[s_page];
+    lv_label_set_text(s_page_title, p->title);
+    const uint8_t *bm = p->title[0] ? icon_bitmap(p->title_icon) : NULL;
+    lv_coord_t x = 10;
+    if (s_title_icon) {
+        if (bm) {
+            static uint8_t px[TITLE_ICON * TITLE_ICON / 2];
+            icon_scale(bm, px, TITLE_ICON);   /* LVGL can't zoom alpha-only images */
+            s_title_icon_dsc.header.cf = LV_IMG_CF_ALPHA_4BIT;
+            s_title_icon_dsc.header.w = TITLE_ICON;
+            s_title_icon_dsc.header.h = TITLE_ICON;
+            s_title_icon_dsc.data_size = sizeof(px);
+            s_title_icon_dsc.data = px;
+            lv_img_cache_invalidate_src(&s_title_icon_dsc);
+            lv_img_set_src(s_title_icon, &s_title_icon_dsc);
+            lv_obj_clear_flag(s_title_icon, LV_OBJ_FLAG_HIDDEN);
+            x = 8 + TITLE_ICON + 5;
+        } else lv_obj_add_flag(s_title_icon, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_set_pos(s_page_title, x, 19 - lv_font_latin_16.line_height / 2);   /* centred on the status icons */
+    lv_obj_set_width(s_page_title, SCR_W - x - 52);   /* short of the Wi-Fi icon and HA dot */
+}
+
+/* The two text colours of the cards: MAIN for values, SEC for everything around them
+ * (names, titles, units, icons, ...): lighter than MAIN in light mode, darker in dark mode */
+#define COL_MAIN(light) lv_color_hex((light) ? 0x2D4152 : 0xE1E4E7)   /* light: HA's tile text */
+#define COL_SEC(light)  lv_color_hex((light) ? 0x3A4C5D : 0xB4BBC2)
+static lv_color_t icon_color(void) { return COL_SEC(s_light); }
+
+static void graph_block(int gi, lv_area_t *a);
+static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y);
+#define GRAPH_X 10   /* left margin of a graph's name and value inside its block */
+/* Tiles: left of the value (portrait) or above it (landscape columns); graphs: top right */
+static void icon_place(int pg, int i)
+{
+    lv_obj_t *o = s_icon[pg][i];
+    if (!o) return;
+    if (KIND(pg, i) == LAYOUT_GRAPH) {
+        lv_area_t b;
+        graph_block(GI(pg, i), &b);
+        lv_obj_set_pos(o, b.x2 + 1 - GRAPH_X - ICON_SIZE, b.y1 + 1);
+        return;
+    }
+    lv_coord_t cx, y;
+    value_pos(pg, i, &cx, &y);
+    const lv_font_t *vf = s_landscape ? &lv_font_montserrat_28 : &lv_font_montserrat_36;
+    if (s_landscape) lv_obj_set_pos(o, cx - ICON_SIZE / 2, y - ICON_SIZE - 2);
+    else lv_obj_set_pos(o, 6, y + (vf->line_height - ICON_SIZE) / 2);
+}
+
 /* Centre the value horizontally in its row and hang the unit off its right side,
  * on the same baseline. Call after changing either text (LVGL lock held). */
 static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y)
@@ -325,7 +448,7 @@ static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y)
         *cx = i * colw + colw / 2;
         *y = STATUS_H + (SCR_H - STATUS_H - BOTTOM_M - 52) / 2;
     } else {
-        *cx = SCR_W / 2;
+        *cx = SCR_W / 2 + ICON_SHIFT(pg, i);
         *y = row_y(i, ROWS(pg));
     }
 }
@@ -341,15 +464,16 @@ static int name_width(const char *txt, void *ctx)
     return sz.x;
 }
 
-static void graph_block(int gi, lv_area_t *a);
-#define GRAPH_X 10   /* left margin of a graph's name and value inside its block */
-
 /* Widest a name may be: its block (row/column) minus the margins */
 static lv_coord_t name_max_w(int pg, int i)
 {
     lv_area_t b;
     graph_block(GI(pg, i), &b);
-    return lv_area_get_width(&b) - (KIND(pg, i) == LAYOUT_GRAPH ? 2 * GRAPH_X : 8);
+    lv_coord_t w = lv_area_get_width(&b) - (KIND(pg, i) == LAYOUT_GRAPH ? 2 * GRAPH_X : 8);
+    /* room for the icon: right of a graph's name, left of a portrait tile's centred value */
+    if (KIND(pg, i) == LAYOUT_GRAPH && icon_slot(pg, i)) w -= ICON_SIZE + ICON_GAP;
+    w -= 2 * ICON_SHIFT(pg, i);
+    return w;
 }
 
 /* Text centred on cx below the value; ends in "..." if it still doesn't fit */
@@ -470,9 +594,13 @@ static void btn_paint(int pg, int i)
     default: break;
     }
     lv_obj_set_style_bg_color(b, bg, 0);
-    if (st == HA_BTN_UNAVAILABLE) text = lv_color_hex(s_light ? 0x7A808A : 0x8A8F98);   /* greyed text, opaque */
-    lv_obj_set_style_text_color(s_btn_name[pg][i], text, 0);
-    lv_obj_set_style_text_color(s_btn_state[pg][i], text, 0);
+    /* on: dark text on amber; otherwise the card colours (state = value colour, name and icon
+     * secondary; unavailable: all secondary) */
+    lv_color_t name = st == HA_BTN_ON ? text : COL_SEC(s_light);
+    lv_color_t state = st == HA_BTN_ON ? text : st == HA_BTN_UNAVAILABLE ? COL_SEC(s_light) : COL_MAIN(s_light);
+    lv_obj_set_style_text_color(s_btn_name[pg][i], name, 0);
+    lv_obj_set_style_text_color(s_btn_state[pg][i], state, 0);
+    if (s_icon[pg][i]) lv_obj_set_style_img_recolor(s_icon[pg][i], name, 0);
     lv_label_set_text(s_btn_state[pg][i], label);
     bool running = lv_anim_get(b, btn_pulse_cb) != NULL;
     if (s_btn_pending[pg][i] && !running) {
@@ -529,10 +657,28 @@ static void create_button(lv_obj_t *page, int pg, int i)
     lv_obj_set_height(s_btn_name[pg][i], lv_font_latin_16.line_height);   /* one line, "..." */
     lv_obj_set_style_text_align(s_btn_name[pg][i], LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_btn_name[pg][i], it->name[0] ? it->name : it->entity);
-    lv_obj_align(s_btn_name[pg][i], LV_ALIGN_CENTER, 0, -10);
     s_btn_state[pg][i] = lv_label_create(b);
     lv_obj_set_style_text_font(s_btn_state[pg][i], &lv_font_latin_14, 0);
-    lv_obj_align(s_btn_state[pg][i], LV_ALIGN_CENTER, 0, 12);
+    /* icon above name and state, all centred as one column: 2x icon when there is room,
+     * none when the button is too short for it */
+    lv_coord_t h = lv_obj_get_height(b), nh = lv_font_latin_16.line_height, sh = lv_font_latin_14.line_height;
+    lv_coord_t text = nh + 2 + sh, ih = 0;
+    if (icon_slot(pg, i)) {
+        if (h - 12 >= text + 4 + 2 * ICON_SIZE && inner >= 2 * ICON_SIZE) ih = 2 * ICON_SIZE;
+        else if (h - 8 >= text + 2 + ICON_SIZE) ih = ICON_SIZE;
+        else if (h - 8 >= nh + 2 + ICON_SIZE) {   /* short: icon and name, like HA, no state line */
+            ih = ICON_SIZE;
+            text = nh;
+            lv_obj_add_flag(s_btn_state[pg][i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lv_coord_t gap = ih ? (ih > ICON_SIZE ? 4 : 2) : 0, top = (h - (ih + gap + text)) / 2;
+    if (ih) {
+        lv_obj_t *o = icon_create(b, pg, i, lv_color_white(), ih);
+        lv_obj_align(o, LV_ALIGN_TOP_MID, 0, top);
+    }
+    lv_obj_align(s_btn_name[pg][i], LV_ALIGN_TOP_MID, 0, top + ih + gap);
+    lv_obj_align(s_btn_state[pg][i], LV_ALIGN_TOP_MID, 0, top + ih + gap + nh + 2);
     s_btn[pg][i] = b;
     btn_paint(pg, i);
 }
@@ -690,8 +836,9 @@ static void wx_cloud(lv_obj_t *p, int S, int x0, int y0, int w, uint32_t col)   
 
 static void wx_sun(lv_obj_t *p, int x, int y, int d)
 {
-    lv_obj_t *s = WX_DOT(p, x, y, d, 0xFDD93C);
-    lv_obj_set_style_shadow_color(s, lv_color_hex(0xFDD93C), 0);
+    uint32_t sun = s_light ? 0xF2B600 : 0xFDD93C;
+    lv_obj_t *s = WX_DOT(p, x, y, d, sun);
+    lv_obj_set_style_shadow_color(s, lv_color_hex(sun), 0);
     lv_obj_set_style_shadow_width(s, d / 3, 0);
     lv_obj_set_style_shadow_opa(s, LV_OPA_50, 0);
 }
@@ -700,8 +847,8 @@ static void wx_sun(lv_obj_t *p, int x, int y, int d)
 static void wx_draw_icon(lv_obj_t *p, int S, const char *c)
 {
     lv_obj_clean(p);
-    uint32_t cloud = s_light ? 0xC4C9CE : 0xDDE1E5, grey = s_light ? 0xA9AFB5 : 0xB8BDC2;
-    uint32_t rain = 0x30B3FF, snow = s_light ? 0x9FD8FF : 0xFFFFFF;
+    uint32_t cloud = s_light ? 0x7D8790 : 0xDDE1E5, grey = s_light ? 0x5E6770 : 0xB8BDC2;   /* light: dark enough on the light background */
+    uint32_t rain = s_light ? 0x1A8FD6 : 0x30B3FF, snow = s_light ? 0x3E9BD8 : 0xFFFFFF;
     bool rainy = !strcmp(c, "rainy") || !strcmp(c, "pouring") || !strcmp(c, "lightning-rainy") || !strcmp(c, "snowy-rainy");
     bool snowy = !strcmp(c, "snowy") || !strcmp(c, "snowy-rainy"), hail = !strcmp(c, "hail");
     bool bolt = !strncmp(c, "lightning", 9), fog = !strcmp(c, "fog");
@@ -713,7 +860,7 @@ static void wx_draw_icon(lv_obj_t *p, int S, const char *c)
         lv_obj_set_pos(a, S / 5, S / 5);
         lv_arc_set_bg_angles(a, 60, 300);
         lv_obj_set_style_arc_width(a, S / 6, LV_PART_MAIN);
-        lv_obj_set_style_arc_color(a, lv_color_hex(0xF0E6A8), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(a, lv_color_hex(s_light ? 0xC9A400 : 0xF0E6A8), LV_PART_MAIN);
         lv_obj_set_style_arc_rounded(a, true, LV_PART_MAIN);
         lv_obj_set_style_arc_opa(a, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
@@ -759,7 +906,7 @@ static void wx_draw_icon(lv_obj_t *p, int S, const char *c)
         int x = S * 22 / 100 + k * (S * 56 / 100) / (n - 1) - dw / 2;
         if (bolt && k == 1) continue;     /* the bolt sits in the middle */
         bool flake = snowy && (!rainy || k % 2 == 0);
-        if (hail) WX_DOT(p, x - dw / 2, y + S / 10 + (k % 2) * S / 10, dw * 2, s_light ? 0xB0C4D4 : 0xFFFFFF);
+        if (hail) WX_DOT(p, x - dw / 2, y + S / 10 + (k % 2) * S / 10, dw * 2, s_light ? 0x6F8BA3 : 0xFFFFFF);
         else if (flake) WX_DOT(p, x - dw / 2, y + S / 10 + (k % 2) * S / 10, dw * 2, snow);
         else if (rainy) wx_shape(p, x, y + S / 12 + (k % 2) * S / 12, dw, S / 5, rain, LV_RADIUS_CIRCLE);
     }
@@ -775,7 +922,7 @@ static void create_weather(lv_obj_t *page, int pg, int i)
     lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(bg, w, h);
     lv_obj_set_pos(bg, blk.x1 + 4, blk.y1 + 4);
-    lv_color_t fg = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
+    lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light);
     bool stacked = w < 240 && h >= 96;    /* portrait: icon + temperature on top, text below */
     int S = stacked ? LV_MIN(52, h / 2) : LV_MIN(52, h - 16), pad = 10;
 
@@ -792,9 +939,8 @@ static void create_weather(lv_obj_t *page, int pg, int i)
     lv_obj_set_style_text_font(u, &lv_font_latin_16, 0);
     lv_obj_set_style_text_font(hm, &lv_font_montserrat_14, 0);   /* has the drop symbol */
     lv_obj_set_style_text_color(t, fg, 0);
-    lv_obj_set_style_text_color(u, fg, 0);
-    lv_obj_set_style_text_color(hm, fg, 0);
-    lv_obj_set_style_text_opa(hm, LV_OPA_70, 0);
+    lv_obj_set_style_text_color(u, sec, 0);
+    lv_obj_set_style_text_color(hm, sec, 0);
 
     lv_obj_t *c = lv_label_create(bg), *n = lv_label_create(bg);
     lv_label_set_text(c, "");
@@ -802,8 +948,7 @@ static void create_weather(lv_obj_t *page, int pg, int i)
     lv_obj_set_style_text_font(c, &lv_font_latin_22, 0);
     lv_obj_set_style_text_font(n, &lv_font_latin_14, 0);
     lv_obj_set_style_text_color(c, fg, 0);
-    lv_obj_set_style_text_color(n, fg, 0);
-    lv_obj_set_style_text_opa(n, LV_OPA_70, 0);
+    lv_obj_set_style_text_color(n, sec, 0);
     lv_label_set_long_mode(c, LV_LABEL_LONG_DOT);
     lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
 
@@ -1048,11 +1193,8 @@ static void ha_button_pressed(int page, int row, bool ok)
 
 static void apply_temp_theme(bool light)
 {
-    lv_color_t fg = light ? lv_color_hex(0x1C1C1E) : lv_color_white();
-    /* name, value and unit colours of HA's sensor card (unit = name colour) */
-    lv_color_t sub = lv_color_hex(light ? 0x3B4A58 : 0xB1B8BE);   /* light: darker than HA for contrast */
-    lv_color_t val = lv_color_hex(light ? 0x2D4152 : 0xC7C7C7);
-    lv_color_t unit = sub;
+    lv_color_t fg = light ? lv_color_hex(0x1C1C1E) : lv_color_white();   /* page dots */
+    lv_color_t sub = COL_SEC(light), val = COL_MAIN(light), unit = sub;
     for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++) {
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++) {
             if (!s_val[pg][i]) continue;
@@ -1061,6 +1203,10 @@ static void apply_temp_theme(bool light)
             lv_obj_set_style_text_color(s_unit[pg][i], unit, 0);
         }
     }
+    for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++)
+            if (s_icon[pg][i] && pg < PAGE_COUNT && i < ROWS(pg) && KIND(pg, i) != LAYOUT_BUTTONS)
+                lv_obj_set_style_img_recolor(s_icon[pg][i], sub, 0);
     for (s_gi = 0; s_gi < GRAPHS; s_gi++) {
         if (!s_chart) continue;
         lv_obj_set_style_text_color(s_g_name, sub, 0);
@@ -1080,7 +1226,16 @@ static void apply_temp_theme(bool light)
             }
         }
     }
-    if (s_page_title) lv_obj_set_style_text_color(s_page_title, fg, 0);
+    if (s_page_title) lv_obj_set_style_text_color(s_page_title, val, 0);
+    if (s_title_icon) lv_obj_set_style_img_recolor(s_title_icon, val, 0);
+    /* weather cards: text colours and the icon (its shapes are coloured per theme) */
+    for (int pg = 0; pg < PAGE_COUNT; pg++)
+        for (int i = 0; i < ROWS(pg); i++) {
+            if (KIND(pg, i) != LAYOUT_WEATHER || !s_wx_temp[pg][i]) continue;
+            lv_obj_t *l[] = { s_wx_cond[pg][i], s_wx_temp[pg][i], s_wx_name[pg][i], s_wx_unit[pg][i], s_wx_hum[pg][i] };
+            for (int k = 0; k < 5; k++) lv_obj_set_style_text_color(l[k], k < 2 ? val : sub, 0);   /* condition, temperature */
+            if (s_wx_last[pg][i][0]) wx_draw_icon(s_wx_icon[pg][i], lv_obj_get_width(s_wx_icon[pg][i]), s_wx_last[pg][i]);
+        }
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
         if (!s_dot[pg]) continue;
         lv_obj_set_style_bg_color(s_dot[pg], pg == s_page ? fg : lv_color_hex(light ? 0xAEB4BE : 0x4A5058), 0);
@@ -1097,7 +1252,7 @@ static void show_page(int page)
     if (page < 0) page = 0;                       /* no wrap-around: stop at either end */
     if (page >= PAGE_COUNT) page = PAGE_COUNT - 1;
     s_page = page;
-    lv_label_set_text(s_page_title, s_layout.pages[s_page].title);
+    title_update();
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_strip);
@@ -1157,6 +1312,7 @@ static void ha_graph_changed(int graph, int row, const char *latest, const char 
         }
         lv_label_set_text(s_g_val, latest);
         lv_label_set_text(s_g_unit, unit ? unit : "");
+        fit_value(s_g_val, s_g_unit, name_max_w(graph, row));   /* clear of the icon */
         place_graph_value();
     }
     if (pts) {
@@ -1306,13 +1462,17 @@ static void create_graph(lv_obj_t *page)
     s_g_unit = lv_label_create(page);
     lv_label_set_text(s_g_unit, "");
     lv_obj_set_style_text_font(s_g_unit, UFONT, 0);
-    lv_obj_set_style_text_opa(s_g_unit, LV_OPA_80, 0);
+    lv_obj_set_style_text_opa(s_g_unit, LV_OPA_COVER, 0);
     place_graph_value();
     s_g_name = lv_label_create(page);
     const layout_item_t *it = &s_layout.pages[GPG(s_gi)].items[GROW(s_gi)];
     lv_obj_set_style_text_font(s_g_name, NFONT, 0);
     snprintf(s_full[GPG(s_gi)][GROW(s_gi)], 32, "%.31s", it->name[0] ? it->name : it->entity);
     (void)ny;
+    if (icon_slot(GPG(s_gi), GROW(s_gi))) {
+        icon_create(page, GPG(s_gi), GROW(s_gi), icon_color(), ICON_SIZE);
+        icon_place(GPG(s_gi), GROW(s_gi));
+    }
 
     /* line chart below the value to the bottom of the block, no axes or grid */
     lv_area_t b;
@@ -1381,8 +1541,9 @@ static void create_pages(lv_obj_t *scr)
             s_unit[pg][i] = lv_label_create(page);
             lv_label_set_text(s_unit[pg][i], "");
             lv_obj_set_style_text_font(s_unit[pg][i], UFONT, 0);
-            lv_obj_set_style_text_opa(s_unit[pg][i], LV_OPA_80, 0);
+            lv_obj_set_style_text_opa(s_unit[pg][i], LV_OPA_COVER, 0);
             place_value(pg, i);
+            if (icon_slot(pg, i)) { icon_create(page, pg, i, icon_color(), ICON_SIZE); icon_place(pg, i); }
         }
         page_names_update(pg);
     }
@@ -1414,8 +1575,12 @@ static void create_pages(lv_obj_t *scr)
     lv_label_set_long_mode(s_page_title, LV_LABEL_LONG_DOT);   /* ends in "..." when too long */
     lv_obj_set_size(s_page_title, SCR_W - 10 - 52, lv_font_latin_16.line_height);   /* one line, short of the status icons */
     /* vertically centred on the status icons (HA dot centre is at y = 14 + 10/2) */
-    lv_obj_align(s_page_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_latin_16.line_height / 2);
-    lv_label_set_text(s_page_title, s_layout.pages[s_page].title);
+    s_title_icon = lv_img_create(scr);
+    lv_obj_clear_flag(s_title_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_img_recolor_opa(s_title_icon, LV_OPA_COVER, 0);
+    /* centred on y = 19, like the Wi-Fi symbol and HA dot on the right */
+    lv_obj_set_pos(s_title_icon, 8, 19 - TITLE_ICON / 2);
+    title_update();
     apply_temp_theme(s_light);
 }
 
@@ -1773,6 +1938,7 @@ static void create_ui(void)
     lv_obj_t *scr = lv_scr_act();
     lv_anim_del_all();
     lv_obj_clean(scr);
+    s_page_title = s_title_icon = NULL;
     s_dots_box = NULL;                    /* deleted with the screen: don't touch them */
     s_wifi_icon[0] = s_ha_icon[0] = s_wifi_icon[1] = s_ha_icon[1] = NULL;
     pic_free_all();
@@ -1784,6 +1950,8 @@ static void create_ui(void)
     s_cfg_open = false;
     s_dragging = s_paging = false;
     memset(s_val, 0, sizeof(s_val));
+    memset(s_icon, 0, sizeof(s_icon));
+    icons_free();
     memset(s_unit, 0, sizeof(s_unit));
     memset(s_name, 0, sizeof(s_name));
     memset(s_g_val_, 0, sizeof(s_g_val_));
@@ -2318,11 +2486,23 @@ static void orient_cb(lv_event_t *e)
 
 /* Network task: a new layout from the dashboard (or the NVS cache). Rebuilds the UI right
  * away, before the values for it arrive; keeps the current page when it still exists. */
+/* Network task: a card's icon changed */
+static void ha_icon_changed(int page, int row, const char *icon)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page >= 0 && page < LAYOUT_MAX_PAGES && row >= 0 && row < LAYOUT_MAX_ROWS) {
+        snprintf(s_icon_name[page][row], sizeof(s_icon_name[page][row]), "%s", icon);
+        if (page < PAGE_COUNT && row < ROWS(page)) icon_show(page, row);
+    }
+    lvgl_port_unlock();
+}
+
 static void ha_layout_changed(const ha_layout_t *layout)
 {
     if (!lvgl_port_lock(0)) return;
     bool was_open = s_cfg_open;
     s_layout = *layout;
+    memset(s_icon_name, 0, sizeof(s_icon_name));   /* rows changed: HA sends them again */
     create_ui();   /* keeps the current page when it still exists */
     if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
     lv_obj_invalidate(lv_scr_act());

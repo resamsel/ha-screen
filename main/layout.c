@@ -112,7 +112,11 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
         const char *ct = str(card, "type");
         if (ct && !strcmp(ct, "heading")) {
             const char *h = str(card, "heading");
-            if (h && !pg->title[0]) copy(pg->title, sizeof(pg->title), h);
+            const char *hi = str(card, "icon");
+            if (h && !pg->title[0]) {
+                copy(pg->title, sizeof(pg->title), h);
+                if (hi && strlen(hi) < sizeof(pg->title_icon)) copy(pg->title_icon, sizeof(pg->title_icon), hi);
+            }
             continue;
         }
         bool clock = ct && !strcmp(ct, "clock");
@@ -168,6 +172,9 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
         } else if (src) {
             LOGW("section %d: picture source longer than %d characters, skipped", idx, LAYOUT_IMAGE_LEN - 1);
         }
+        const char *icon = str(card, "icon");
+        if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_icon"))) copy(it->icon, sizeof(it->icon), "-");
+        else if (icon && strlen(icon) < sizeof(it->icon)) copy(it->icon, sizeof(it->icon), icon);
         if (graph) {
             const cJSON *h = cJSON_GetObjectItemCaseSensitive(card, "hours_to_show");
             int hours = cJSON_IsNumber(h) ? (int)h->valuedouble : 0;
@@ -280,6 +287,7 @@ bool layout_sanitize(ha_layout_t *l)
             pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
             pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
+            pg->items[i].icon[sizeof(pg->items[i].icon) - 1] = 0;
             if (pg->items[i].kind != LAYOUT_PICTURE || pg->items[i].image > LAYOUT_MAX_IMAGES) pg->items[i].image = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
             pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : pg->items[i].kind == LAYOUT_CLOCK ? LAYOUT_CLOCK_FLAGS : 0;

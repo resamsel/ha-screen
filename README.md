@@ -19,6 +19,9 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
   when their state changes, URLs on each page visit. JPEG (baseline) and PNG (non-interlaced)
 - a `weather-forecast` card = current weather of a `weather.*` entity: icon, condition, name,
   temperature and humidity (the forecast is not shown)
+- icons on tiles, sensor graphs and buttons, as in HA: the card's `icon`, else the entity's,
+  else HA's icon for its integration, device class or domain (`show_icon: false` hides it).
+  All Material Design Icons are built in (`tools/make_icons.py` -> `main/mdi_icons.bin`)
 - up to 8 pages; anything else (other cards, missing or non-numeric entities) is skipped
 
 The last good layout is kept in flash, so the board starts with it when HA isn't reachable.
@@ -38,6 +41,11 @@ and compiled into the firmware. The build stops if one is missing. Keep them in 
 
 They end up in the generated `build/esp-idf/main/secrets_env.h` (in the build directory,
 never in the source tree). Anyone with the firmware binary can read them.
+
+## Screenshots
+
+With the board on USB, `python3 tools/screenshot.py [port] [out.png]` saves what is on screen
+(needs pyserial and Pillow; the board redraws once and streams it over the cable).
 
 ## Build and flash
 

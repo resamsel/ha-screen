@@ -65,6 +65,11 @@ void ha_client_toggle_landscape(void);
 typedef void (*ha_picture_cb_t)(int page, int row, uint16_t *pixels, int w, int h, int zoom, const char *name);
 void ha_client_set_picture_cb(ha_picture_cb_t cb);  /* call before ha_client_start */
 
+/* Icon of a value, graph or button card: "mdi:<name>", or "" for none. Sent when it changes
+ * (and again after every new layout). */
+typedef void (*ha_icon_cb_t)(int page, int row, const char *icon);
+void ha_client_set_icon_cb(ha_icon_cb_t cb);  /* call before ha_client_start */
+
 /* Weather card: condition = HA state (sunny, fog, ...; "" when unavailable), temperature
  * and humidity as HA sends them ("" when missing), unit like "°C". */
 typedef void (*ha_weather_cb_t)(int page, int row, const char *condition, const char *temp, const char *unit,

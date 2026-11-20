@@ -20,6 +20,7 @@ static void add_error(const char *fmt, ...);
 #include "esp_crt_bundle.h"
 #include "ha_client.h"
 #include "dash_fetch.h"
+#include "icon_rule.h"
 #include "layout_store.h"
 #include "names.h"
 #include "rom/tjpgd.h"
@@ -63,6 +64,10 @@ void ha_client_set_busy_cb(ha_busy_cb_t cb) { s_busy_cb = cb; }
 static ha_layout_t s_layout;              /* current layout, used only by the network task */
 static ha_picture_cb_t s_pic_cb;
 void ha_client_set_picture_cb(ha_picture_cb_t cb) { s_pic_cb = cb; }
+static ha_icon_cb_t s_icon_cb;
+void ha_client_set_icon_cb(ha_icon_cb_t cb) { s_icon_cb = cb; }
+static char *s_icon_rule[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];      /* from HA's icon tables */
+static char s_icon_last[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][48];   /* last icon reported */
 static ha_weather_cb_t s_weather_cb;
 void ha_client_set_weather_cb(ha_weather_cb_t cb) { s_weather_cb = cb; }
 static portMUX_TYPE s_pic_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -292,7 +297,8 @@ static bool json_num(const char *json, const char *key, float *out)
     return true;
 }
 
-static float read_entity(const layout_item_t *it, char text[24], char unit[8], char name[32]);
+static float read_entity(int pg, int row, char text[24], char unit[8], char name[32]);
+static void report_icon(int pg, int row, const char *json);
 static void utf8_trim(char *s);
 static void fetch_weather(int pg, int row);
 static void fetch_button(int pg, int row);
@@ -336,7 +342,7 @@ static bool fetch_state(void)
             if (it->kind == LAYOUT_WEATHER) { fetch_weather(pg, i); continue; }
             if (it->kind != LAYOUT_VALUES) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
-            read_entity(it, text, unit, name);
+            read_entity(pg, i, text, unit, name);
             if (s_sensor_cb) s_sensor_cb(pg, i, text, unit, name);
         }
     }
@@ -357,8 +363,9 @@ static bool json_str(const char *json, const char *key, char *out, size_t n)
 
 /* Current value of a layout item as display text ("--" when not numeric), its unit and the
  * name to show (card name, else friendly_name, else the entity id). Returns the value, or NAN. */
-static float read_entity(const layout_item_t *it, char text[24], char unit[8], char name[32])
+static float read_entity(int pg, int row, char text[24], char unit[8], char name[32])
 {
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
     static resp_t r;
     char path[96];
     float v = NAN;
@@ -367,6 +374,7 @@ static float read_entity(const layout_item_t *it, char text[24], char unit[8], c
     snprintf(name, 32, "%.31s", it->name[0] ? it->name : it->entity);
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
     if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+        report_icon(pg, row, r.buf);
         if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, 32)) utf8_trim(name);
         json_str(r.buf, "\"unit_of_measurement\":\"", unit, 8);
         char st[48];
@@ -389,7 +397,7 @@ static void fetch_graph(int pg, int row)
 {
     const layout_item_t *it = &s_layout.pages[pg].items[row];
     char latest[24], unit[8], name[32], path[256];
-    read_entity(it, latest, unit, name);
+    read_entity(pg, row, latest, unit, name);
     bool zero_based = !strcmp(unit, "%");
     if (s_graph_cb) s_graph_cb(pg, row, latest, unit, name, NULL, 0, 0, it->hours, zero_based);
 
@@ -445,6 +453,7 @@ static void fetch_button(int pg, int row)
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
     ha_btn_state_t bs = HA_BTN_UNAVAILABLE;
     if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+        report_icon(pg, row, r.buf);
         if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
         json_str(r.buf, "\"state\":\"", state, sizeof(state));
         if (!strcmp(state, "unavailable")) bs = HA_BTN_UNAVAILABLE;
@@ -577,11 +586,81 @@ static void resolve_names(ha_layout_t *l)
     }
 }
 
+/* Icons: the card's icon, else the entity's icon attribute, else HA's icon tables (the
+ * integration's icon for the entity's translation key, else the domain's icon for its device
+ * class, else the domain default), like HA's frontend */
+static bool has_icon(const layout_item_t *it)
+{
+    return (it->kind == LAYOUT_VALUES || it->kind == LAYOUT_GRAPH || it->kind == LAYOUT_BUTTONS) && it->icon[0] != '-';
+}
+
+static void load_icon_rules(void)
+{
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++) { free(s_icon_rule[p][i]); s_icon_rule[p][i] = NULL; }
+    memset(s_icon_last, 0, sizeof(s_icon_last));
+    dash_ws_t *ws = NULL;
+    for (int p = 0; p < s_layout.count; p++)
+        for (int i = 0; i < s_layout.pages[p].count; i++) {
+            const layout_item_t *it = &s_layout.pages[p].items[i];
+            if (!has_icon(it) || it->icon[0]) continue;
+            if (!ws && !(ws = dash_ws_open())) return;
+            char body[200], platform[32] = "", tkey[48] = "", dc[32] = "", domain[24], rule[320] = "";
+            snprintf(domain, sizeof(domain), "%.*s", (int)strcspn(it->entity, "."), it->entity);
+            snprintf(body, sizeof(body), "\"type\":\"config/entity_registry/get\",\"entity_id\":\"%s\"", it->entity);
+            char *msg = dash_ws_call(ws, body);
+            const char *reg = json_obj_get(msg, "result");
+            json_get_str(json_obj_get(reg, "platform"), platform, sizeof(platform));
+            json_get_str(json_obj_get(reg, "translation_key"), tkey, sizeof(tkey));
+            if (!json_get_str(json_obj_get(reg, "device_class"), dc, sizeof(dc)))
+                json_get_str(json_obj_get(reg, "original_device_class"), dc, sizeof(dc));
+            free(msg);
+            if (!dc[0]) {                 /* not in the registry: the state has it */
+                static resp_t r;
+                snprintf(body, sizeof(body), "/api/states/%s", it->entity);
+                if (ha_request(HTTP_METHOD_GET, body, NULL, &r) == 200) json_str(r.buf, "\"device_class\":\"", dc, sizeof(dc));
+            }
+            if (platform[0] && tkey[0]) {
+                snprintf(body, sizeof(body), "\"type\":\"frontend/get_icons\",\"category\":\"entity\",\"integration\":\"%s\"", platform);
+                msg = dash_ws_call(ws, body);
+                icon_rule_from_icons(msg, platform, domain, tkey, rule, sizeof(rule));
+                free(msg);
+            }
+            if (!rule[0]) {
+                snprintf(body, sizeof(body), "\"type\":\"frontend/get_icons\",\"category\":\"entity_component\",\"integration\":\"%s\"", domain);
+                msg = dash_ws_call(ws, body);
+                if (!dc[0] || !icon_rule_from_icons(msg, domain, NULL, dc, rule, sizeof(rule)))
+                    icon_rule_from_icons(msg, domain, NULL, "_", rule, sizeof(rule));
+                free(msg);
+            }
+            ESP_LOGI(TAG, "icon %s: %s", it->entity, rule[0] ? rule : "(none)");
+            s_icon_rule[p][i] = rule[0] ? strdup(rule) : NULL;
+        }
+    dash_ws_close(ws);
+}
+
+/* The icon for this state (json = /api/states result), reported when it changes */
+static void report_icon(int pg, int row, const char *json)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    char icon[48] = "", state[48] = "";
+    if (!has_icon(it)) return;
+    if (it->icon[0]) snprintf(icon, sizeof(icon), "%s", it->icon);
+    else if (!json_str(json, "\"icon\":\"", icon, sizeof(icon))) {
+        json_str(json, "\"state\":\"", state, sizeof(state));
+        icon_rule_apply(s_icon_rule[pg][row], state, icon, sizeof(icon));
+    }
+    if (!strcmp(icon, s_icon_last[pg][row])) return;
+    strcpy(s_icon_last[pg][row], icon);
+    if (s_icon_cb) s_icon_cb(pg, row, icon);
+}
+
 static void use_layout(const ha_layout_t *l)
 {
     s_layout = *l;
     s_layout_hash = layout_hash(l);
     if (s_layout_cb) s_layout_cb(&s_layout);
+    load_icon_rules();
 }
 
 /* Re-read the dashboard; switch to it if it is usable and differs from the current one.

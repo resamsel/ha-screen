@@ -1,7 +1,8 @@
-idf_component_register(SRCS "main.c" "ha_client.c" "bg_dark.c" "bg_light.c" "layout.c" "layout_store.c" "dash_fetch.c" "names.c" "tz.c"
+idf_component_register(SRCS "main.c" "ha_client.c" "bg_dark.c" "bg_light.c" "layout.c" "layout_store.c" "dash_fetch.c" "names.c" "tz.c" "icon_rule.c" "icons.c" "screenshot.c"
                          "fonts/lv_font_latin_12.c" "fonts/lv_font_latin_14.c" "fonts/lv_font_latin_16.c" "fonts/lv_font_latin_22.c"
                          "fonts/lv_font_clock_24.c" "fonts/lv_font_clock_28.c" "fonts/lv_font_clock_32.c" "fonts/lv_font_clock_36.c" "fonts/lv_font_clock_40.c" "fonts/lv_font_clock_44.c" "fonts/lv_font_clock_48.c" "fonts/lv_font_clock_56.c" "fonts/lv_font_clock_64.c" "fonts/lv_font_clock_72.c"
-                    INCLUDE_DIRS ".")
+                    INCLUDE_DIRS "."
+                    EMBED_FILES "mdi_icons.bin")
 
 # Secrets come from environment variables at build time (see gen_secrets.cmake)
 set(SECRETS_H "${CMAKE_CURRENT_BINARY_DIR}/secrets_env.h")
