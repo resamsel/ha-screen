@@ -107,6 +107,7 @@ static void ha_errors(const char *errors);
 static bool s_busy = false;
 static bool s_swiped = false;   /* this touch became a swipe: buttons ignore its release */
 static bool s_light = false;   /* current theme */
+static int s_boot_page = -1;   /* page saved before the last reboot, until the pages exist */
 static bool s_refreshing = false;
 static lv_obj_t *s_refresh_btn = NULL;
 static void refresh_cb(lv_event_t *e);
@@ -181,7 +182,12 @@ void app_main(void)
         // lv_demo_music();
         nvs_handle_t nv;
         uint8_t land = 0;
-        if (nvs_open("ui", NVS_READONLY, &nv) == ESP_OK) { nvs_get_u8(nv, "landscape", &land); nvs_close(nv); }
+        uint8_t page = 0;
+        if (nvs_open("ui", NVS_READONLY, &nv) == ESP_OK) {
+            nvs_get_u8(nv, "landscape", &land);
+            if (nvs_get_u8(nv, "page", &page) == ESP_OK) s_boot_page = page;
+            nvs_close(nv);
+        }
         s_landscape = land;
         apply_rotation();
         create_ui();
@@ -1306,6 +1312,20 @@ static void apply_temp_theme(bool light)
 static void strip_anim_x(void *obj, int32_t x) { lv_obj_set_x(obj, x); }
 
 static void value_select(int g);
+/* The shown page, saved once it has stayed for a few seconds (no flash write per swipe) */
+static void page_save_cb(lv_timer_t *t)
+{
+    lv_timer_pause(t);
+    nvs_handle_t nv;
+    uint8_t old = 0xFF;
+    if (nvs_open("ui", NVS_READWRITE, &nv) != ESP_OK) return;
+    if (nvs_get_u8(nv, "page", &old) != ESP_OK || old != s_page) {
+        nvs_set_u8(nv, "page", (uint8_t)s_page);
+        nvs_commit(nv);
+    }
+    nvs_close(nv);
+}
+
 static void show_page(int page)
 {
     value_select(-1);
@@ -1314,6 +1334,10 @@ static void show_page(int page)
     if (page >= PAGE_COUNT) page = PAGE_COUNT - 1;
     s_page = page;
     title_update();
+    static lv_timer_t *save;
+    if (!save) save = lv_timer_create(page_save_cb, 5000, NULL);
+    lv_timer_reset(save);
+    lv_timer_resume(save);
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_strip);
@@ -2084,6 +2108,8 @@ static void create_ui(void)
     s_dots_box = NULL;                    /* deleted with the screen: don't touch them */
     s_wifi_icon[0] = s_ha_icon[0] = s_wifi_icon[1] = s_ha_icon[1] = NULL;
     pic_free_all();
+    /* back on the page shown before the reboot, once there are pages */
+    if (s_boot_page >= 0 && PAGE_COUNT) { s_page = s_boot_page; s_boot_page = -1; }
     /* stay on the current page across rebuilds (rotation, new layout) when it still exists */
     if (s_page >= PAGE_COUNT) s_page = 0;
     s_sel = -1;
