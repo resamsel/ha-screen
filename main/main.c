@@ -217,7 +217,10 @@ void app_main(void)
  * Sensor pages (temperature, humidity) first, then the graph page.
  * Rows share the height between the status line and the dots evenly. */
 #define STATUS_H   30                    /* top strip reserved for Wi-Fi icon and HA dot */
-#define DOTS_H     22                    /* bottom strip for the page dots */
+#define DOTS_H     22                    /* bottom strip for the page dots (config panel) */
+#define BOTTOM_M   4                     /* page content reaches this close to the bottom: the
+                                          * page dots float over it and fade out */
+#define DOTS_SHOW_MS 3000                /* page dots fade out this long after the last touch */
 #define ROW_BLOCK  64                    /* value (36 px font) + name below it */
 #define PAGE_W     SCR_W
 #define SWIPE_MIN  40                    /* drag distance that flips the page */
@@ -231,7 +234,7 @@ static ha_layout_t s_layout;                  /* pages from the HA dashboard (LV
 static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y);
 static lv_coord_t row_y(int i, int rows)
 {
-    lv_coord_t slot = (SCR_H - STATUS_H - DOTS_H) / LV_MAX(rows, 1);
+    lv_coord_t slot = (SCR_H - STATUS_H - BOTTOM_M) / LV_MAX(rows, 1);
     return STATUS_H + i * slot + (slot - ROW_BLOCK) / 2;
 }
 
@@ -240,6 +243,57 @@ static lv_obj_t *s_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_val[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_dot[LAYOUT_MAX_PAGES];
+static lv_obj_t *s_dots_box;                             /* pill holding the dots, fades */
+static lv_timer_t *s_dots_timer;
+
+static bool s_dots_on = true;     /* within DOTS_SHOW_MS of the last touch */
+static bool s_status_quiet;       /* Wi-Fi and HA fine and nothing being read: icons may fade */
+
+static void dots_opa_cb(void *o, int32_t v) { lv_obj_set_style_opa(o, v, 0); }
+static void fade_obj(lv_obj_t *o, lv_opa_t to, uint32_t ms)
+{
+    if (!o) return;
+    lv_anim_del(o, dots_opa_cb);
+    lv_opa_t from = lv_obj_get_style_opa(o, 0);
+    if (from == to) return;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, o);
+    lv_anim_set_exec_cb(&a, dots_opa_cb);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_time(&a, ms);
+    lv_anim_start(&a);
+}
+static void dots_fade(lv_opa_t to, uint32_t ms) { fade_obj(s_dots_box, to, ms); }
+
+/* Main-screen status icons: shown on touch and whenever something needs attention */
+static void status_icons_update(void)
+{
+    bool show = s_dots_on || !s_status_quiet;
+    fade_obj(s_wifi_icon[0], show ? LV_OPA_COVER : LV_OPA_TRANSP, show ? 200 : 600);
+    fade_obj(s_ha_icon[0], show ? LV_OPA_COVER : LV_OPA_TRANSP, show ? 200 : 600);
+}
+
+static void dots_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    lv_timer_pause(s_dots_timer);
+    s_dots_on = false;
+    dots_fade(LV_OPA_TRANSP, 600);
+    status_icons_update();
+}
+
+/* Show the page dots now; they fade out DOTS_SHOW_MS later (restarted by every touch) */
+static void dots_show(void)
+{
+    s_dots_on = true;
+    status_icons_update();
+    if (!s_dots_box) return;
+    dots_fade(LV_OPA_COVER, 200);
+    if (!s_dots_timer) s_dots_timer = lv_timer_create(dots_timer_cb, DOTS_SHOW_MS, NULL);
+    lv_timer_reset(s_dots_timer);
+    lv_timer_resume(s_dots_timer);
+}
 static int s_page = 0;
 static lv_obj_t *s_page_title = NULL;               /* page name, left side of the status line */
 
@@ -268,7 +322,7 @@ static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y)
     if (s_landscape) {
         lv_coord_t colw = SCR_W / LV_MAX(ROWS(pg), 1);
         *cx = i * colw + colw / 2;
-        *y = STATUS_H + (SCR_H - STATUS_H - DOTS_H - 52) / 2;
+        *y = STATUS_H + (SCR_H - STATUS_H - BOTTOM_M - 52) / 2;
     } else {
         *cx = SCR_W / 2;
         *y = row_y(i, ROWS(pg));
@@ -1174,7 +1228,7 @@ static float nice_ceil(float x)
 static void graph_block(int gi, lv_area_t *a)
 {
     int pg = GPG(gi), r = GROW(gi), n = LV_MAX(ROWS(pg), 1);
-    lv_coord_t top = STATUS_H, bottom = SCR_H - DOTS_H;
+    lv_coord_t top = STATUS_H, bottom = SCR_H - BOTTOM_M;
     if (s_landscape) {
         lv_coord_t w = SCR_W / n;
         a->x1 = r * w; a->x2 = a->x1 + w - 1; a->y1 = top; a->y2 = bottom - 1;
@@ -1333,19 +1387,26 @@ static void create_pages(lv_obj_t *scr)
     }
     s_gi = 0;
 
-    /* Page dots, centred at the bottom; fixed on the screen, not part of the strip */
+    /* Page dots, centred at the bottom (no background); fixed on the screen, not part of the
+     * strip, above the pages (which run under them) */
     const lv_coord_t d = 6, gap = 10;   /* dot 20 % smaller than the original 8 px */
     lv_coord_t total = PAGE_COUNT * d + (PAGE_COUNT - 1) * gap;
+    s_dots_box = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_dots_box);
+    lv_obj_clear_flag(s_dots_box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_dots_box, total + 16, d + 10);
+    lv_obj_set_style_radius(s_dots_box, LV_RADIUS_CIRCLE, 0);
+    lv_obj_align(s_dots_box, LV_ALIGN_BOTTOM_MID, 0, -(DOTS_H - d - 10) / 2);
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
-        s_dot[pg] = lv_obj_create(scr);
+        s_dot[pg] = lv_obj_create(s_dots_box);
         lv_obj_remove_style_all(s_dot[pg]);
         lv_obj_set_size(s_dot[pg], d, d);
         lv_obj_set_style_radius(s_dot[pg], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_opa(s_dot[pg], LV_OPA_COVER, 0);
         lv_obj_clear_flag(s_dot[pg], LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_align(s_dot[pg], LV_ALIGN_BOTTOM_LEFT,
-                     (PAGE_W - total) / 2 + pg * (d + gap), -(DOTS_H - d) / 2);
+        lv_obj_set_pos(s_dot[pg], 8 + pg * (d + gap), 5);
     }
+    dots_show();
 
     s_page_title = lv_label_create(scr);
     lv_obj_set_style_text_font(s_page_title, &lv_font_latin_16, 0);
@@ -1637,6 +1698,7 @@ static void edge_swipe_cb(lv_event_t *e)
     lv_indev_get_point(lv_indev_get_act(), &p);
 
     if (code == LV_EVENT_PRESSED) {
+        dots_show();
         s_dragging = s_cfg_open || p.y <= CFG_EDGE;
         s_paging = !s_dragging && s_strip;
         s_drag_start_x = p.x;
@@ -1710,6 +1772,7 @@ static void create_ui(void)
     lv_obj_t *scr = lv_scr_act();
     lv_anim_del_all();
     lv_obj_clean(scr);
+    s_dots_box = NULL;
     pic_free_all();
     /* stay on the current page across rebuilds (rotation, new layout) when it still exists */
     if (s_page >= PAGE_COUNT) s_page = 0;
@@ -1890,11 +1953,13 @@ static void set_busy(bool busy)
  * Must be called with the LVGL lock held. */
 
 /* HA dot fades in and out while connecting (no Wi-Fi) or while data is being read */
-static bool s_net_busy, s_offline = true;
+static bool s_net_busy, s_offline = true, s_ha_ok;
 static void dot_opa_cb(void *obj, int32_t v) { lv_obj_set_style_bg_opa(obj, (lv_opa_t)v, 0); }
 static void update_dot_pulse(void)
 {
     bool on = s_net_busy || s_offline;
+    s_status_quiet = !on && s_ha_ok;
+    status_icons_update();
     for (int i = 0; i < 2; i++) {
         lv_obj_t *d = s_ha_icon[i];
         if (!d) continue;
@@ -1939,6 +2004,7 @@ static void show_status(ha_state_t state)
         lv_obj_set_style_text_color(s_wifi_icon[i], lv_color_hex(wifi ? ok : off), 0);
         lv_obj_set_style_bg_color(s_ha_icon[i], lv_color_hex(ha), 0);
     }
+    s_ha_ok = wifi && state != HA_STATE_ERROR;   /* dot is green */
     update_dot_pulse();
 }
 
