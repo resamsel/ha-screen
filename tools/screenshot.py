@@ -1,6 +1,6 @@
 """Screenshot of the board's screen over USB (main/screenshot.c).
 
-Usage: python3 tools/screenshot.py [port] [out.png]
+Usage: python3 tools/screenshot.py [port] [out.png] [--touch] [--page=N]
 Needs pyserial and Pillow.
 """
 import sys
@@ -10,10 +10,15 @@ from PIL import Image
 
 port = sys.argv[1] if len(sys.argv) > 1 else "/dev/cu.usbmodem14401"
 out = sys.argv[2] if len(sys.argv) > 2 else "screenshot.png"
+touch = "--touch" in sys.argv          # show what a touch shows (status line, page dots)
+page = next((a[7:] for a in sys.argv if a.startswith("--page=")), None)   # switch page first
 
 s = serial.Serial(port, 115200, timeout=5)
 s.reset_input_buffer()
-s.write(b"s")
+if page is not None:
+    s.write(page.encode())
+    time.sleep(1.0)                    # page slide animation
+s.write(b"S" if touch else b"s")
 img, area, row = None, None, 0
 deadline = time.time() + 30
 while time.time() < deadline:

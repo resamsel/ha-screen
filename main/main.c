@@ -91,6 +91,8 @@ static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
 static void ha_icon_changed(int page, int row, const char *icon);
+static void dots_show(void);
+static void show_page(int page);
 
 static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
                              const float *pts, int n, int64_t end, int hours, bool zero_based);
@@ -198,6 +200,8 @@ void app_main(void)
     ha_client_set_weather_cb(ha_weather_changed);
     ha_client_set_icon_cb(ha_icon_changed);
     screenshot_start();
+    screenshot_set_touch_cb(dots_show);
+    screenshot_set_page_cb(show_page);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -221,7 +225,9 @@ void app_main(void)
 /* ---- Main screen: pages dragged left/right, with page dots at the bottom ----------
  * Sensor pages (temperature, humidity) first, then the graph page.
  * Rows share the height between the status line and the dots evenly. */
-#define STATUS_H   30                    /* top strip reserved for Wi-Fi icon and HA dot */
+#define STATUS_H   30                    /* status line: page title, Wi-Fi icon, HA dot */
+#define TOP_M      4                     /* pages start this close to the top: the status line
+                                          * floats over them and fades out like the page dots */
 #define DOTS_H     22                    /* bottom strip for the page dots (config panel) */
 #define BOTTOM_M   4                     /* page content reaches this close to the bottom: the
                                           * page dots float over it and fade out */
@@ -239,8 +245,8 @@ static ha_layout_t s_layout;                  /* pages from the HA dashboard (LV
 static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y);
 static lv_coord_t row_y(int i, int rows)
 {
-    lv_coord_t slot = (SCR_H - STATUS_H - BOTTOM_M) / LV_MAX(rows, 1);
-    return STATUS_H + i * slot + (slot - ROW_BLOCK) / 2;
+    lv_coord_t slot = (SCR_H - TOP_M - BOTTOM_M) / LV_MAX(rows, 1);
+    return TOP_M + i * slot + (slot - ROW_BLOCK) / 2;
 }
 
 static lv_obj_t *s_strip = NULL;                         /* all pages side by side */
@@ -273,8 +279,14 @@ static void fade_obj(lv_obj_t *o, lv_opa_t to, uint32_t ms)
 static void dots_fade(lv_opa_t to, uint32_t ms) { fade_obj(s_dots_box, to, ms); }
 
 /* Main-screen status icons: shown on touch and whenever something needs attention */
+static lv_obj_t *s_status_bg;      /* status line background, shown on touch */
+static lv_obj_t *s_page_title, *s_title_icon;
 static void status_icons_update(void)
 {
+    /* page title, its icon and the bar behind the status line: only while touched */
+    fade_obj(s_status_bg, s_dots_on ? LV_OPA_COVER : LV_OPA_TRANSP, s_dots_on ? 200 : 600);
+    fade_obj(s_page_title, s_dots_on ? LV_OPA_COVER : LV_OPA_TRANSP, s_dots_on ? 200 : 600);
+    fade_obj(s_title_icon, s_dots_on ? LV_OPA_COVER : LV_OPA_TRANSP, s_dots_on ? 200 : 600);
     bool ha = s_dots_on || !s_status_quiet, wifi = s_dots_on || !s_wifi_quiet;   /* refresh: HA dot only */
     fade_obj(s_wifi_icon[0], wifi ? LV_OPA_COVER : LV_OPA_TRANSP, wifi ? 200 : 600);
     fade_obj(s_ha_icon[0], ha ? LV_OPA_COVER : LV_OPA_TRANSP, ha ? 200 : 600);
@@ -383,7 +395,6 @@ static lv_obj_t *icon_create(lv_obj_t *parent, int pg, int i, lv_color_t color, 
 }
 
 /* Page title in the status line, with the heading's icon in front when it has one */
-static lv_obj_t *s_page_title, *s_title_icon;
 static lv_img_dsc_t s_title_icon_dsc;
 #define TITLE_ICON 20   /* px (even: 4 bpp rows), a bit bigger than the Wi-Fi symbol */
 static void title_update(void)
@@ -446,7 +457,7 @@ static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y)
     if (s_landscape) {
         lv_coord_t colw = SCR_W / LV_MAX(ROWS(pg), 1);
         *cx = i * colw + colw / 2;
-        *y = STATUS_H + (SCR_H - STATUS_H - BOTTOM_M - 52) / 2;
+        *y = TOP_M + (SCR_H - TOP_M - BOTTOM_M - 52) / 2;
     } else {
         *cx = SCR_W / 2 + ICON_SHIFT(pg, i);
         *y = row_y(i, ROWS(pg));
@@ -1227,6 +1238,7 @@ static void apply_temp_theme(bool light)
         }
     }
     if (s_page_title) lv_obj_set_style_text_color(s_page_title, val, 0);
+    if (s_status_bg) lv_obj_set_style_bg_color(s_status_bg, lv_color_hex(light ? 0xEEF1F4 : 0x14181C), 0);
     if (s_title_icon) lv_obj_set_style_img_recolor(s_title_icon, val, 0);
     /* weather cards: text colours and the icon (its shapes are coloured per theme) */
     for (int pg = 0; pg < PAGE_COUNT; pg++)
@@ -1385,7 +1397,7 @@ static float nice_ceil(float x)
 static void graph_block(int gi, lv_area_t *a)
 {
     int pg = GPG(gi), r = GROW(gi), n = LV_MAX(ROWS(pg), 1);
-    lv_coord_t top = STATUS_H, bottom = SCR_H - BOTTOM_M;
+    lv_coord_t top = TOP_M, bottom = SCR_H - BOTTOM_M;
     if (s_landscape) {
         lv_coord_t w = SCR_W / n;
         a->x1 = r * w; a->x2 = a->x1 + w - 1; a->y1 = top; a->y2 = bottom - 1;
@@ -1570,6 +1582,12 @@ static void create_pages(lv_obj_t *scr)
     }
     dots_show();
 
+    s_status_bg = lv_obj_create(scr);     /* above the pages, below title and status icons */
+    lv_obj_remove_style_all(s_status_bg);
+    lv_obj_clear_flag(s_status_bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_status_bg, SCR_W, STATUS_H + 4);
+    lv_obj_set_style_bg_opa(s_status_bg, LV_OPA_40, 0);   /* 60 % transparent */
+    lv_obj_set_style_bg_color(s_status_bg, lv_color_hex(s_light ? 0xEEF1F4 : 0x14181C), 0);
     s_page_title = lv_label_create(scr);
     lv_obj_set_style_text_font(s_page_title, &lv_font_latin_16, 0);
     lv_label_set_long_mode(s_page_title, LV_LABEL_LONG_DOT);   /* ends in "..." when too long */
@@ -1938,7 +1956,7 @@ static void create_ui(void)
     lv_obj_t *scr = lv_scr_act();
     lv_anim_del_all();
     lv_obj_clean(scr);
-    s_page_title = s_title_icon = NULL;
+    s_page_title = s_title_icon = s_status_bg = NULL;
     s_dots_box = NULL;                    /* deleted with the screen: don't touch them */
     s_wifi_icon[0] = s_ha_icon[0] = s_wifi_icon[1] = s_ha_icon[1] = NULL;
     pic_free_all();

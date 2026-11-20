@@ -6,6 +6,7 @@
  * tools/screenshot.py turns that into a PNG. There is no full frame buffer in RAM. */
 #include "screenshot.h"
 #include <stdio.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/usb_serial_jtag.h"
@@ -34,8 +35,18 @@ static void dump_flush(lv_disp_drv_t *drv, const lv_area_t *a, lv_color_t *px)
     s_flush(drv, a, px);
 }
 
-static void take(void)
+static void (*s_touch)(void);
+static void (*s_page)(int);
+void screenshot_set_page_cb(void (*cb)(int)) { s_page = cb; }
+void screenshot_set_touch_cb(void (*cb)(void)) { s_touch = cb; }
+
+static void take(bool touch)
 {
+    if (touch && s_touch && lvgl_port_lock(0)) {
+        s_touch();
+        lvgl_port_unlock();
+        vTaskDelay(pdMS_TO_TICKS(400));   /* let the fade-in finish */
+    }
     if (!lvgl_port_lock(0)) return;
     lv_disp_t *d = lv_disp_get_default();
     if (d) {
@@ -56,13 +67,15 @@ static void task(void *arg)
     (void)arg;
     uint8_t c;
     for (;;)
-        if (usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY) == 1 && c == 's') take();
+        if (usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY) != 1) continue;
+        else if (c == 's' || c == 'S') take(c == 'S');
+        else if (c >= '0' && c <= '9' && s_page && lvgl_port_lock(0)) { s_page(c - '0'); lvgl_port_unlock(); }
 }
 
 void screenshot_start(void)
 {
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
-    cfg.tx_buffer_size = 4096;
+    cfg.tx_buffer_size = 2048;
     if (usb_serial_jtag_driver_install(&cfg) != ESP_OK) return;
     xTaskCreate(task, "shot", 3072, NULL, 2, NULL);
 }

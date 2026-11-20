@@ -594,8 +594,10 @@ static bool has_icon(const layout_item_t *it)
     return (it->kind == LAYOUT_VALUES || it->kind == LAYOUT_GRAPH || it->kind == LAYOUT_BUTTONS) && it->icon[0] != '-';
 }
 
+static bool s_icon_rules_pending;      /* the last load failed (no memory/connection): retry */
 static void load_icon_rules(void)
 {
+    s_icon_rules_pending = false;
     for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++) { free(s_icon_rule[p][i]); s_icon_rule[p][i] = NULL; }
     memset(s_icon_last, 0, sizeof(s_icon_last));
@@ -604,7 +606,13 @@ static void load_icon_rules(void)
         for (int i = 0; i < s_layout.pages[p].count; i++) {
             const layout_item_t *it = &s_layout.pages[p].items[i];
             if (!has_icon(it) || it->icon[0]) continue;
-            if (!ws && !(ws = dash_ws_open())) return;
+            if (!ws) {
+                if (s_http) {             /* two TLS sessions at once don't fit in RAM */
+                    esp_http_client_cleanup(s_http);
+                    s_http = NULL;
+                }
+                if (!(ws = dash_ws_open())) { s_icon_rules_pending = true; return; }
+            }
             char body[200], platform[32] = "", tkey[48] = "", dc[32] = "", domain[24], rule[320] = "";
             snprintf(domain, sizeof(domain), "%.*s", (int)strcspn(it->entity, "."), it->entity);
             snprintf(body, sizeof(body), "\"type\":\"config/entity_registry/get\",\"entity_id\":\"%s\"", it->entity);
@@ -615,11 +623,9 @@ static void load_icon_rules(void)
             if (!json_get_str(json_obj_get(reg, "device_class"), dc, sizeof(dc)))
                 json_get_str(json_obj_get(reg, "original_device_class"), dc, sizeof(dc));
             free(msg);
-            if (!dc[0]) {                 /* not in the registry: the state has it */
-                static resp_t r;
-                snprintf(body, sizeof(body), "/api/states/%s", it->entity);
-                if (ha_request(HTTP_METHOD_GET, body, NULL, &r) == 200) json_str(r.buf, "\"device_class\":\"", dc, sizeof(dc));
-            }
+            /* not in the registry: no device class here (an HTTPS request now would need a
+             * second TLS session next to the websocket, which doesn't fit in RAM); the
+             * domain default applies */
             if (platform[0] && tkey[0]) {
                 snprintf(body, sizeof(body), "\"type\":\"frontend/get_icons\",\"category\":\"entity\",\"integration\":\"%s\"", platform);
                 msg = dash_ws_call(ws, body);
@@ -1107,6 +1113,7 @@ static void ha_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(300)); /* give HA a moment to update the state */
             s_force_report = true;         /* resync the UI even if nothing changed */
         }
+        if (s_icon_rules_pending) load_icon_rules();
         bool fetched = fetch_state();
         for (int pg = 0; pg < s_layout.count; pg++)
             for (int i = 0; i < s_layout.pages[pg].count; i++)
