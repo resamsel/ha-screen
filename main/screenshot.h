@@ -9,3 +9,5 @@ void screenshot_set_page_cb(void (*cb)(int page));
 void screenshot_set_tap_cb(void (*cb)(int x, int y));
 /* 'V<n>' over USB: show dashboard view n (for testing) */
 void screenshot_set_view_cb(void (*cb)(int));
+/* 'C<n>' over USB: open config panel page n, 'C9' closes it (for screenshots) */
+void screenshot_set_cfg_cb(void (*cb)(int));

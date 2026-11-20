@@ -58,6 +58,10 @@ every 15 min (`HA_CACHE_INTERVAL_MS`). The partition table must be flashed once 
 
 With the board on USB, `python3 tools/screenshot.py [port] [out.png]` saves what is on screen
 (needs pyserial and Pillow; the board redraws once and streams it over the cable).
+`--page=` sends any command first: a digit shows that page, `V<n>` shows dashboard view n,
+`C<n>` opens config panel page n (`C9` closes it).
+
+All screens, dark and light, portrait and landscape: [docs/screenshots.md](docs/screenshots.md).
 
 ## Build and flash
 

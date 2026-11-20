@@ -115,6 +115,7 @@ static void view_cb(lv_event_t *e);
 static void view_btn_update(void);
 static void view_menu_close(void);
 static void view_select(int i);
+static void cfg_test_open(int page);
 /* Dashboard views for the view selector (LVGL lock) */
 static layout_view_t s_views[LAYOUT_MAX_VIEWS];
 static int s_nviews, s_cur_view = -1;
@@ -227,6 +228,7 @@ void app_main(void)
     screenshot_set_page_cb(show_page);
     screenshot_set_tap_cb(test_tap);
     screenshot_set_view_cb(view_select);
+    screenshot_set_cfg_cb(cfg_test_open);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -2273,6 +2275,14 @@ static void cfg_slide_to(bool open)
     lv_anim_start(&a);
 }
 
+/* Serial 'C<n>': open the panel on page n; n >= CFG_PAGES closes it */
+static void cfg_test_open(int page)
+{
+    if (page >= CFG_PAGES) { cfg_slide_to(false); return; }
+    cfg_show_page(page);
+    cfg_slide_to(true);
+}
+
 /* Registered on the main screen (to open) and on the panel background (to close) */
 static void edge_swipe_cb(lv_event_t *e)
 {
@@ -2725,6 +2735,7 @@ static void ha_state_changed(ha_state_t state)
     apply_panel_theme(light);
     apply_temp_theme(light);
     if (s_orient_btn) lv_obj_set_style_bg_color(s_orient_btn, neutral_btn_color(), 0);
+    if (s_view_btn) lv_obj_set_style_bg_color(s_view_btn, neutral_btn_color(), 0);
     if (s_refresh_btn && !s_refreshing) { /* follow theme */
         lv_obj_set_style_bg_color(s_refresh_btn, neutral_btn_color(), 0);
         lv_obj_set_style_text_color(lv_obj_get_child(s_refresh_btn, 0), lv_color_white(), 0);
