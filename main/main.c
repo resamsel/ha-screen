@@ -474,9 +474,12 @@ static void icon_place(int pg, int i)
         lv_coord_t x = 6;
         if (s_val[pg][i]) {
             lv_obj_update_layout(s_val[pg][i]);
-            x = LV_MAX(lv_obj_get_x(s_val[pg][i]) - ICON_GAP - ICON_SIZE, 4);
+            x = lv_obj_get_x(s_val[pg][i]) - ICON_GAP - ICON_SIZE;
         }
-        lv_obj_set_pos(o, x, y + (vf->line_height - ICON_SIZE) / 2);
+        /* a wide value takes the room: no icon rather than a cut value */
+        if (x < 2) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        else if (icon_bitmap(s_icon_name[pg][i])) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(o, LV_MAX(x, 2), y + (vf->line_height - ICON_SIZE) / 2);
     }
 }
 
@@ -518,14 +521,14 @@ static lv_coord_t name_max_w(int pg, int i)
 }
 
 /* Text centred on cx below the value; ends in "..." if it still doesn't fit */
-static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_coord_t cx, lv_coord_t y, bool left)
+static void set_name_label(lv_obj_t *l, const char *txt, lv_coord_t max_w, lv_coord_t cx, lv_coord_t y, bool left, int lines)
 {
     lv_label_set_text(l, txt);
     bool fits = name_width(txt, NULL) <= max_w;
     lv_label_set_long_mode(l, fits ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
     lv_obj_set_width(l, fits ? LV_SIZE_CONTENT : max_w);
-    /* one line: with a growing height LONG_DOT wraps instead of cutting off with "..." */
-    lv_obj_set_height(l, fits ? LV_SIZE_CONTENT : lv_obj_get_style_text_font(l, 0)->line_height);
+    /* up to `lines` lines: with a growing height LONG_DOT wraps on instead of ending in "..." */
+    lv_obj_set_height(l, fits ? LV_SIZE_CONTENT : lv_obj_get_style_text_font(l, 0)->line_height * lines);
     lv_obj_set_style_text_align(l, left ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
     if (left) lv_obj_align(l, LV_ALIGN_TOP_LEFT, cx, y + NAME_DY);
     else lv_obj_align(l, LV_ALIGN_TOP_MID, cx - SCR_W / 2, y + NAME_DY);
@@ -557,11 +560,16 @@ static void page_names_update(int pg)
                 s_gi = GI(pg, i);
                 if (!s_g_name) continue;
                 graph_name_pos(&cx, &y);
-                set_name_label(s_g_name, n[c], name_max_w(pg, i), cx, y - NAME_DY, true);
+                set_name_label(s_g_name, n[c], name_max_w(pg, i), cx, y - NAME_DY, true, 1);
             } else {
                 if (!s_name[pg][i]) continue;
                 value_pos(pg, i, &cx, &y);
-                set_name_label(s_name[pg][i], n[c], name_max_w(pg, i), cx, y, false);
+                /* tiles: the full card width (the icon sits beside the value, not the name);
+                 * portrait rows have room for a second line */
+                lv_area_t b;
+                graph_block(GI(pg, i), &b);
+                set_name_label(s_name[pg][i], s_landscape ? n[c] : s_full[pg][i],
+                               lv_area_get_width(&b) - 8, cx, y, false, s_landscape ? 1 : 2);
             }
         }
     }
@@ -1357,7 +1365,11 @@ static void ha_sensor_changed(int page, int row, const char *value, const char *
     if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_VALUES && s_val[page][row]) {
         lv_label_set_text(s_val[page][row], value);
         lv_label_set_text(s_unit[page][row], unit);
-        fit_value(s_val[page][row], s_unit[page][row], name_max_w(page, row));
+        {   /* the whole card width: the value is never cut for the icon's sake */
+            lv_area_t b;
+            graph_block(GI(page, row), &b);
+            fit_value(s_val[page][row], s_unit[page][row], lv_area_get_width(&b) - 8);
+        }
         if (strncmp(s_full[page][row], name, 31)) {
             snprintf(s_full[page][row], sizeof(s_full[page][row]), "%s", name);
             page_names_update(page);
@@ -2661,7 +2673,10 @@ static void ha_icon_changed(int page, int row, const char *icon)
     if (!lvgl_port_lock(0)) return;
     if (page >= 0 && page < LAYOUT_MAX_PAGES && row >= 0 && row < LAYOUT_MAX_ROWS) {
         snprintf(s_icon_name[page][row], sizeof(s_icon_name[page][row]), "%s", icon);
-        if (page < PAGE_COUNT && row < ROWS(page)) icon_show(page, row);
+        if (page < PAGE_COUNT && row < ROWS(page)) {
+            icon_show(page, row);
+            if (KIND(page, row) == LAYOUT_VALUES) icon_place(page, row);   /* hidden again if no room */
+        }
     }
     lvgl_port_unlock();
 }
