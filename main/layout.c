@@ -226,7 +226,32 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
     return pg->count > 0;
 }
 
+static int parse_impl(const char *json, const char *view_path, ha_layout_t *out,
+                      layout_view_t *views_out, int max, int *nviews, char *chosen);
+
 int layout_parse(const char *json, const char *view_path, ha_layout_t *out)
+{
+    return parse_impl(json, view_path, out, NULL, 0, NULL, NULL);
+}
+
+int layout_parse_views(const char *json, const char *view_path, ha_layout_t *out,
+                       layout_view_t *views, int max, int *nviews, char chosen[32])
+{
+    *nviews = 0;
+    chosen[0] = 0;
+    return parse_impl(json, view_path ? view_path : "", out, views, max, nviews, chosen);
+}
+
+/* A view's identifier: its path, or its index when it has none */
+static void view_id(const cJSON *v, int idx, char out[32])
+{
+    const char *p = str(v, "path");
+    if (p && *p) snprintf(out, 32, "%s", p);
+    else snprintf(out, 32, "%d", idx);
+}
+
+static int parse_impl(const char *json, const char *view_path, ha_layout_t *out,
+                      layout_view_t *views_out, int max, int *nviews, char *chosen)
 {
     memset(out, 0, sizeof(*out));
     if (!json) return 0;
@@ -237,11 +262,37 @@ int layout_parse(const char *json, const char *view_path, ha_layout_t *out)
     }
     const cJSON *cfg = cJSON_GetObjectItemCaseSensitive(root, "result");
     if (!cJSON_IsObject(cfg)) cfg = root;
-    const cJSON *views = cJSON_GetObjectItemCaseSensitive(cfg, "views"), *view = NULL, *v;
+    const cJSON *views = cJSON_GetObjectItemCaseSensitive(cfg, "views"), *view = NULL, *v, *first = NULL;
+    layout_view_t *list = views_out;
+    (void)max;
     if (cJSON_IsArray(views)) {
+        int vi = 0;
         cJSON_ArrayForEach(v, views) {
             const char *p = str(v, "path");
-            if (p && !strcmp(p, view_path)) { view = v; break; }
+            if (!list) {
+                if (p && !strcmp(p, view_path)) { view = v; break; }
+                continue;
+            }
+            if (!cJSON_IsObject(v)) { vi++; continue; }
+            char id[32];
+            view_id(v, vi, id);
+            if (*nviews < max) {
+                layout_view_t *o = &list[(*nviews)++];
+                snprintf(o->path, sizeof(o->path), "%s", id);
+                const char *t = str(v, "title");
+                snprintf(o->title, sizeof(o->title), "%s", t && *t ? t : id);
+            }
+            if (!view && *view_path && !strcmp(id, view_path)) view = v;
+            if (!first) first = v;
+            vi++;
+        }
+        if (list && !view) view = first;   /* no choice yet, or the chosen view is gone */
+        if (list && view) {
+            int i = 0;
+            cJSON_ArrayForEach(v, views) {
+                if (v == view) { view_id(v, i, chosen); break; }
+                i++;
+            }
         }
     }
     const cJSON *secs = view ? cJSON_GetObjectItemCaseSensitive(view, "sections") : NULL;

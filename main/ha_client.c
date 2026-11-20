@@ -75,6 +75,10 @@ static portMUX_TYPE s_pic_lock = portMUX_INITIALIZER_UNLOCKED;
 static int s_pic_page = -1;               /* page on screen, and its picture block sizes */
 static uint16_t s_pic_w[LAYOUT_MAX_ROWS], s_pic_h[LAYOUT_MAX_ROWS];
 static uint32_t s_layout_hash;
+static ha_views_cb_t s_views_cb;
+void ha_client_set_views_cb(ha_views_cb_t cb) { s_views_cb = cb; }
+static portMUX_TYPE s_view_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_view[32];                   /* view path chosen in the config panel, "" = first */
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -912,8 +916,19 @@ static void refresh_layout(bool force)
     }
     char *json = dash_fetch_config();
     if (!json) return;
-    int n = layout_parse(json, HA_VIEW, &l);
+    static layout_view_t views[LAYOUT_MAX_VIEWS];
+    char want[32], chosen[32];
+    int nv;
+    taskENTER_CRITICAL(&s_view_lock);
+    memcpy(want, s_view, sizeof(want));
+    taskEXIT_CRITICAL(&s_view_lock);
+    int n = layout_parse_views(json, want, &l, views, LAYOUT_MAX_VIEWS, &nv, chosen);
     free(json);
+    if (s_views_cb) {
+        int cur = -1;
+        for (int i = 0; i < nv; i++) if (!strcmp(views[i].path, chosen)) cur = i;
+        s_views_cb(views, nv, cur);
+    }
     if (!force && n && layout_hash(&l) == raw_hash && s_layout.count) return;
     uint32_t h = layout_hash(&l);
     if (n) n = layout_filter(&l, entity_usable, NULL);
@@ -1428,6 +1443,14 @@ void ha_client_set_brightness(float value)
 
 void ha_client_refresh(void)
 {
+    if (s_events) xEventGroupSetBits(s_events, REFRESH_BIT);
+}
+
+void ha_client_set_view(const char *path)
+{
+    taskENTER_CRITICAL(&s_view_lock);
+    snprintf(s_view, sizeof(s_view), "%s", path ? path : "");
+    taskEXIT_CRITICAL(&s_view_lock);
     if (s_events) xEventGroupSetBits(s_events, REFRESH_BIT);
 }
 

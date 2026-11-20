@@ -72,6 +72,18 @@ typedef struct {
  * Returns the number of pages; 0 = nothing usable. */
 int layout_parse(const char *json, const char *view_path, ha_layout_t *out);
 
+/* A dashboard view, as offered in the config panel's view selector */
+#define LAYOUT_MAX_VIEWS 8
+typedef struct {
+    char path[32];          /* the view's path, or its index ("0", "1", ...) when it has none */
+    char title[32];         /* its title, else the path */
+} layout_view_t;
+
+/* layout_parse that also lists the dashboard's views (up to max) in views / *nviews.
+ * view_path "" or not found picks the first view; *chosen gets the path used ("" if none). */
+int layout_parse_views(const char *json, const char *view_path, ha_layout_t *out,
+                       layout_view_t *views, int max, int *nviews, char chosen[32]);
+
 /* FNV-1a over the whole struct; layouts from layout_parse compare equal when identical. */
 uint32_t layout_hash(const ha_layout_t *l);
 

@@ -111,6 +111,15 @@ static int s_boot_page = -1;   /* page saved before the last reboot, until the p
 static bool s_refreshing = false;
 static lv_obj_t *s_refresh_btn = NULL;
 static void refresh_cb(lv_event_t *e);
+static void view_cb(lv_event_t *e);
+static void view_btn_update(void);
+/* Dashboard views for the view selector (LVGL lock) */
+static layout_view_t s_views[LAYOUT_MAX_VIEWS];
+static int s_nviews, s_cur_view = -1;
+static char s_view_path[32];          /* chosen view, kept in NVS; "" = the first */
+static lv_obj_t *s_view_btn = NULL, *s_view_caption = NULL;
+static bool s_view_pending = false;   /* a view change is on its way */
+static void ha_views_changed(const layout_view_t *views, int n, int current);
 static lv_color_t neutral_btn_color(void);
 /* Status icons: [0] on the main screen, [1] on the config panel */
 static lv_obj_t *s_wifi_icon[2];
@@ -186,6 +195,8 @@ void app_main(void)
         if (nvs_open("ui", NVS_READONLY, &nv) == ESP_OK) {
             nvs_get_u8(nv, "landscape", &land);
             if (nvs_get_u8(nv, "page", &page) == ESP_OK) s_boot_page = page;
+            size_t vlen = sizeof(s_view_path);
+            if (nvs_get_str(nv, "view", s_view_path, &vlen) != ESP_OK) s_view_path[0] = 0;
             nvs_close(nv);
         }
         s_landscape = land;
@@ -206,6 +217,8 @@ void app_main(void)
     ha_client_set_picture_cb(ha_picture_changed);
     ha_client_set_weather_cb(ha_weather_changed);
     ha_client_set_icon_cb(ha_icon_changed);
+    ha_client_set_views_cb(ha_views_changed);
+    ha_client_set_view(s_view_path);
     screenshot_start();
     screenshot_set_touch_cb(dots_show);
     screenshot_set_page_cb(show_page);
@@ -2196,7 +2209,9 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colo
 static lv_obj_t *s_cfg = NULL;
 static lv_obj_t *s_cfg_title = NULL;
 static lv_obj_t *s_bri_caption = NULL;
-#define CFG_PAGES    2    /* settings, errors */
+#define CFG_PAGES    3    /* settings (refresh, view), display, errors */
+#define CFG_ERR_PAGE 2
+static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Errors"};
 #define NO_ERRORS    "No errors"
 static lv_obj_t *s_err_box = NULL, *s_err_label = NULL;
 static lv_obj_t *s_cfg_strip = NULL, *s_cfg_dot[CFG_PAGES];
@@ -2232,11 +2247,10 @@ static void cfg_strip_x(void *obj, int32_t x) { lv_obj_set_x(obj, x); }
 
 static void cfg_show_page(int page)
 {
-    static const char *titles[CFG_PAGES] = {"Settings", "Errors"};
     if (page < 0) page = 0;
     if (page >= CFG_PAGES) page = CFG_PAGES - 1;
     s_cfg_page = page;
-    lv_label_set_text(s_cfg_title, titles[page]);
+    lv_label_set_text(s_cfg_title, s_cfg_titles[page]);
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_cfg_strip);
@@ -2310,7 +2324,7 @@ static void edge_swipe_cb(lv_event_t *e)
             } else {
                 /* errors page: scroll the text while it can move that way; dragging up
                  * with the text already at its end (or fitting) closes the panel */
-                bool can = s_cfg_page == 1 && (dy > 0 ? s_err_scroll > 0 : s_err_scroll < err_scroll_max());
+                bool can = s_cfg_page == CFG_ERR_PAGE && (dy > 0 ? s_err_scroll > 0 : s_err_scroll < err_scroll_max());
                 s_cfg_mode = can ? CFG_SCROLL : CFG_VERTICAL;
                 s_err_scroll_start = s_err_scroll;
             }
@@ -2354,8 +2368,7 @@ static void create_ui(void)
     s_sel = -1;
     memset(s_zoom, 0, sizeof(s_zoom));
     memset(s_crisp, 0, sizeof(s_crisp));
-    s_cfg_page = 0;
-    s_cfg_open = false;
+    s_cfg_open = false;               /* the panel page is kept across rebuilds */
     s_dragging = s_paging = false;
     memset(s_val, 0, sizeof(s_val));
     memset(s_icon, 0, sizeof(s_icon));
@@ -2380,6 +2393,7 @@ static void create_ui(void)
     memset(s_wx_temp, 0, sizeof(s_wx_temp));
     memset(s_full, 0, sizeof(s_full));
     s_err_box = s_err_label = NULL;
+    s_view_btn = s_view_caption = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -2401,7 +2415,7 @@ static void create_ui(void)
     lv_obj_clear_flag(s_cfg, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_cfg, edge_swipe_cb, LV_EVENT_ALL, NULL);
 
-    /* Two panel pages side by side (settings, errors), dragged left/right like the main screen */
+    /* Panel pages side by side (settings, display, errors), dragged left/right like the main screen */
     s_cfg_strip = lv_obj_create(s_cfg);
     lv_obj_remove_style_all(s_cfg_strip);
     lv_obj_set_size(s_cfg_strip, CFG_W * CFG_PAGES, SCR_H);
@@ -2416,28 +2430,49 @@ static void create_ui(void)
         lv_obj_clear_flag(cp[i], LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(cp[i], LV_OBJ_FLAG_EVENT_BUBBLE);
     }
+    lv_obj_set_x(s_cfg_strip, -s_cfg_page * CFG_W);
 
     s_cfg_title = lv_label_create(s_cfg);
-    lv_label_set_text(s_cfg_title, "Settings");
+    lv_label_set_text(s_cfg_title, s_cfg_titles[s_cfg_page]);
     lv_obj_set_style_text_font(s_cfg_title, &lv_font_montserrat_20, 0);
     lv_obj_align(s_cfg_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_montserrat_20.line_height / 2);
 
-    lv_obj_t *btn = make_button(cp[0], "Theme", lv_color_hex(0x5E5E6E));
-    /* portrait: one column (refresh, theme, orientation, brightness last); landscape: refresh
-     * and theme left, orientation and brightness right */
+    /* Settings page: refresh, then the dashboard view; one centred column */
+    s_view_caption = lv_label_create(cp[0]);
+    lv_label_set_text(s_view_caption, "View");
+    lv_obj_set_style_text_font(s_view_caption, &lv_font_latin_14, 0);
+    s_view_btn = make_button(cp[0], "", lv_color_hex(0x5E5E6E));
+    lv_obj_t *vl = lv_obj_get_child(s_view_btn, 0);
+    lv_label_set_long_mode(vl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(vl, 148 - 16);
+    lv_obj_set_style_text_align(vl, LV_TEXT_ALIGN_CENTER, 0);
+    /* landscape: refresh left, view right */
+    lv_obj_align(s_view_btn, LV_ALIGN_TOP_MID, s_landscape ? SCR_W / 4 : 0, s_landscape ? 64 : 128);
+    lv_obj_align_to(s_view_caption, s_view_btn, LV_ALIGN_OUT_TOP_LEFT, 0, -4);
+    lv_obj_add_event_cb(s_view_btn, view_cb, LV_EVENT_CLICKED, NULL);
+    view_btn_update();
+
+    /* Display page. Portrait: one column (theme, orientation, brightness); landscape: theme
+     * and orientation left, brightness right */
     const lv_coord_t colx = s_landscape ? SCR_W / 4 : 0;   /* column offset from centre */
-    if (s_landscape) lv_obj_align(btn, LV_ALIGN_TOP_MID, -colx, 96);
-    else lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 106);
+    lv_obj_t *btn = make_button(cp[1], "Theme", lv_color_hex(0x5E5E6E));
+    lv_obj_align(btn, LV_ALIGN_TOP_MID, -colx, s_landscape ? 40 : 44);
     lv_obj_add_event_cb(btn, ha_toggle_cb, LV_EVENT_CLICKED, NULL);
     s_ha_btn = btn;
 
-    s_bri_caption = lv_label_create(cp[0]);
+    /* Orientation: the label names the action, like the theme button */
+    lv_obj_t *ob = make_button(cp[1], s_landscape ? "Portrait" : "Landscape", lv_color_hex(0x5E5E6E));
+    lv_obj_align(ob, LV_ALIGN_TOP_MID, -colx, s_landscape ? 96 : 106);
+    lv_obj_add_event_cb(ob, orient_cb, LV_EVENT_CLICKED, NULL);
+    s_orient_btn = ob;
+
+    s_bri_caption = lv_label_create(cp[1]);
     lv_label_set_text(s_bri_caption, "Brightness");
     lv_obj_set_style_text_font(s_bri_caption, &lv_font_latin_14, 0);
-    if (s_landscape) lv_obj_set_pos(s_bri_caption, SCR_W / 2 + (SCR_W / 2 - 148) / 2, 96);
-    else lv_obj_align_to(s_bri_caption, btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 62 + 20);   /* below orientation */
+    if (s_landscape) lv_obj_set_pos(s_bri_caption, SCR_W / 2 + (SCR_W / 2 - 148) / 2, 56);
+    else lv_obj_align_to(s_bri_caption, ob, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 20);
 
-    lv_obj_t *sl = lv_slider_create(cp[0]);
+    lv_obj_t *sl = lv_slider_create(cp[1]);
     lv_obj_set_width(sl, 132);
     lv_obj_align_to(sl, s_bri_caption, LV_ALIGN_OUT_BOTTOM_LEFT, 8, 16);
     lv_slider_set_range(sl, 0, 100);
@@ -2449,18 +2484,11 @@ static void create_ui(void)
     lv_obj_add_event_cb(sl, slider_cb, LV_EVENT_RELEASED, NULL);
     s_slider = sl;
 
-    /* Orientation: the label names the action, like the theme button */
-    lv_obj_t *ob = make_button(cp[0], s_landscape ? "Portrait" : "Landscape", lv_color_hex(0x5E5E6E));
-    if (s_landscape) lv_obj_align(ob, LV_ALIGN_TOP_MID, colx, 40);
-    else lv_obj_align(ob, LV_ALIGN_TOP_MID, 0, 168);
-    lv_obj_add_event_cb(ob, orient_cb, LV_EVENT_CLICKED, NULL);
-    s_orient_btn = ob;
-
     /* Errors page: HA errors from the last poll, scrolls when the text is long */
     lv_coord_t ey = STATUS_H + 6;
     /* A plain, non-clickable clip area: touches pass through to the panel, which scrolls
      * the text itself (see edge_swipe_cb) */
-    s_err_box = lv_obj_create(cp[1]);
+    s_err_box = lv_obj_create(cp[CFG_ERR_PAGE]);
     lv_obj_remove_style_all(s_err_box);
     lv_obj_set_size(s_err_box, CFG_W - 20, SCR_H - ey - DOTS_H - 4);
     lv_obj_set_pos(s_err_box, 10, ey);
@@ -2489,13 +2517,14 @@ static void create_ui(void)
 
     /* Refresh: re-read everything from Home Assistant now */
     s_refresh_btn = make_button(cp[0], "Connecting...", lv_color_hex(0x5E5E6E));
-    lv_obj_align(s_refresh_btn, LV_ALIGN_TOP_MID, -colx, s_landscape ? 40 : 44);
+    lv_obj_align(s_refresh_btn, LV_ALIGN_TOP_MID, s_landscape ? -SCR_W / 4 : 0, s_landscape ? 64 : 44);
     lv_obj_add_event_cb(s_refresh_btn, refresh_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_set_style_opa(s_refresh_btn, LV_OPA_50, LV_STATE_DISABLED);
 
     lv_obj_set_style_opa(btn, LV_OPA_50, LV_STATE_DISABLED);
     lv_obj_set_style_opa(sl, LV_OPA_50, LV_STATE_DISABLED);
     lv_obj_set_style_opa(s_orient_btn, LV_OPA_50, LV_STATE_DISABLED);
+    lv_obj_set_style_opa(s_view_btn, LV_OPA_50, LV_STATE_DISABLED);
 }
 
 /* Panel colours for the current theme. Must be called with the LVGL lock held. */
@@ -2506,6 +2535,7 @@ static void apply_panel_theme(bool light)
     lv_color_t text = light ? lv_color_hex(0x1C1C1E) : lv_color_white();
     lv_obj_set_style_text_color(s_cfg_title, text, 0);
     lv_obj_set_style_text_color(s_bri_caption, text, 0);
+    if (s_view_caption) lv_obj_set_style_text_color(s_view_caption, text, 0);
     if (s_err_box) {
         bool none = strcmp(lv_label_get_text(s_err_label), NO_ERRORS) == 0;
         lv_obj_set_style_text_color(s_err_label, none ? lv_color_hex(light ? 0x5F6368 : 0x8A8F98)
@@ -2522,8 +2552,8 @@ static void apply_panel_theme(bool light)
 static void set_busy(bool busy)
 {
     s_busy = busy;
-    lv_obj_t *objs[] = {s_ha_btn, s_slider, s_refresh_btn, s_orient_btn};
-    for (int i = 0; i < 4; i++) {
+    lv_obj_t *objs[] = {s_ha_btn, s_slider, s_refresh_btn, s_orient_btn, s_view_btn};
+    for (int i = 0; i < 5; i++) {
         if (!objs[i]) continue;
         if (busy) lv_obj_add_state(objs[i], LV_STATE_DISABLED);
         else lv_obj_clear_state(objs[i], LV_STATE_DISABLED);
@@ -2629,6 +2659,8 @@ static void ha_update_done(bool ok)
         s_refreshing = false;
         lv_label_set_text(lv_obj_get_child(s_refresh_btn, 0), LV_SYMBOL_REFRESH " Refresh");
     }
+    s_view_pending = false;
+    view_btn_update();
     (void)ok;
     lvgl_port_unlock();
 }
@@ -2885,6 +2917,46 @@ static void ha_landscape_changed(bool landscape)
     if (!lvgl_port_lock(0)) return;
     if (landscape != s_landscape) lv_async_call(orient_apply, (void *)(intptr_t)landscape);
     lvgl_port_unlock();
+}
+
+/* View button: the current view's title; "Loading..." while a change is on its way.
+ * Must be called with the LVGL lock held. */
+static void view_btn_update(void)
+{
+    if (!s_view_btn) return;
+    lv_obj_t *l = lv_obj_get_child(s_view_btn, 0);
+    if (s_view_pending) lv_label_set_text(l, "Loading...");
+    else if (s_cur_view >= 0) lv_label_set_text(l, s_views[s_cur_view].title);
+    else lv_label_set_text(l, s_nviews ? "-" : "Connecting...");
+}
+
+/* Network task: the dashboard's views and the one shown */
+static void ha_views_changed(const layout_view_t *views, int n, int current)
+{
+    if (!lvgl_port_lock(0)) return;
+    memcpy(s_views, views, n * sizeof(*views));
+    s_nviews = n;
+    s_cur_view = current;
+    view_btn_update();
+    lvgl_port_unlock();
+}
+
+/* View button: show the dashboard's next view (wraps around); remembered across reboots */
+static void view_cb(lv_event_t *e)
+{
+    if (s_busy || s_swiped || s_nviews < 2) return;
+    int next = (s_cur_view + 1) % s_nviews;
+    snprintf(s_view_path, sizeof(s_view_path), "%s", s_views[next].path);
+    nvs_handle_t nv;
+    if (nvs_open("ui", NVS_READWRITE, &nv) == ESP_OK) {
+        nvs_set_str(nv, "view", s_view_path);
+        nvs_commit(nv);
+        nvs_close(nv);
+    }
+    s_view_pending = true;
+    set_busy(true);
+    view_btn_update();
+    ha_client_set_view(s_view_path);
 }
 
 /* Orientation button: toggle the HA entity; the layout follows when HA reports it */

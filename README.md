@@ -5,8 +5,8 @@ Settings (HA URL, settings entities, poll interval, graph style) are in `main/co
 
 ## Pages from a dashboard
 
-The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
-(`esp32-c6-dev/main`). The board re-reads it every minute and rebuilds when it changed:
+The main-screen pages come from the HA dashboard view `HA_DASHBOARD` (the view is chosen in the config panel)
+(`esp32-c6-dev`). The board re-reads it every minute and rebuilds when it changed:
 
 - each section = one page; its heading card = the page title
 - `tile` cards = value rows (up to 4), in dashboard order; name = the card's name or the

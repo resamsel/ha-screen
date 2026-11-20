@@ -85,3 +85,11 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
 void ha_client_toggle(void);
 void ha_client_set_brightness(float value);
 void ha_client_refresh(void);  /* re-read all entities now; ends with the done callback */
+
+/* Dashboard views, after every dashboard read: n views, current = index of the one shown
+ * (-1 if none). The array is only valid during the call. */
+typedef void (*ha_views_cb_t)(const layout_view_t *views, int n, int current);
+void ha_client_set_views_cb(ha_views_cb_t cb);  /* call before ha_client_start */
+/* Show this view's pages ("" = the first view): re-reads the dashboard like ha_client_refresh.
+ * May be called before ha_client_start to set the view to start with. */
+void ha_client_set_view(const char *path);

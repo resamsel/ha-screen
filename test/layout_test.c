@@ -166,6 +166,17 @@ static void test_bad_input(void)
     assert(layout_parse(NULL, "main", &l) == 0);
     assert(layout_parse("{\"views\":[{\"path\":\"other\",\"sections\":[" SEC(TILE("sensor.a")) "]}]}", "main", &l) == 0);
     assert(l.count == 0);
+    {   /* view list: title or path, index for a view without path; missing view = first */
+        layout_view_t v[LAYOUT_MAX_VIEWS];
+        int nv;
+        char ch[32];
+        const char *j = "{\"views\":[{\"path\":\"a\",\"title\":\"Home\",\"sections\":[" SEC(TILE("sensor.a")) "]},"
+                        "{\"sections\":[" SEC(TILE("sensor.b")) "," SEC(TILE("sensor.c")) "]}]}";
+        assert(layout_parse_views(j, "", &l, v, LAYOUT_MAX_VIEWS, &nv, ch) == 1);
+        assert(nv == 2 && !strcmp(v[0].title, "Home") && !strcmp(v[1].path, "1") && !strcmp(ch, "a"));
+        assert(layout_parse_views(j, "1", &l, v, LAYOUT_MAX_VIEWS, &nv, ch) == 2 && !strcmp(ch, "1"));
+        assert(layout_parse_views(j, "gone", &l, v, LAYOUT_MAX_VIEWS, &nv, ch) == 1 && !strcmp(ch, "a"));
+    }
 }
 
 static void test_hash(void)

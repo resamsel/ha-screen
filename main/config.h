@@ -24,10 +24,10 @@
 /* Backlight brightness, shown and set by the slider (uses the entity's min/max) */
 #define HA_BRIGHTNESS_ENTITY "input_number.dev_brightness"
 
-/* Dashboard that defines the main-screen pages: each section of this view is one page
- * (tiles = value rows, a line-graph sensor card = graph page). Re-read every interval. */
+/* Dashboard that defines the main-screen pages: each section of the view chosen in the
+ * config panel (first page, "View") is one page (tiles = value rows, a line-graph sensor
+ * card = graph page). Re-read every interval. */
 #define HA_DASHBOARD          "esp32-c6-dev"
-#define HA_VIEW               "main"
 #define HA_LAYOUT_INTERVAL_MS 60000
 
 /* Picture cards (picture-entity, camera.* / image.*): refresh interval while the page is shown */
