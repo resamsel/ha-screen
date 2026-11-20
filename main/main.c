@@ -516,6 +516,19 @@ static void pic_free_all(void)
     memset(s_pic_name, 0, sizeof(s_pic_name));
 }
 
+/* Picture name: one line, or two when it doesn't fit (then cut with "...") */
+static void pic_name_set(lv_obj_t *n, const char *text)
+{
+    lv_label_set_text(n, text);
+    const lv_font_t *f = lv_obj_get_style_text_font(n, 0);
+    lv_obj_update_layout(lv_obj_get_parent(n));
+    lv_point_t sz;
+    lv_txt_get_size(&sz, text, f, 0, 0, LV_MAX(lv_obj_get_content_width(n), 1), LV_TEXT_FLAG_NONE);
+    int lines = sz.y > f->line_height ? 2 : 1;
+    lv_obj_set_height(n, lines * f->line_height + 8);
+    lv_obj_align(n, LV_ALIGN_BOTTOM_MID, 0, 0);
+}
+
 static void create_picture(lv_obj_t *page, int pg, int i)
 {
     lv_area_t blk;
@@ -543,9 +556,7 @@ static void create_picture(lv_obj_t *page, int pg, int i)
     lv_obj_set_style_text_font(n, &lv_font_latin_14, 0);
     lv_obj_set_style_text_align(n, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(n, lv_font_latin_14.line_height + 8);
-    lv_label_set_text(n, it->name[0] ? it->name : it->entity);
-    lv_obj_align(n, LV_ALIGN_BOTTOM_MID, 0, 0);
+    pic_name_set(n, it->name[0] ? it->name : it->entity);
     s_pic_name[pg][i] = n;
 }
 
@@ -580,7 +591,7 @@ static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, in
         s_pic_px[page][row] = NULL;
     }
     free(old);
-    if (name && s_pic_name[page][row]) lv_label_set_text(s_pic_name[page][row], name);
+    if (name && s_pic_name[page][row]) pic_name_set(s_pic_name[page][row], name);
     lvgl_port_unlock();
 }
 
