@@ -12,6 +12,8 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
 - `tile` cards = value rows (up to 4), in dashboard order; name = the card's name or the
   entity's friendly name
 - a `sensor` card with `graph: line` = a graph page (span = `hours_to_show`, default 24)
+- a `button` card = a tap toggles on/off entities, runs scripts, activates scenes and presses
+  `button.*` / `input_button.*` entities
 - a `picture-entity` card = a picture fitted into its block, name along the bottom
   (`show_name: false` hides it). Source: `camera_image`, else `image` (URL, absolute or relative
   to HA; the HA token is only sent to HA), else the card's own `camera.*`/`image.*` entity.

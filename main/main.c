@@ -634,6 +634,7 @@ static void btn_paint(int pg, int i)
     case HA_BTN_OFF:    label = "Off"; break;
     case HA_BTN_SCRIPT: label = "Run"; break;
     case HA_BTN_SCENE:  label = "Activate"; break;
+    case HA_BTN_PRESS:  label = ""; break;   /* no state line (hidden in create_button) */
     default: break;
     }
     lv_obj_set_style_bg_color(b, bg, 0);
@@ -709,6 +710,11 @@ static void create_button(lv_obj_t *page, int pg, int i)
      * none when the button is too short for it */
     lv_coord_t h = lv_obj_get_height(b), nh = lv_font_latin_16.line_height, sh = lv_font_latin_14.line_height;
     lv_coord_t text = nh + 2 + sh, ih = 0;
+    /* button / input_button entities have no state worth showing: icon and name only */
+    if (!strncmp(it->entity, "button.", 7) || !strncmp(it->entity, "input_button.", 13)) {
+        text = nh;
+        lv_obj_add_flag(s_btn_state[pg][i], LV_OBJ_FLAG_HIDDEN);
+    }
     if (icon_slot(pg, i)) {
         if (h - 12 >= text + 4 + 2 * ICON_SIZE && inner >= 2 * ICON_SIZE) ih = 2 * ICON_SIZE;
         else if (h - 8 >= text + 2 + ICON_SIZE) ih = ICON_SIZE;

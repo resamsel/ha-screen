@@ -26,7 +26,7 @@ typedef void (*ha_layout_cb_t)(const ha_layout_t *layout);
 void ha_client_set_layout_cb(ha_layout_cb_t cb);  /* call before ha_client_start */
 
 /* Button page row: state for display; name = card name or friendly_name */
-typedef enum { HA_BTN_UNAVAILABLE, HA_BTN_OFF, HA_BTN_ON, HA_BTN_SCRIPT, HA_BTN_SCENE } ha_btn_state_t;
+typedef enum { HA_BTN_UNAVAILABLE, HA_BTN_OFF, HA_BTN_ON, HA_BTN_SCRIPT, HA_BTN_SCENE, HA_BTN_PRESS } ha_btn_state_t;   /* PRESS: button / input_button */
 typedef void (*ha_button_cb_t)(int page, int row, ha_btn_state_t state, const char *name);
 void ha_client_set_button_cb(ha_button_cb_t cb);  /* call before ha_client_start */
 

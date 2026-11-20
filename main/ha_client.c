@@ -681,6 +681,7 @@ static void fetch_button(int pg, int row)
         if (!strcmp(state, "unavailable")) bs = HA_BTN_UNAVAILABLE;
         else if (is_domain(it->entity, "script")) bs = HA_BTN_SCRIPT;
         else if (is_domain(it->entity, "scene")) bs = HA_BTN_SCENE;
+        else if (is_domain(it->entity, "button") || is_domain(it->entity, "input_button")) bs = HA_BTN_PRESS;
         else if (!strcmp(state, "on")) bs = HA_BTN_ON;
         else if (!strcmp(state, "off")) bs = HA_BTN_OFF;
     }
@@ -696,6 +697,8 @@ static bool press_button(int pg, int row)
     if (it->action != LAYOUT_ACT_TOGGLE) { ESP_LOGW(TAG, "%s: tap action not supported", it->entity); return false; }
     const char *svc = is_domain(it->entity, "script") ? "/api/services/script/turn_on"
                     : is_domain(it->entity, "scene")  ? "/api/services/scene/turn_on"
+                    : is_domain(it->entity, "button") ? "/api/services/button/press"
+                    : is_domain(it->entity, "input_button") ? "/api/services/input_button/press"
                     : "/api/services/homeassistant/toggle";
     char body[96];
     snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", it->entity);
@@ -706,7 +709,8 @@ static bool press_button(int pg, int row)
 
 /* Value entities may be anything (text states are shown as text); graph entities must be
  * numeric (or unavailable/unknown); button entities must be
- * on/off (or unavailable/unknown), or a script or scene. Missing entities are dropped;
+ * on/off (or unavailable/unknown), or a script, scene, button or input_button (pressed).
+ * Missing entities are dropped;
  * network errors keep the entity. */
 static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
 {
@@ -720,6 +724,7 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
     if (!strcmp(state, "unavailable") || !strcmp(state, "unknown")) return true;
     if (kind == LAYOUT_BUTTONS) {
         if (is_domain(entity, "script") || is_domain(entity, "scene") ||
+            is_domain(entity, "button") || is_domain(entity, "input_button") ||   /* state = last press time */
             !strcmp(state, "on") || !strcmp(state, "off")) return true;
         ESP_LOGW(TAG, "layout: %s can't be switched ('%s'), skipped", entity, state);
         return false;
