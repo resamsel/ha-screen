@@ -247,7 +247,8 @@ static lv_obj_t *s_dots_box;                             /* pill holding the dot
 static lv_timer_t *s_dots_timer;
 
 static bool s_dots_on = true;     /* within DOTS_SHOW_MS of the last touch */
-static bool s_status_quiet;       /* Wi-Fi and HA fine and nothing being read: icons may fade */
+static bool s_status_quiet;       /* HA fine and nothing being read: the HA dot may fade */
+static bool s_wifi_quiet;         /* Wi-Fi connected: its icon may fade */
 
 static void dots_opa_cb(void *o, int32_t v) { lv_obj_set_style_opa(o, v, 0); }
 static void fade_obj(lv_obj_t *o, lv_opa_t to, uint32_t ms)
@@ -269,9 +270,9 @@ static void dots_fade(lv_opa_t to, uint32_t ms) { fade_obj(s_dots_box, to, ms); 
 /* Main-screen status icons: shown on touch and whenever something needs attention */
 static void status_icons_update(void)
 {
-    bool show = s_dots_on || !s_status_quiet;
-    fade_obj(s_wifi_icon[0], show ? LV_OPA_COVER : LV_OPA_TRANSP, show ? 200 : 600);
-    fade_obj(s_ha_icon[0], show ? LV_OPA_COVER : LV_OPA_TRANSP, show ? 200 : 600);
+    bool ha = s_dots_on || !s_status_quiet, wifi = s_dots_on || !s_wifi_quiet;   /* refresh: HA dot only */
+    fade_obj(s_wifi_icon[0], wifi ? LV_OPA_COVER : LV_OPA_TRANSP, wifi ? 200 : 600);
+    fade_obj(s_ha_icon[0], ha ? LV_OPA_COVER : LV_OPA_TRANSP, ha ? 200 : 600);
 }
 
 static void dots_timer_cb(lv_timer_t *t)
@@ -1772,7 +1773,8 @@ static void create_ui(void)
     lv_obj_t *scr = lv_scr_act();
     lv_anim_del_all();
     lv_obj_clean(scr);
-    s_dots_box = NULL;
+    s_dots_box = NULL;                    /* deleted with the screen: don't touch them */
+    s_wifi_icon[0] = s_ha_icon[0] = s_wifi_icon[1] = s_ha_icon[1] = NULL;
     pic_free_all();
     /* stay on the current page across rebuilds (rotation, new layout) when it still exists */
     if (s_page >= PAGE_COUNT) s_page = 0;
@@ -1955,11 +1957,12 @@ static void set_busy(bool busy)
 /* HA dot fades in and out while connecting (no Wi-Fi) or while data is being read */
 static bool s_net_busy, s_offline = true, s_ha_ok;
 static void dot_opa_cb(void *obj, int32_t v) { lv_obj_set_style_bg_opa(obj, (lv_opa_t)v, 0); }
-static void update_dot_pulse(void)
+/* Busy flips on and off with every request (many at start-up): the pulse and the fade-out
+ * wait until it has been quiet for STATUS_SETTLE_MS, so the dot doesn't blink */
+#define STATUS_SETTLE_MS 1500
+static lv_timer_t *s_settle_timer;
+static void dot_pulse(bool on)
 {
-    bool on = s_net_busy || s_offline;
-    s_status_quiet = !on && s_ha_ok;
-    status_icons_update();
     for (int i = 0; i < 2; i++) {
         lv_obj_t *d = s_ha_icon[i];
         if (!d) continue;
@@ -1980,6 +1983,36 @@ static void update_dot_pulse(void)
             lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
         }
     }
+}
+
+static void settle_cb(lv_timer_t *t)
+{
+    (void)t;
+    lv_timer_pause(s_settle_timer);
+    dot_pulse(false);
+    s_status_quiet = s_ha_ok;
+    status_icons_update();
+}
+
+static void update_dot_pulse(void)
+{
+    bool on = s_net_busy || s_offline;
+    s_wifi_quiet = !s_offline;
+    if (!s_settle_timer) {
+        s_settle_timer = lv_timer_create(settle_cb, STATUS_SETTLE_MS, NULL);
+        lv_timer_pause(s_settle_timer);
+    }
+    if (on) {
+        lv_timer_pause(s_settle_timer);
+        s_status_quiet = false;
+        dot_pulse(true);
+    } else {
+        if (!s_ha_ok) dot_pulse(false);   /* error: red dot, steady */
+        s_status_quiet = false;           /* fades (if fine) once settled */
+        lv_timer_reset(s_settle_timer);
+        lv_timer_resume(s_settle_timer);
+    }
+    status_icons_update();
 }
 
 static void ha_busy(bool busy)
