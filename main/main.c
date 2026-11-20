@@ -873,6 +873,14 @@ static void ha_graph_changed(int graph, int row, const char *latest, const char 
         s_gi = GI(graph, row);
     }
     if (latest) {
+        char v[24];                       /* portrait: whole numbers only (rounded) */
+        char *e;
+        double x = strtod(latest, &e);
+        if (!s_landscape && e != latest && !*e && strchr(latest, '.')) {
+            snprintf(v, sizeof(v), "%.0f", x);
+            if (!strcmp(v, "-0")) strcpy(v, "0");
+            latest = v;
+        }
         lv_label_set_text(s_g_val, latest);
         lv_label_set_text(s_g_unit, unit ? unit : "");
         place_graph_value();
