@@ -10,7 +10,7 @@
 #define LAYOUT_MAX_IMAGES    4      /* picture cards with an image:/camera_image: source */
 #define LAYOUT_IMAGE_LEN     128
 
-typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER } layout_kind_t;
+typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER, LAYOUT_GAUGE, LAYOUT_GLANCE } layout_kind_t;
 
 /* clock card options (layout_item_t.flags) */
 #define LAYOUT_CLOCK_SECONDS 0x01
@@ -28,6 +28,11 @@ typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT
 #define LAYOUT_PIC_FILL      0x04   /* fit_mode: fill (stretch to the block) */
 #define LAYOUT_PIC_FLAGS     0x07   /* default fit_mode contain: whole image, aspect kept */
 
+/* glance card options (layout_item_t.flags), one item per entity of the card */
+#define LAYOUT_GLANCE_NO_NAME  0x01   /* show_name: false */
+#define LAYOUT_GLANCE_NO_STATE 0x02   /* show_state: false */
+#define LAYOUT_GLANCE_FLAGS    0x03
+
 /* what a tap on a button does: toggle/run/activate, or nothing (other tap_action types) */
 typedef enum { LAYOUT_ACT_TOGGLE, LAYOUT_ACT_NONE } layout_action_t;
 
@@ -36,6 +41,8 @@ typedef struct {
     char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
     uint8_t action;         /* layout_action_t, button pages */
     uint16_t hours;         /* graph span (graph pages) */
+    float min, max;         /* gauge range (default 0..100) */
+    float sev[3];           /* gauge severity: green, yellow, red from these values on; NAN = none */
     uint8_t flags;          /* LAYOUT_CLOCK_* (clock cards), LAYOUT_PIC_* (pictures) */
     uint8_t kind;           /* layout_kind_t of this card: each card is its own block */
     uint8_t image;          /* pictures: 1-based index into ha_layout_t.images, 0 = the entity itself */

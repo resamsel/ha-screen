@@ -12,6 +12,9 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
 - `tile` cards = value rows (up to 4), in dashboard order; name = the card's name or the
   entity's friendly name
 - a `sensor` card with `graph: line` = a graph page (span = `hours_to_show`, default 24)
+- an `entity` card = like a tile
+- a `gauge` card = the value on a half-circle arc (`min`/`max`, `severity` colours like HA)
+- a `glance` card = one cell per entity (icon, state, name), up to 4 per page
 - a `button` card = a tap toggles on/off entities, runs scripts, activates scenes and presses
   `button.*` / `input_button.*` entities
 - a `picture-entity` card = a picture fitted into its block, name along the bottom

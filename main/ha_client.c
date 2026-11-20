@@ -562,7 +562,7 @@ static bool fetch_state(void)
             const layout_item_t *it = &s_layout.pages[pg].items[i];
             if (it->kind == LAYOUT_BUTTONS) { fetch_button(pg, i); continue; }
             if (it->kind == LAYOUT_WEATHER) { fetch_weather(pg, i); continue; }
-            if (it->kind != LAYOUT_VALUES) continue;   /* graphs: fetch_graph; clocks: no data */
+            if (it->kind != LAYOUT_VALUES && it->kind != LAYOUT_GAUGE && it->kind != LAYOUT_GLANCE) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
             read_entity(pg, i, text, unit, name);
             emit_sensor(pg, i, text, unit, name);
@@ -729,7 +729,7 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
         ESP_LOGW(TAG, "layout: %s can't be switched ('%s'), skipped", entity, state);
         return false;
     }
-    if (kind == LAYOUT_VALUES) return true;   /* text states are shown as text */
+    if (kind == LAYOUT_VALUES || kind == LAYOUT_GLANCE) return true;   /* text states are shown as text */
     if (kind == LAYOUT_WEATHER) {
         if (is_domain(entity, "weather")) return true;
         ESP_LOGW(TAG, "layout: %s is not a weather entity, skipped", entity);
@@ -818,7 +818,8 @@ static void resolve_names(ha_layout_t *l)
  * class, else the domain default), like HA's frontend */
 static bool has_icon(const layout_item_t *it)
 {
-    return (it->kind == LAYOUT_VALUES || it->kind == LAYOUT_GRAPH || it->kind == LAYOUT_BUTTONS) && it->icon[0] != '-';
+    return (it->kind == LAYOUT_VALUES || it->kind == LAYOUT_GRAPH || it->kind == LAYOUT_BUTTONS || it->kind == LAYOUT_GLANCE) &&
+           it->icon[0] != '-';
 }
 
 static bool s_icon_rules_pending;      /* the last load failed (no memory/connection): retry */
@@ -905,6 +906,10 @@ static void refresh_layout(bool force)
 {
     static ha_layout_t l;
     static uint32_t raw_hash;             /* parsed but unfiltered: skip the entity checks when unchanged */
+    if (s_http) {                         /* two TLS sessions at once don't fit in RAM */
+        esp_http_client_cleanup(s_http);
+        s_http = NULL;
+    }
     char *json = dash_fetch_config();
     if (!json) return;
     int n = layout_parse(json, HA_VIEW, &l);

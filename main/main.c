@@ -365,7 +365,8 @@ static char s_icon_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][48];   /* kept across
 static bool icon_slot(int pg, int i)
 {
     uint8_t k = KIND(pg, i);
-    return (k == LAYOUT_VALUES || k == LAYOUT_GRAPH || k == LAYOUT_BUTTONS) && s_layout.pages[pg].items[i].icon[0] != '-';
+    return (k == LAYOUT_VALUES || k == LAYOUT_GRAPH || k == LAYOUT_BUTTONS || k == LAYOUT_GLANCE) &&
+           s_layout.pages[pg].items[i].icon[0] != '-';
 }
 /* portrait tiles: icon on the left of the value, which moves right by this much */
 /* portrait tiles: the icon sits left of the centred value; this much room is kept free on
@@ -1088,6 +1089,143 @@ static void ha_weather_changed(int page, int row, const char *cond, const char *
     lvgl_port_unlock();
 }
 
+/* ---- Gauge cards: the value on a half-circle arc, like HA's gauge card ---- */
+static lv_obj_t *s_gz_arc[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_val[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_gz_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_coord_t s_gz_cx[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], s_gz_flat[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+#define GZ_SCALE 1000
+
+static void gauge_place(int pg, int i)
+{
+    lv_obj_t *v = s_gz_val[pg][i], *u = s_gz_unit[pg][i];
+    lv_obj_update_layout(v);
+    lv_obj_update_layout(u);
+    const lv_font_t *vf = lv_obj_get_style_text_font(v, 0), *uf = lv_obj_get_style_text_font(u, 0);
+    lv_coord_t vw = lv_obj_get_width(v), uw = lv_label_get_text(u)[0] ? lv_obj_get_width(u) + 3 : 0;
+    lv_coord_t x = s_gz_cx[pg][i] - (vw + uw) / 2, base = s_gz_flat[pg][i] - 2;   /* baseline on the flat side */
+    lv_obj_set_pos(v, x, base - (vf->line_height - vf->base_line));
+    lv_obj_set_pos(u, x + vw + 3, base - (uf->line_height - uf->base_line));
+}
+
+static void create_gauge(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    int w = lv_area_get_width(&blk), h = lv_area_get_height(&blk);
+    const lv_font_t *nf = &lv_font_latin_16;
+    lv_coord_t D = LV_MIN(w - 24, 2 * (h - nf->line_height - 20));
+    D = LV_MAX(D, 40);
+    lv_coord_t top = blk.y1 + (h - (D / 2 + 6 + nf->line_height)) / 2;
+    lv_coord_t cx = blk.x1 + w / 2;
+    lv_obj_t *a = lv_arc_create(page);
+    lv_obj_remove_style(a, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
+    lv_arc_set_rotation(a, 180);
+    lv_arc_set_bg_angles(a, 0, 180);
+    lv_arc_set_range(a, 0, GZ_SCALE);
+    lv_arc_set_value(a, 0);
+    lv_obj_set_size(a, D, D);
+    lv_obj_set_pos(a, cx - D / 2, top);
+    lv_obj_set_style_pad_all(a, 0, 0);
+    lv_obj_set_style_arc_width(a, LV_MAX(D / 8, 6), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(a, LV_MAX(D / 8, 6), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(a, false, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(a, false, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(a, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(a, COL_SEC(s_light), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(a, lv_color_hex(0x03A9F4), LV_PART_INDICATOR);   /* HA's primary */
+    s_gz_arc[pg][i] = a;
+    s_gz_cx[pg][i] = cx;
+    s_gz_flat[pg][i] = top + D / 2;
+
+    lv_obj_t *v = lv_label_create(page), *u = lv_label_create(page), *n = lv_label_create(page);
+    lv_obj_set_style_text_font(v, D >= 120 ? &lv_font_montserrat_28 : &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(u, &lv_font_latin_14, 0);
+    lv_obj_set_style_text_font(n, nf, 0);
+    lv_obj_set_style_text_color(v, COL_MAIN(s_light), 0);
+    lv_obj_set_style_text_color(u, COL_SEC(s_light), 0);
+    lv_obj_set_style_text_color(n, COL_SEC(s_light), 0);
+    lv_label_set_text(v, "--");
+    lv_label_set_text(u, "");
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    lv_label_set_text(n, it->name[0] ? it->name : it->entity);
+    lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(n, w - 16, nf->line_height);
+    lv_obj_set_style_text_align(n, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(n, blk.x1 + 8, top + D / 2 + 6);
+    s_gz_val[pg][i] = v; s_gz_unit[pg][i] = u; s_gz_name[pg][i] = n;
+    gauge_place(pg, i);
+}
+
+static void gauge_update(int pg, int i, const char *value, const char *unit, const char *name)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    int g = GI(pg, i);
+    bool crisp = s_crisp[g];
+    crisp_off(g);
+    lv_label_set_text(s_gz_val[pg][i], value);
+    lv_label_set_text(s_gz_unit[pg][i], unit);
+    if (!it->name[0] && name) lv_label_set_text(s_gz_name[pg][i], name);
+    gauge_place(pg, i);
+    page_relayout(pg);                    /* re-applies a tapped gauge's growth */
+    if (crisp) crisp_on(g);
+    char *end;
+    float v = strtof(value, &end);
+    if (end == value) { lv_arc_set_value(s_gz_arc[pg][i], 0); return; }
+    float f = (v - it->min) / (it->max - it->min);
+    lv_arc_set_value(s_gz_arc[pg][i], (int16_t)(LV_CLAMP(0.0f, f, 1.0f) * GZ_SCALE));
+    uint32_t col = 0x03A9F4;              /* severity: the highest threshold reached, like HA */
+    static const uint32_t SEV[3] = { 0x43A047, 0xFFA600, 0xDB4437 };
+    for (int k = 0; k < 3; k++) if (!isnan(it->sev[k]) && v >= it->sev[k]) col = SEV[k];
+    lv_obj_set_style_arc_color(s_gz_arc[pg][i], lv_color_hex(col), LV_PART_INDICATOR);
+}
+
+/* ---- Glance cards: one cell per entity, icon over name over state ---- */
+static lv_obj_t *s_gl_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gl_state[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+
+static void create_glance(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    int w = lv_area_get_width(&blk), h = lv_area_get_height(&blk);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    bool name = !(it->flags & LAYOUT_GLANCE_NO_NAME), state = !(it->flags & LAYOUT_GLANCE_NO_STATE);
+    const lv_font_t *nf = &lv_font_latin_14, *sf = &lv_font_latin_16;
+    lv_coord_t text = (name ? nf->line_height + 2 : 0) + (state ? sf->line_height : 0), ih = 0;
+    if (icon_slot(pg, i)) ih = h - 16 >= text + 4 + 2 * ICON_SIZE && w - 16 >= 2 * ICON_SIZE ? 2 * ICON_SIZE
+                             : h - 8 >= text + 2 + ICON_SIZE ? ICON_SIZE : 0;
+    lv_coord_t gap = ih ? 4 : 0, y = blk.y1 + (h - (ih + gap + text)) / 2;
+    if (ih) {
+        lv_obj_t *o = icon_create(page, pg, i, icon_color(), ih);
+        lv_obj_set_pos(o, blk.x1 + (w - ih) / 2, y);
+        y += ih + gap;
+    }
+    lv_obj_t *labels[2] = { NULL, NULL };   /* [0] name, [1] state */
+    for (int j = 0; j < 2; j++) {
+        int k = 1 - j;                    /* state (value) first, name below it */
+        if (k == 0 ? !name : !state) continue;
+        lv_obj_t *l = lv_label_create(page);
+        const lv_font_t *f = k == 0 ? nf : sf;
+        lv_obj_set_style_text_font(l, f, 0);
+        lv_obj_set_style_text_color(l, k == 0 ? COL_SEC(s_light) : COL_MAIN(s_light), 0);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_set_size(l, w - 8, f->line_height);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(l, blk.x1 + 4, y);
+        lv_label_set_text(l, k == 0 ? (it->name[0] ? it->name : it->entity) : "--");
+        y += f->line_height + 2;
+        labels[k] = l;
+    }
+    s_gl_name[pg][i] = labels[0];
+    s_gl_state[pg][i] = labels[1];
+}
+
+static void glance_update(int pg, int i, const char *value, const char *unit, const char *name)
+{
+    if (s_gl_state[pg][i]) lv_label_set_text_fmt(s_gl_state[pg][i], "%s%s%s", value, unit[0] ? " " : "", unit);
+    if (s_gl_name[pg][i] && !s_layout.pages[pg].items[i].name[0] && name) lv_label_set_text(s_gl_name[pg][i], name);
+}
+
 /* ---- Clock pages: the board's time (set from HA's responses), updated every second ---- */
 /* one set per block, indexed GI(page, row) */
 static lv_obj_t *s_clk_time[GRAPHS], *s_clk_small[GRAPHS];   /* no date, like HA's card */
@@ -1301,6 +1439,19 @@ static void apply_temp_theme(bool light)
         }
     }
     if (s_page_title) lv_obj_set_style_text_color(s_page_title, val, 0);
+    for (int pg = 0; pg < PAGE_COUNT; pg++)
+        for (int i = 0; i < ROWS(pg); i++) {
+            if (KIND(pg, i) == LAYOUT_GAUGE && s_gz_val[pg][i]) {
+                lv_obj_set_style_text_color(s_gz_val[pg][i], val, 0);
+                lv_obj_set_style_text_color(s_gz_unit[pg][i], sub, 0);
+                lv_obj_set_style_text_color(s_gz_name[pg][i], sub, 0);
+                lv_obj_set_style_arc_color(s_gz_arc[pg][i], sub, LV_PART_MAIN);
+            }
+            if (KIND(pg, i) == LAYOUT_GLANCE) {
+                if (s_gl_name[pg][i]) lv_obj_set_style_text_color(s_gl_name[pg][i], sub, 0);
+                if (s_gl_state[pg][i]) lv_obj_set_style_text_color(s_gl_state[pg][i], val, 0);
+            }
+        }
     if (s_status_bg) lv_obj_set_style_bg_color(s_status_bg, lv_color_hex(light ? 0xEEF1F4 : 0x14181C), 0);
     if (s_title_icon) lv_obj_set_style_img_recolor(s_title_icon, val, 0);
     /* weather cards: text colours and the icon (its shapes are coloured per theme) */
@@ -1362,6 +1513,10 @@ static void show_page(int page)
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name)
 {
     if (!lvgl_port_lock(0)) return;
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_GAUGE && s_gz_val[page][row])
+        gauge_update(page, row, value, unit, name);
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_GLANCE)
+        glance_update(page, row, value, unit, name);
     if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_VALUES && s_val[page][row]) {
         lv_label_set_text(s_val[page][row], value);
         lv_label_set_text(s_unit[page][row], unit);
@@ -1635,6 +1790,8 @@ static void create_pages(lv_obj_t *scr)
             if (it->kind == LAYOUT_CLOCK) { create_clock(page, pg, i); continue; }
             if (it->kind == LAYOUT_PICTURE) { create_picture(page, pg, i); continue; }
             if (it->kind == LAYOUT_WEATHER) { create_weather(page, pg, i); continue; }
+            if (it->kind == LAYOUT_GAUGE) { create_gauge(page, pg, i); continue; }
+            if (it->kind == LAYOUT_GLANCE) { create_glance(page, pg, i); continue; }
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
@@ -1706,7 +1863,17 @@ static uint16_t s_zoom[GROUPS];
 /* A grown value is drawn in a real font of its size once the animation ends (LVGL's scaling
  * of a rendered label looks washed out); s_base = its area in the normal font */
 static lv_area_t s_base[GROUPS];
-#define BIG_FONT (s_landscape ? &lv_font_clock_44 : &lv_font_clock_56)   /* ~1.6 x VFONT */
+static const lv_font_t *s_base_font[GROUPS];   /* the normal font while s_crisp */
+/* the clock font nearest to 1.6 x the normal one (digits and signs only) */
+static const lv_font_t *big_font(const lv_font_t *base)
+{
+    static const lv_font_t *const F[] = { &lv_font_clock_24, &lv_font_clock_28, &lv_font_clock_32, &lv_font_clock_36,
+        &lv_font_clock_40, &lv_font_clock_44, &lv_font_clock_48, &lv_font_clock_56, &lv_font_clock_64, &lv_font_clock_72 };
+    int want = base->line_height * 16 / 10, best = 0;
+    for (int k = 1; k < (int)(sizeof(F) / sizeof(F[0])); k++)
+        if (LV_ABS(F[k]->line_height - want) < LV_ABS(F[best]->line_height - want)) best = k;
+    return F[best];
+}
 
 /* o[0] = NULL when group g doesn't exist in the current layout */
 static void group_objs(int g, lv_obj_t *o[3])
@@ -1717,6 +1884,10 @@ static void group_objs(int g, lv_obj_t *o[3])
     if (KIND(pg, row) == LAYOUT_GRAPH) {
         int gi = GI(pg, row);   /* index directly: s_gi belongs to the caller */
         o[0] = s_g_val_[gi]; o[1] = s_g_unit_[gi]; o[2] = s_g_name_[gi];
+        return;
+    }
+    if (KIND(pg, row) == LAYOUT_GAUGE) {
+        o[0] = s_gz_val[pg][row]; o[1] = s_gz_unit[pg][row]; o[2] = s_gz_name[pg][row];
         return;
     }
     if (KIND(pg, row) != LAYOUT_VALUES) return;   /* buttons and clocks don't grow */
@@ -1792,7 +1963,7 @@ static void page_relayout(int pg)
     for (int i = 0; i < ROWS(pg); i++) pure &= KIND(pg, i) == LAYOUT_VALUES;
     bool cols = s_landscape && pure;
     lv_coord_t right_bound = SCR_W - 2;
-    const lv_font_t *vf = VFONT;
+    const lv_font_t *vf;
     for (int k = 0; k < n; k++) {
         /* push away from the neighbours' growth */
         float shift = 0;
@@ -1808,6 +1979,7 @@ static void page_relayout(int pg)
          * the status bar); rows: about its centre */
         bool corner = KIND(pg, GROW(gs[k])) == LAYOUT_GRAPH;
         lv_coord_t udx = corner ? gw : gw / 2;
+        vf = s_crisp[gs[k]] ? s_base_font[gs[k]] : lv_obj_get_style_text_font(o[k][0], 0);   /* gauges: own size */
         lv_coord_t udy = (lv_coord_t)(((vf->line_height - vf->base_line) - (corner ? 0 : h / 2)) * f[k]);
         /* keep the whole element on screen */
         /* page-relative: the page may be anywhere on the strip (even off screen) */
@@ -1829,7 +2001,7 @@ static void page_relayout(int pg)
         if (s_crisp[gs[k]]) {
             /* big font, no scaling: put it where the scaled value would be (same baseline,
              * left edge for graphs, centre for tiles) */
-            const lv_font_t *bf = BIG_FONT;
+            const lv_font_t *bf = lv_obj_get_style_text_font(o[k][0], 0);
             float z = 1 + f[k];
             lv_coord_t px = corner ? 0 : w / 2, py = corner ? 0 : h / 2;
             lv_coord_t sx1 = va[k].x1 + px - (lv_coord_t)(px * z), sy1 = va[k].y1 + py - (lv_coord_t)(py * z);
@@ -1877,7 +2049,7 @@ static void crisp_off(int g)
     lv_obj_t *o[3];
     group_objs(g, o);
     s_crisp[g] = false;
-    if (o[0]) { lv_obj_set_style_text_font(o[0], VFONT, 0); lv_obj_update_layout(o[0]); }
+    if (o[0]) { lv_obj_set_style_text_font(o[0], s_base_font[g] ? s_base_font[g] : VFONT, 0); lv_obj_update_layout(o[0]); }
 }
 
 static void crisp_on(int g)
@@ -1888,7 +2060,8 @@ static void crisp_on(int g)
     lv_obj_update_layout(o[0]);
     lv_obj_get_coords(o[0], &s_base[g]);   /* normal font, untranslated */
     lv_area_move(&s_base[g], -lv_obj_get_style_translate_x(o[0], 0), -lv_obj_get_style_translate_y(o[0], 0));
-    lv_obj_set_style_text_font(o[0], BIG_FONT, 0);
+    s_base_font[g] = lv_obj_get_style_text_font(o[0], 0);
+    lv_obj_set_style_text_font(o[0], big_font(s_base_font[g]), 0);
     lv_obj_update_layout(o[0]);
     s_crisp[g] = true;
     page_relayout(group_page(g));
@@ -2140,6 +2313,9 @@ static void create_ui(void)
     s_dragging = s_paging = false;
     memset(s_val, 0, sizeof(s_val));
     memset(s_icon, 0, sizeof(s_icon));
+    memset(s_gz_val, 0, sizeof(s_gz_val));
+    memset(s_gl_name, 0, sizeof(s_gl_name));
+    memset(s_gl_state, 0, sizeof(s_gl_state));
     icons_free();
     memset(s_unit, 0, sizeof(s_unit));
     memset(s_name, 0, sizeof(s_name));

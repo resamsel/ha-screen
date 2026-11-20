@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "layout.h"
 #include <string.h>
+#include <math.h>
 #include "cJSON.h"
 
 #ifdef LAYOUT_HOST
@@ -39,7 +40,13 @@ static bool is_button(const cJSON *card)
 static bool is_tile(const cJSON *card)
 {
     const char *type = str(card, "type");
-    return type && !strcmp(type, "tile");
+    return type && (!strcmp(type, "tile") || !strcmp(type, "entity"));   /* entity card: same look */
+}
+
+static float num(const cJSON *obj, const char *key, float def)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return cJSON_IsNumber(v) ? (float)v->valuedouble : def;
 }
 
 /* picture-entity card with a camera or image entity */
@@ -119,10 +126,32 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             }
             continue;
         }
+        if (ct && !strcmp(ct, "glance")) {   /* one cell per entity */
+            const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
+            uint8_t fl = (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_name")) ? LAYOUT_GLANCE_NO_NAME : 0) |
+                         (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_state")) ? LAYOUT_GLANCE_NO_STATE : 0);
+            bool no_icon = cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_icon"));
+            cJSON_ArrayForEach(e, ents) {
+                const char *ent = cJSON_IsString(e) ? e->valuestring : cJSON_IsObject(e) ? str(e, "entity") : NULL;
+                if (!ent) continue;
+                if (pg->count == LAYOUT_MAX_ROWS) { LOGW("section %d: more than %d cards, extra skipped", idx, LAYOUT_MAX_ROWS); break; }
+                layout_item_t *it = &pg->items[pg->count++];
+                it->kind = LAYOUT_GLANCE;
+                if (pg->count == 1) pg->kind = it->kind;
+                if (cJSON_IsObject(e)) set_item(it, e);   /* entity, name */
+                else copy(it->entity, sizeof(it->entity), ent);
+                it->flags = fl;
+                const char *ic = cJSON_IsObject(e) ? str(e, "icon") : NULL;
+                if (no_icon) copy(it->icon, sizeof(it->icon), "-");
+                else if (ic && strlen(ic) < sizeof(it->icon)) copy(it->icon, sizeof(it->icon), ic);
+            }
+            continue;
+        }
         bool clock = ct && !strcmp(ct, "clock");
+        bool gauge = ct && !strcmp(ct, "gauge");
         bool weather = ct && !strcmp(ct, "weather-forecast");   /* current weather; forecast not shown */
         bool graph = is_graph(card), tile = is_tile(card), button = is_button(card), picture = is_picture(card);
-        if (!clock && !graph && !tile && !button && !picture && !weather) {
+        if (!clock && !graph && !tile && !button && !picture && !weather && !gauge) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
             continue;
         }
@@ -135,7 +164,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             continue;
         }
         layout_item_t *it = &pg->items[pg->count++];
-        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : LAYOUT_VALUES;
+        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : gauge ? LAYOUT_GAUGE : LAYOUT_VALUES;
         if (pg->count == 1) pg->kind = it->kind;
         if (clock) {
             const char *tf = str(card, "time_format"), *sz = str(card, "clock_size"), *tz = str(card, "time_zone");
@@ -175,6 +204,13 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
         const char *icon = str(card, "icon");
         if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_icon"))) copy(it->icon, sizeof(it->icon), "-");
         else if (icon && strlen(icon) < sizeof(it->icon)) copy(it->icon, sizeof(it->icon), icon);
+        if (gauge) {
+            it->min = num(card, "min", 0);
+            it->max = num(card, "max", 100);
+            const cJSON *sv = cJSON_GetObjectItemCaseSensitive(card, "severity");
+            static const char *const names[3] = { "green", "yellow", "red" };
+            for (int k = 0; k < 3; k++) it->sev[k] = cJSON_IsObject(sv) ? num(sv, names[k], NAN) : NAN;
+        }
         if (graph) {
             const cJSON *h = cJSON_GetObjectItemCaseSensitive(card, "hours_to_show");
             int hours = cJSON_IsNumber(h) ? (int)h->valuedouble : 0;
@@ -280,7 +316,7 @@ bool layout_sanitize(ha_layout_t *l)
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
         for (int i = 0; i < pg->count; i++)
-            if (pg->items[i].kind > LAYOUT_WEATHER) pg->items[i].kind = LAYOUT_VALUES;
+            if (pg->items[i].kind > LAYOUT_GLANCE) pg->items[i].kind = LAYOUT_VALUES;
         pg->kind = pg->items[0].kind;   /* kind of the first card */
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
@@ -290,7 +326,12 @@ bool layout_sanitize(ha_layout_t *l)
             pg->items[i].icon[sizeof(pg->items[i].icon) - 1] = 0;
             if (pg->items[i].kind != LAYOUT_PICTURE || pg->items[i].image > LAYOUT_MAX_IMAGES) pg->items[i].image = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
-            pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : pg->items[i].kind == LAYOUT_CLOCK ? LAYOUT_CLOCK_FLAGS : 0;
+            pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : pg->items[i].kind == LAYOUT_CLOCK ? LAYOUT_CLOCK_FLAGS
+                                : pg->items[i].kind == LAYOUT_GLANCE ? LAYOUT_GLANCE_FLAGS : 0;
+            if (pg->items[i].kind == LAYOUT_GAUGE) {   /* a usable range */
+                if (!isfinite(pg->items[i].min)) pg->items[i].min = 0;
+                if (!isfinite(pg->items[i].max) || pg->items[i].max <= pg->items[i].min) pg->items[i].max = pg->items[i].min + 100;
+            }
             if ((pg->items[i].flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_SIZE) pg->items[i].flags &= ~LAYOUT_CLOCK_SIZE;
             uint16_t *h = &pg->items[i].hours;
             if (pg->items[i].kind != LAYOUT_GRAPH) *h = 0;   /* unused; as layout_parse leaves it */

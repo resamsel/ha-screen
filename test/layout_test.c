@@ -1,5 +1,6 @@
 /* Host tests for main/layout.c. Build/run: see test/run.sh */
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -338,6 +339,24 @@ static void test_heading_icon(void)
     assert(!strcmp(l.pages[0].title, "Wetter") && !strcmp(l.pages[0].title_icon, "mdi:weather-cloudy"));
 }
 
+static void test_new_cards(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"entity\",\"entity\":\"sensor.a\"}" ","
+                                  "{\"type\":\"gauge\",\"entity\":\"sensor.b\",\"min\":-10,\"max\":40,\"severity\":{\"green\":0,\"yellow\":25,\"red\":30}}" ","
+                                  "{\"type\":\"gauge\",\"entity\":\"sensor.c\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].kind == LAYOUT_VALUES);
+    assert(l.pages[0].items[1].kind == LAYOUT_GAUGE && l.pages[0].items[1].min == -10 && l.pages[0].items[1].max == 40);
+    assert(l.pages[0].items[1].sev[0] == 0 && l.pages[0].items[1].sev[1] == 25 && l.pages[0].items[1].sev[2] == 30);
+    assert(l.pages[0].items[2].min == 0 && l.pages[0].items[2].max == 100 && isnan(l.pages[0].items[2].sev[0]));
+    assert(parse_sections("[" SEC("{\"type\":\"glance\",\"show_state\":false,\"entities\":[\"light.a\","
+                                  "{\"entity\":\"switch.b\",\"name\":\"Bee\",\"icon\":\"mdi:bee\"},\"sensor.c\",\"sensor.d\",\"sensor.e\"]}") "]", &l) == 1);
+    assert(l.pages[0].count == LAYOUT_MAX_ROWS && l.pages[0].items[0].kind == LAYOUT_GLANCE);
+    assert(!strcmp(l.pages[0].items[1].entity, "switch.b") && !strcmp(l.pages[0].items[1].name, "Bee") && !strcmp(l.pages[0].items[1].icon, "mdi:bee"));
+    assert(l.pages[0].items[0].flags == LAYOUT_GLANCE_NO_STATE);
+    assert(layout_sanitize(&l) && l.pages[0].items[0].flags == LAYOUT_GLANCE_NO_STATE);
+}
+
 static void test_weather(void)
 {
     ha_layout_t l;
@@ -353,6 +372,7 @@ int main(void)
     test_weather();
     test_icons();
     test_heading_icon();
+    test_new_cards();
     test_clock();
     test_buttons();
     test_filter_kind();
