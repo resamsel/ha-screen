@@ -39,6 +39,8 @@ static void (*s_touch)(void);
 static void (*s_page)(int);
 static void (*s_tap)(int, int);
 void screenshot_set_tap_cb(void (*cb)(int, int)) { s_tap = cb; }
+static void (*s_view)(int);
+void screenshot_set_view_cb(void (*cb)(int)) { s_view = cb; }
 void screenshot_set_page_cb(void (*cb)(int)) { s_page = cb; }
 void screenshot_set_touch_cb(void (*cb)(void)) { s_touch = cb; }
 
@@ -72,6 +74,10 @@ static void task(void *arg)
         if (usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY) != 1) continue;
         else if (c == 's' || c == 'S') take(c == 'S');
         else if (c >= '0' && c <= '9' && s_page && lvgl_port_lock(0)) { s_page(c - '0'); lvgl_port_unlock(); }
+        else if (c == 'V') {              /* V<n>: show dashboard view n (0 = first) */
+            if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(500)) == 1 && c >= '0' && c <= '9'
+                && s_view && lvgl_port_lock(0)) { s_view(c - '0'); lvgl_port_unlock(); }
+        }
         else if (c == 'T') {
             char buf[16];
             int n = 0;

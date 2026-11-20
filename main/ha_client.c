@@ -236,6 +236,9 @@ static int ha_request_once(esp_http_client_method_t method, const char *url, con
     esp_http_client_set_post_field(s_http, body, body ? strlen(body) : 0);
     *err = esp_http_client_perform(s_http);
     s_resp = NULL;
+    /* a read that failed midway (e.g. TLS out of memory) can still return ESP_OK; that
+     * connection is broken and reusing it crashes mbedTLS, so treat it as a transport error */
+    if (*err == ESP_OK && !esp_http_client_is_complete_data_received(s_http)) *err = ESP_FAIL;
     if (*err != ESP_OK) {
         esp_http_client_cleanup(s_http); /* drop the (possibly stale) connection */
         s_http = NULL;

@@ -7,3 +7,5 @@ void screenshot_set_touch_cb(void (*cb)(void));
 void screenshot_set_page_cb(void (*cb)(int page));
 /* "T<x>,<y>\n": a tap at that screen point (LVGL lock held), for testing */
 void screenshot_set_tap_cb(void (*cb)(int x, int y));
+/* 'V<n>' over USB: show dashboard view n (for testing) */
+void screenshot_set_view_cb(void (*cb)(int));

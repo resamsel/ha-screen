@@ -215,6 +215,8 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             const cJSON *h = cJSON_GetObjectItemCaseSensitive(card, "hours_to_show");
             int hours = cJSON_IsNumber(h) ? (int)h->valuedouble : 0;
             it->hours = hours < 1 ? LAYOUT_HOURS_DEFAULT : hours > LAYOUT_HOURS_MAX ? LAYOUT_HOURS_MAX : hours;
+            const cJSON *lim = cJSON_GetObjectItemCaseSensitive(card, "limits");
+            it->min = cJSON_IsObject(lim) ? num(lim, "min", NAN) : NAN;   /* chart floor */
         }
         if (button) {
             const cJSON *ta = cJSON_GetObjectItemCaseSensitive(card, "tap_action");

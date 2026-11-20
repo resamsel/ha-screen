@@ -113,11 +113,14 @@ static lv_obj_t *s_refresh_btn = NULL;
 static void refresh_cb(lv_event_t *e);
 static void view_cb(lv_event_t *e);
 static void view_btn_update(void);
+static void view_menu_close(void);
+static void view_select(int i);
 /* Dashboard views for the view selector (LVGL lock) */
 static layout_view_t s_views[LAYOUT_MAX_VIEWS];
 static int s_nviews, s_cur_view = -1;
 static char s_view_path[32];          /* chosen view, kept in NVS; "" = the first */
 static lv_obj_t *s_view_btn = NULL, *s_view_caption = NULL;
+static lv_obj_t *s_view_menu = NULL;  /* open view list (its backdrop), NULL when closed */
 static bool s_view_pending = false;   /* a view change is on its way */
 static void ha_views_changed(const layout_view_t *views, int n, int current);
 static lv_color_t neutral_btn_color(void);
@@ -223,6 +226,7 @@ void app_main(void)
     screenshot_set_touch_cb(dots_show);
     screenshot_set_page_cb(show_page);
     screenshot_set_tap_cb(test_tap);
+    screenshot_set_view_cb(view_select);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -363,7 +367,6 @@ static lv_chart_series_t *s_chart_ser_[GRAPHS];
 #define s_g_unit    s_g_unit_[s_gi]
 #define s_chart     s_chart_[s_gi]
 #define s_chart_ser s_chart_ser_[s_gi]
-static bool s_zero_[GRAPHS];               /* y axis from 0 */
 
 
 /* ---- Card icons (values, graphs, buttons): Material Design Icons from HA ---- */
@@ -1605,8 +1608,7 @@ static void ha_graph_changed(int graph, int row, const char *latest, const char 
     }
     s_gi = GI(graph, row);
     if (!s_chart) { lvgl_port_unlock(); return; }
-    (void)hours; (void)end;
-    s_zero_[s_gi] = zero_based;
+    (void)hours; (void)end; (void)zero_based;
     if (name && strncmp(s_full[graph][row], name, 31)) {
         snprintf(s_full[graph][row], sizeof(s_full[graph][row]), "%s", name);
         page_names_update(graph);
@@ -1652,19 +1654,14 @@ static void ha_graph_changed(int graph, int row, const char *latest, const char 
             if (sm[i] < mn) mn = sm[i];
         }
         if (isinf(mx)) { mx = 1; mn = 0; }      /* no data yet */
-        float top, bot = 0;
-        if (s_zero_[s_gi]) {
-            /* 0 .. the next "nice" number (1, 2, 2.5, 5 x 10^n) above the peak */
-            top = nice_ceil(LV_MAX(mx, 1.0f) * 1.05f);
-        } else {
-            /* data range rounded out to a nice step (about a quarter of the range), so
-             * the line fills the chart instead of hugging the top */
-            float step = nice_ceil(LV_MAX(mx - mn, 0.4f) / 4);
-            bot = floorf(mn / step) * step;
-            top = ceilf(mx / step) * step;
-            if (top - mx < step * 0.1f) top += step;    /* a little headroom above the peak */
-            if (bot < 0) bot = 0;
-        }
+        /* floor: the card's limits.min, else the smallest value shown; top: the peak
+         * rounded up to a nice step (about a quarter of the range), with a little headroom */
+        float cmin = s_layout.pages[graph].items[row].min;
+        float bot = isnan(cmin) ? mn : cmin;
+        float step = nice_ceil(LV_MAX(mx - bot, 0.4f) / 4);
+        float top = ceilf(mx / step) * step;
+        if (top - mx < step * 0.1f) top += step;
+        if (top <= bot) top = bot + step;
         lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (lv_coord_t)(bot * 10), (lv_coord_t)(top * 10));
         /* resample the n smoothed points onto the chart's (fewer) points */
         int cnt = lv_chart_get_point_count(s_chart);
@@ -2264,6 +2261,7 @@ static void cfg_show_page(int page)
 
 static void cfg_slide_to(bool open)
 {
+    if (!open) view_menu_close();
     s_cfg_open = open;
     lv_anim_t a;
     lv_anim_init(&a);
@@ -2393,7 +2391,7 @@ static void create_ui(void)
     memset(s_wx_temp, 0, sizeof(s_wx_temp));
     memset(s_full, 0, sizeof(s_full));
     s_err_box = s_err_label = NULL;
-    s_view_btn = s_view_caption = NULL;
+    s_view_btn = s_view_caption = s_view_menu = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -2926,14 +2924,16 @@ static void view_btn_update(void)
     if (!s_view_btn) return;
     lv_obj_t *l = lv_obj_get_child(s_view_btn, 0);
     if (s_view_pending) lv_label_set_text(l, "Loading...");
-    else if (s_cur_view >= 0) lv_label_set_text(l, s_views[s_cur_view].title);
-    else lv_label_set_text(l, s_nviews ? "-" : "Connecting...");
+    else if (s_cur_view >= 0) lv_label_set_text_fmt(l, "%s " LV_SYMBOL_DOWN, s_views[s_cur_view].title);
+    else lv_label_set_text(l, s_nviews ? "- " LV_SYMBOL_DOWN : "Connecting...");
 }
 
 /* Network task: the dashboard's views and the one shown */
 static void ha_views_changed(const layout_view_t *views, int n, int current)
 {
     if (!lvgl_port_lock(0)) return;
+    if (n != s_nviews || current != s_cur_view || memcmp(s_views, views, n * sizeof(*views)))
+        view_menu_close();            /* the open list is out of date */
     memcpy(s_views, views, n * sizeof(*views));
     s_nviews = n;
     s_cur_view = current;
@@ -2941,12 +2941,22 @@ static void ha_views_changed(const layout_view_t *views, int n, int current)
     lvgl_port_unlock();
 }
 
-/* View button: show the dashboard's next view (wraps around); remembered across reboots */
-static void view_cb(lv_event_t *e)
+static void view_menu_close(void)
 {
-    if (s_busy || s_swiped || s_nviews < 2) return;
-    int next = (s_cur_view + 1) % s_nviews;
-    snprintf(s_view_path, sizeof(s_view_path), "%s", s_views[next].path);
+    if (s_view_menu) lv_obj_del(s_view_menu);
+    s_view_menu = NULL;
+}
+
+static void view_menu_bg_cb(lv_event_t *e) { view_menu_close(); }   /* tap beside the list */
+
+/* Show view i: its dashboard sections become the main pages (from the first one) and the
+ * panel closes once they are there; remembered across reboots. Also the serial 'V' command. */
+static void view_select(int i)
+{
+    view_menu_close();
+    if (s_busy || i < 0 || i >= s_nviews || i == s_cur_view) return;
+    ESP_LOGI(TAG, "view %d '%s'", i, s_views[i].path);
+    snprintf(s_view_path, sizeof(s_view_path), "%s", s_views[i].path);
     nvs_handle_t nv;
     if (nvs_open("ui", NVS_READWRITE, &nv) == ESP_OK) {
         nvs_set_str(nv, "view", s_view_path);
@@ -2957,6 +2967,72 @@ static void view_cb(lv_event_t *e)
     set_busy(true);
     view_btn_update();
     ha_client_set_view(s_view_path);
+}
+
+static void view_pick_cb(lv_event_t *e) { view_select((int)(intptr_t)lv_event_get_user_data(e)); }
+
+/* View button: open a list of the dashboard's views below it (above, if there's no room);
+ * the current one is ticked. The list scrolls when it's taller than the screen allows. */
+static void view_cb(lv_event_t *e)
+{
+    if (s_busy || s_swiped || s_nviews < 1 || s_view_menu) return;
+    /* backdrop over the whole panel: catches taps beside the list and keeps swipes off it */
+    lv_obj_t *bg = lv_obj_create(s_cfg);
+    lv_obj_remove_style_all(bg);
+    lv_obj_set_size(bg, CFG_W, SCR_H);
+    lv_obj_add_flag(bg, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(bg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(bg, view_menu_bg_cb, LV_EVENT_CLICKED, NULL);
+    s_view_menu = bg;
+
+    const lv_coord_t row_h = 40, w = 148;
+    lv_area_t a;
+    lv_obj_get_coords(s_view_btn, &a);
+    lv_coord_t below = SCR_H - a.y2 - 6, above = a.y1 - STATUS_H;
+    lv_coord_t want = s_nviews * row_h + 8;
+    bool down = below >= want || below >= above;
+    lv_coord_t h = LV_MIN(want, down ? below : above);
+
+    lv_obj_t *box = lv_obj_create(bg);
+    lv_obj_set_size(box, w, h);
+    lv_obj_set_pos(box, a.x1, down ? a.y2 + 4 : a.y1 - 4 - h);
+    lv_obj_set_style_radius(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 4, 0);
+    lv_obj_set_style_pad_row(box, 0, 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(s_light ? 0xC8CDD4 : 0x3A3F47), 0);
+    lv_obj_set_style_bg_color(box, lv_color_hex(s_light ? 0xFFFFFF : 0x24282F), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(box, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_ACTIVE);
+
+    lv_color_t text = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
+    for (int i = 0; i < s_nviews; i++) {
+        lv_obj_t *r = lv_obj_create(box);
+        lv_obj_remove_style_all(r);
+        lv_obj_set_size(r, lv_pct(100), row_h);
+        lv_obj_set_style_radius(r, 8, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(0x18BCF2), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(r, LV_OPA_40, LV_STATE_PRESSED);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+        lv_obj_add_event_cb(r, view_pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *l = lv_label_create(r);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(l, w - 8 - 36);
+        lv_label_set_text(l, s_views[i].title);
+        lv_obj_set_style_text_font(l, &lv_font_latin_16, 0);
+        lv_obj_set_style_text_color(l, text, 0);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 8, 0);
+        if (i == s_cur_view) {
+            lv_obj_t *c = lv_label_create(r);
+            lv_label_set_text(c, LV_SYMBOL_OK);
+            lv_obj_set_style_text_font(c, &lv_font_latin_16, 0);
+            lv_obj_set_style_text_color(c, lv_color_hex(0x18BCF2), 0);
+            lv_obj_align(c, LV_ALIGN_RIGHT_MID, -8, 0);
+        }
+    }
+    if (s_cur_view >= 0) lv_obj_scroll_to_view(lv_obj_get_child(box, s_cur_view), LV_ANIM_OFF);
 }
 
 /* Orientation button: toggle the HA entity; the layout follows when HA reports it */
@@ -2986,7 +3062,8 @@ static void ha_icon_changed(int page, int row, const char *icon)
 static void ha_layout_changed(const ha_layout_t *layout)
 {
     if (!lvgl_port_lock(0)) return;
-    bool was_open = s_cfg_open;
+    bool was_open = s_cfg_open && !s_view_pending;   /* a new view: show its pages */
+    if (s_view_pending) s_page = 0;
     s_layout = *layout;
     memset(s_icon_name, 0, sizeof(s_icon_name));   /* rows changed: HA sends them again */
     create_ui();   /* keeps the current page when it still exists */

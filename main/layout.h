@@ -41,7 +41,8 @@ typedef struct {
     char name[32];          /* plain card name; "" = resolve name_type, else friendly_name */
     uint8_t action;         /* layout_action_t, button pages */
     uint16_t hours;         /* graph span (graph pages) */
-    float min, max;         /* gauge range (default 0..100) */
+    float min, max;         /* gauge range (default 0..100); graphs: min = limits.min of the
+                             * card (y axis floor), NAN = the data's smallest value */
     float sev[3];           /* gauge severity: green, yellow, red from these values on; NAN = none */
     uint8_t flags;          /* LAYOUT_CLOCK_* (clock cards), LAYOUT_PIC_* (pictures) */
     uint8_t kind;           /* layout_kind_t of this card: each card is its own block */
