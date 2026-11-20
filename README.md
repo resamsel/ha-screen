@@ -15,7 +15,7 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
 - a `picture-entity` card = a picture fitted into its block, name along the bottom
   (`show_name: false` hides it). Source: `camera_image`, else `image` (URL, absolute or relative
   to HA; the HA token is only sent to HA), else the card's own `camera.*`/`image.*` entity.
-  Cameras refresh every 10 s while the page is shown (`HA_PICTURE_INTERVAL_MS`), image entities
+  Cameras refresh every 60 s while the page is shown (`HA_PICTURE_INTERVAL_MS`), image entities
   when their state changes, URLs on each page visit. JPEG (baseline) and PNG (non-interlaced)
 - up to 8 pages; anything else (other cards, missing or non-numeric entities) is skipped
 

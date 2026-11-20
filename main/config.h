@@ -7,7 +7,7 @@
 
 /* How often the display reads all data from Home Assistant (entities and the graph
  * history), in milliseconds */
-#define HA_POLL_INTERVAL_MS  5000
+#define HA_POLL_INTERVAL_MS  60000
 
 /* HTTP requests to HA: timeout per attempt, extra attempts after a failure, and the pause
  * before retry n (n * HA_HTTP_RETRY_MS) */
@@ -31,7 +31,7 @@
 #define HA_LAYOUT_INTERVAL_MS 60000
 
 /* Picture cards (picture-entity, camera.* / image.*): refresh interval while the page is shown */
-#define HA_PICTURE_INTERVAL_MS 10000
+#define HA_PICTURE_INTERVAL_MS 60000
 
 /* Graph pages (the time span comes from the dashboard card's hours_to_show) */
 /* Line smoothing: Gaussian blur width in points (pixels); 0 = raw data, higher = smoother.
