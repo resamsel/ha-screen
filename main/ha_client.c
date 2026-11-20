@@ -9,6 +9,7 @@ static void add_error(const char *fmt, ...);
 #include <time.h>
 #include <sys/time.h>
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -21,6 +22,8 @@ static void add_error(const char *fmt, ...);
 #include "dash_fetch.h"
 #include "layout_store.h"
 #include "names.h"
+#include "rom/tjpgd.h"
+#include "miniz.h"
 
 #include "config.h"
 
@@ -35,6 +38,7 @@ static const char *TAG = "ha";
 #define WAKE_BIT    BIT3  /* Wi-Fi just came up: check HA right away */
 #define REFRESH_BIT BIT4  /* user asked for a refresh */
 #define PRESS_BIT   BIT5  /* a dashboard button was tapped */
+#define PIC_BIT     BIT6  /* another page is shown: fetch its pictures now */
 
 static volatile float s_set_value;
 
@@ -57,6 +61,11 @@ void ha_client_set_press_cb(ha_press_cb_t cb) { s_press_cb = cb; }
 static volatile int s_press_page = -1, s_press_row = -1;   /* last tapped button */
 void ha_client_set_busy_cb(ha_busy_cb_t cb) { s_busy_cb = cb; }
 static ha_layout_t s_layout;              /* current layout, used only by the network task */
+static ha_picture_cb_t s_pic_cb;
+void ha_client_set_picture_cb(ha_picture_cb_t cb) { s_pic_cb = cb; }
+static portMUX_TYPE s_pic_lock = portMUX_INITIALIZER_UNLOCKED;
+static int s_pic_page = -1;               /* page on screen, and its picture block sizes */
+static uint16_t s_pic_w[LAYOUT_MAX_ROWS], s_pic_h[LAYOUT_MAX_ROWS];
 static uint32_t s_layout_hash;
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -481,6 +490,11 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
         return false;
     }
     if (kind == LAYOUT_VALUES) return true;   /* text states are shown as text */
+    if (kind == LAYOUT_PICTURE) {
+        if (is_domain(entity, "camera") || is_domain(entity, "image")) return true;
+        ESP_LOGW(TAG, "layout: %s is not a camera or image, no picture", entity);
+        return false;
+    }
     char *end;
     strtof(state, &end);
     if (end != state) return true;
@@ -554,6 +568,362 @@ static void refresh_layout(bool force)
     use_layout(&l);
 }
 
+#define PIC_MAX1(x) ((x) > 1 ? (x) : 1)
+/* ---- Picture cards: JPEG or PNG, decoded while it streams in (never held whole in RAM) ---- */
+typedef struct {
+    esp_http_client_handle_t http;
+    uint8_t head[8];                      /* bytes read to sniff the format, handed out first */
+    int head_len, head_pos;
+    uint16_t *px;                         /* output, ow x oh */
+    int ow, oh;                           /* output size */
+    int vw, vh, cx, cy;                   /* image scaled to vw x vh, cropped from (cx, cy) */
+    uint8_t fit;                          /* LAYOUT_PIC_COVER / _FILL, else contain */
+    uint8_t zoom;                         /* 2: decoded at half size, shown zoomed (low memory) */
+    int iw, ih, bw, bh;                   /* image and block size, for a refit at half size */
+    int sw, sh;                           /* size of the decoded image (JPEG: 1/2^scale) */
+    uint8_t *win;                         /* PNG inflate window / JPEG work area (32 KB) */
+    tinfl_decompressor *inf;              /* PNG inflate state */
+} pic_dec_t;
+
+/* Next n bytes of the body (buf NULL = skip them); returns how many were read */
+static int pic_read(pic_dec_t *d, uint8_t *buf, int n)
+{
+    static uint8_t skip[256];
+    int got = 0;
+    while (got < n && d->head_pos < d->head_len) {
+        if (buf) buf[got] = d->head[d->head_pos];
+        got++; d->head_pos++;
+    }
+    while (got < n) {
+        int want = n - got;
+        uint8_t *dst = buf ? buf + got : skip;
+        if (!buf && want > (int)sizeof(skip)) want = sizeof(skip);
+        int r = esp_http_client_read(d->http, (char *)dst, want);
+        if (r <= 0) break;
+        got += r;
+    }
+    return got;
+}
+
+/* Scale iw x ih for the block bw x bh: contain keeps the whole image (aspect kept), cover
+ * fills the block and crops the overflow evenly, fill stretches */
+static void pic_fit(pic_dec_t *d, int iw, int ih, int bw, int bh)
+{
+    d->iw = iw; d->ih = ih; d->bw = bw; d->bh = bh;
+    bool wide = (int64_t)iw * bh > (int64_t)ih * bw;
+    if (d->fit & LAYOUT_PIC_FILL) { d->vw = bw; d->vh = bh; }
+    else if (wide != !!(d->fit & LAYOUT_PIC_COVER)) { d->vw = bw; d->vh = PIC_MAX1((int)((int64_t)ih * bw / iw)); }
+    else { d->vh = bh; d->vw = PIC_MAX1((int)((int64_t)iw * bh / ih)); }
+    d->ow = d->vw < bw ? d->vw : bw;
+    d->oh = d->vh < bh ? d->vh : bh;
+    d->cx = (d->vw - d->ow) / 2;
+    d->cy = (d->vh - d->oh) / 2;
+}
+
+/* Output range [*a, *b) covered by source pixel i of n (scaled to v, cropped from c, size o) */
+static bool pic_span(int i, int n, int v, int c, int o, int *a, int *b)
+{
+    *a = (int)((int64_t)i * v / n) - c;
+    *b = (int)((int64_t)(i + 1) * v / n) - c;
+    if (*b <= *a) *b = *a + 1;
+    if (*a < 0) *a = 0;
+    if (*b > o) *b = o;
+    return *a < *b;
+}
+
+static inline uint16_t rgb565s(int r, int g, int b)   /* LV_COLOR_16_SWAP byte order */
+{
+    uint16_t c = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    return (uint16_t)((c >> 8) | (c << 8));
+}
+
+static UINT jpg_in(JDEC *jd, BYTE *buf, UINT n) { return pic_read(jd->device, buf, n); }
+
+/* One decoded block (RGB888) -> nearest pixels of the fitted output */
+static UINT jpg_out(JDEC *jd, void *bitmap, JRECT *rc)
+{
+    pic_dec_t *d = jd->device;
+    const uint8_t *p = bitmap;
+    int w = rc->right - rc->left + 1;
+    for (int y = rc->top; y <= rc->bottom; y++, p += w * 3) {
+        int y0, y1;
+        if (!pic_span(y, d->sh, d->vh, d->cy, d->oh, &y0, &y1)) continue;
+        const uint8_t *q = p;
+        for (int x = rc->left; x <= rc->right; x++, q += 3) {
+            int x0, x1;
+            if (!pic_span(x, d->sw, d->vw, d->cx, d->ow, &x0, &x1)) continue;
+            uint16_t c = rgb565s(q[0], q[1], q[2]);
+            for (int oy = y0; oy < y1; oy++)
+                for (int ox = x0; ox < x1; ox++) d->px[oy * d->ow + ox] = c;
+        }
+    }
+    return 1;
+}
+
+/* Reserves the output for the whole block before the connection opens (TLS and the PNG
+ * window split the heap up); when short on memory the old picture is dropped first. */
+/* Decoder buffers are static: 43 KB that a fragmented heap rarely has in one piece */
+static uint8_t s_pic_win[TINFL_LZ_DICT_SIZE];
+static tinfl_decompressor s_pic_inf;
+
+
+/* Output at the fitted size, allocated once the header is known; when short on memory the
+ * old picture is dropped first */
+static bool pic_alloc(pic_dec_t *d, int pg, int row)
+{
+    size_t sz = (size_t)d->ow * d->oh * 2;
+    d->px = malloc(sz);
+    if (!d->px && s_pic_cb) {
+        s_pic_cb(pg, row, NULL, 0, 0, 1, NULL);
+        d->px = malloc(sz);
+    }
+    if (!d->px) {                         /* still too big: half size, zoomed back up by LVGL */
+        int ow = d->ow, oh = d->oh;
+        pic_fit(d, d->iw, d->ih, PIC_MAX1(d->bw / 2), PIC_MAX1(d->bh / 2));
+        d->px = malloc((size_t)d->ow * d->oh * 2);
+        if (d->px) { d->zoom = 2; sz = (size_t)d->ow * d->oh * 2; }
+        else { d->ow = ow; d->oh = oh; }
+    }
+    if (!d->px) {
+        ESP_LOGW(TAG, "picture %dx%d: no memory (free %u, largest %u)", d->ow, d->oh, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        return false;
+    }
+    memset(d->px, 0, sz);
+    return true;
+}
+
+static const char *jpg_decode(pic_dec_t *d, int bw, int bh, int pg, int row)
+{
+    void *work = d->win;                  /* 32 KB reserved up front; JPEG needs 3100 bytes */
+    JDEC jd;
+    const char *err = NULL;
+    JRESULT r = jd_prepare(&jd, jpg_in, work, 3100, d);
+    if (r != JDR_OK || !jd.width || !jd.height) err = "JPEG header error";
+    if (!err) {
+        pic_fit(d, jd.width, jd.height, bw, bh);
+        int scale = 0;                    /* largest 1/2^n that still has enough pixels */
+        while (scale < 3 && (int)(jd.width >> (scale + 1)) >= d->vw && (int)(jd.height >> (scale + 1)) >= d->vh) scale++;
+        d->sw = PIC_MAX1((int)((jd.width + (1 << scale) - 1) >> scale));
+        d->sh = PIC_MAX1((int)((jd.height + (1 << scale) - 1) >> scale));
+        if (!pic_alloc(d, pg, row)) err = "no memory";
+        else if (jd_decomp(&jd, jpg_out, scale) != JDR_OK) err = "JPEG decode error (progressive?)";
+    }
+    return err;
+}
+
+/* PNG: chunks are walked as they arrive; IDAT data goes through the ROM's inflate into a
+ * 32 KB window, rows are unfiltered one at a time and scaled straight into the output. */
+typedef struct {
+    pic_dec_t *d;
+    uint32_t left;                        /* bytes left in the current IDAT chunk */
+    bool end;                             /* no more IDAT */
+} png_in_t;
+
+static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+
+/* Next compressed bytes from the IDAT chunks; 0 at the end */
+static int png_idat(png_in_t *in, uint8_t *buf, int n)
+{
+    while (!in->left && !in->end) {
+        uint8_t h[12];                    /* CRC of the previous chunk + next length and type */
+        if (pic_read(in->d, h, 12) != 12 || memcmp(h + 8, "IDAT", 4)) { in->end = true; break; }
+        in->left = be32(h + 4);
+    }
+    if (in->end) return 0;
+    if ((uint32_t)n > in->left) n = in->left;
+    int r = pic_read(in->d, buf, n);
+    if (r <= 0) { in->end = true; return 0; }
+    in->left -= r;
+    return r;
+}
+
+static inline int paeth(int a, int b, int c)
+{
+    int p = a + b - c, pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+}
+
+static const char *png_decode(pic_dec_t *d, int bw, int bh, int pg, int row)
+{
+    uint8_t h[8 + 8 + 13];                /* signature, IHDR header and data */
+    if (pic_read(d, h, sizeof(h)) != sizeof(h) || memcmp(h + 12, "IHDR", 4)) return "PNG header error";
+    int W = be32(h + 16), H = be32(h + 20), depth = h[24], ct = h[25];
+    if (h[28]) return "interlaced PNG not supported";
+    static const uint8_t chans[7] = { 1, 0, 3, 1, 2, 0, 4 };
+    if (W <= 0 || H <= 0 || ct > 6 || !chans[ct] || (depth != 8 && !(ct == 3 && depth < 8) && !(ct == 0 && depth < 8)))
+        return "PNG format not supported (needs 8-bit, or palette/grey)";
+    int bpp = PIC_MAX1(chans[ct] * depth / 8);           /* bytes per pixel for the filters */
+    int rowb = (W * chans[ct] * depth + 7) / 8;
+    pic_read(d, NULL, 4);                 /* IHDR CRC */
+
+    /* chunks before the image data: keep the palette, skip the rest */
+    static uint8_t pal[256 * 3];
+    uint32_t first = 0;
+    for (;;) {
+        uint8_t c[8];
+        if (pic_read(d, c, 8) != 8) return "PNG ended early";
+        uint32_t len = be32(c);
+        if (!memcmp(c + 4, "IDAT", 4)) { first = len; break; }
+        if (!memcmp(c + 4, "PLTE", 4) && len <= sizeof(pal)) pic_read(d, pal, len);
+        else pic_read(d, NULL, len);
+        pic_read(d, NULL, 4);             /* CRC */
+    }
+
+    pic_fit(d, W, H, bw, bh);
+    d->sw = W; d->sh = H;
+    const char *err = NULL;
+    tinfl_decompressor *inf = d->inf;
+    uint8_t *win = d->win, *inb = malloc(1024);
+    uint8_t *cur = malloc(rowb + 1), *prev = calloc(1, rowb + 1);
+    if (!inb || !cur || !prev || !pic_alloc(d, pg, row)) err = "no memory";
+    if (!err) {
+        tinfl_init(inf);
+        png_in_t in = { .d = d, .left = first };
+        size_t in_len = 0, in_pos = 0, win_pos = 0;
+        int fill = 0, y = 0;              /* bytes in cur (filter byte first), current row */
+        tinfl_status st = TINFL_STATUS_NEEDS_MORE_INPUT;
+        while (y < H && !err) {
+            if (in_pos == in_len && st == TINFL_STATUS_NEEDS_MORE_INPUT) {
+                in_len = png_idat(&in, inb, 1024);
+                in_pos = 0;
+                if (!in_len) { err = "PNG data ended early"; break; }
+            }
+            size_t n_in = in_len - in_pos, n_out = TINFL_LZ_DICT_SIZE - win_pos;
+            st = tinfl_decompress(inf, inb + in_pos, &n_in, win, win + win_pos, &n_out,
+                                  TINFL_FLAG_PARSE_ZLIB_HEADER | (in.end ? 0 : TINFL_FLAG_HAS_MORE_INPUT));
+            in_pos += n_in;
+            if (st < 0) { err = "PNG data error"; break; }
+            for (size_t k = 0; k < n_out && y < H; k++) {
+                cur[fill++] = win[win_pos + k];
+                if (fill < rowb + 1) continue;
+                /* a full row: undo its filter, then scale it into the output */
+                uint8_t f = cur[0], *r = cur + 1, *p = prev + 1;
+                for (int i = 0; i < rowb; i++) {
+                    int a = i >= bpp ? r[i - bpp] : 0, b = p[i], c = i >= bpp ? p[i - bpp] : 0;
+                    r[i] += f == 1 ? a : f == 2 ? b : f == 3 ? (a + b) / 2 : f == 4 ? paeth(a, b, c) : 0;
+                }
+                int y0, y1;
+                uint16_t *o = NULL;
+                if (pic_span(y, H, d->vh, d->cy, d->oh, &y0, &y1)) o = d->px + y0 * d->ow;
+                for (int ox = 0; o && ox < d->ow; ox++) {
+                    int x = (int)((int64_t)(ox + d->cx) * W / d->vw), R, G, B, A = 255;
+                    if (ct == 2 || ct == 6) { const uint8_t *q = r + x * chans[ct]; R = q[0]; G = q[1]; B = q[2]; if (ct == 6) A = q[3]; }
+                    else if (ct == 4) { R = G = B = r[x * 2]; A = r[x * 2 + 1]; }
+                    else {                /* grey or palette, 1-8 bits per pixel */
+                        int bit = x * depth, v = (r[bit >> 3] >> (8 - depth - (bit & 7))) & ((1 << depth) - 1);
+                        if (ct == 3) { R = pal[v * 3]; G = pal[v * 3 + 1]; B = pal[v * 3 + 2]; }
+                        else R = G = B = v * 255 / ((1 << depth) - 1);
+                    }
+                    o[ox] = rgb565s(R * A / 255, G * A / 255, B * A / 255);   /* over black */
+                }
+                for (int oy = y0 + 1; o && oy < y1; oy++) memcpy(d->px + oy * d->ow, o, d->ow * 2);
+                uint8_t *t = prev; prev = cur; cur = t;
+                fill = 0;
+                y++;
+            }
+            win_pos = (win_pos + n_out) & (TINFL_LZ_DICT_SIZE - 1);
+            if (st == TINFL_STATUS_DONE && y < H) err = "PNG data ended early";
+        }
+    }
+    free(inb); free(cur); free(prev);
+    return err;
+}
+
+/* GET url and decode the picture fitted into bw x bh; the HA token is sent only to HA.
+ * Uses its own connection (streamed reads don't mix with the shared keep-alive one).
+ * Returns the pixels (caller frees) or NULL. */
+static uint16_t *fetch_picture(const char *url, bool auth, uint8_t fit, int bw, int bh, int *ow, int *oh, int *zoom, int pg, int row)
+{
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = HA_HTTP_TIMEOUT_MS,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 2048,
+    };
+    pic_dec_t d = { .win = s_pic_win, .inf = &s_pic_inf, .fit = fit };
+    d.http = esp_http_client_init(&cfg);
+    if (!d.http) return NULL;
+    if (auth) esp_http_client_set_header(d.http, "Authorization", "Bearer " HA_TOKEN);
+    const char *err = NULL, *path = auth ? url + strlen(HA_URL) : url;
+    int st = -1;
+    if (esp_http_client_open(d.http, 0) != ESP_OK || esp_http_client_fetch_headers(d.http) < 0) err = "connection failed";
+    else if ((st = esp_http_client_get_status_code(d.http)) != 200) err = "HTTP error";
+    else if ((d.head_len = pic_read(&d, d.head, 8)) != 8) err = "empty response";
+    else if (!memcmp(d.head, "\x89PNG", 4)) err = png_decode(&d, bw, bh, pg, row);
+    else if (d.head[0] == 0xFF && d.head[1] == 0xD8) err = jpg_decode(&d, bw, bh, pg, row);
+    else err = "not a JPEG or PNG";
+    esp_http_client_close(d.http);
+    esp_http_client_cleanup(d.http);
+    if (err) {
+        if (st > 0 && st != 200) { ESP_LOGW(TAG, "%s: HTTP %d", path, st); add_error("%.60s: HTTP %d", path, st); }
+        else { ESP_LOGW(TAG, "%s: %s", path, err); add_error("%.60s: %s", path, err); }
+        free(d.px);
+        return NULL;
+    }
+    *ow = d.ow; *oh = d.oh; *zoom = d.zoom ? d.zoom : 1;
+    ESP_LOGI(TAG, "picture %dx%d%s from %.60s", d.ow, d.oh, d.zoom ? " (half size, zoomed)" : "", path);
+    return d.px;
+}
+
+static char s_pic_state[LAYOUT_MAX_ROWS][LAYOUT_IMAGE_LEN];   /* what was shown last */
+
+/* Pictures of the page on screen. Cameras are re-read every time; image entities when their
+ * state (the image's timestamp) changes; image URLs once per page visit. */
+static void fetch_pictures(bool force)
+{
+    int pg;
+    uint16_t w[LAYOUT_MAX_ROWS], h[LAYOUT_MAX_ROWS];
+    taskENTER_CRITICAL(&s_pic_lock);
+    pg = s_pic_page;
+    memcpy(w, s_pic_w, sizeof(w));
+    memcpy(h, s_pic_h, sizeof(h));
+    taskEXIT_CRITICAL(&s_pic_lock);
+    if (force) memset(s_pic_state, 0, sizeof(s_pic_state));
+    if (pg < 0 || pg >= s_layout.count || !s_pic_cb) return;
+    for (int i = 0; i < s_layout.pages[pg].count; i++) {
+        const layout_item_t *it = &s_layout.pages[pg].items[i];
+        if (it->kind != LAYOUT_PICTURE || !w[i] || !h[i]) continue;
+        static resp_t r;
+        static char url[LAYOUT_IMAGE_LEN + 128];
+        char path[128], name[32], key[LAYOUT_IMAGE_LEN] = "";
+        snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+        const char *src = it->image ? s_layout.images[it->image - 1] : it->entity;
+        bool camera = is_domain(src, "camera"), entity = camera || is_domain(src, "image");
+        snprintf(path, sizeof(path), "/api/states/%s", it->entity);
+        if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+            if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+            if (!it->image) json_str(r.buf, "\"state\":\"", key, sizeof(key));
+        }
+        if (it->image && !entity) snprintf(key, sizeof(key), "%s", src);
+        if (!camera && key[0] && !strcmp(key, s_pic_state[i])) continue;   /* same image */
+        bool auth = true;
+        if (camera) snprintf(url, sizeof(url), "%s/api/camera_proxy/%s?width=%d&height=%d", HA_URL, src, w[i], h[i]);
+        else if (entity) snprintf(url, sizeof(url), "%s/api/image_proxy/%s", HA_URL, src);
+        else if (strstr(src, "://")) { snprintf(url, sizeof(url), "%s", src); auth = !strncmp(src, HA_URL "/", strlen(HA_URL) + 1); }
+        else snprintf(url, sizeof(url), "%s%s%s", HA_URL, src[0] == '/' ? "" : "/", src);
+        int ow, oh, zoom;
+        if (s_http) {                     /* two TLS sessions at once leave too little RAM to decode */
+            esp_http_client_cleanup(s_http);
+            s_http = NULL;
+        }
+        uint16_t *px = fetch_picture(url, auth, it->flags, w[i], h[i], &ow, &oh, &zoom, pg, i);
+        if (!px) continue;
+        snprintf(s_pic_state[i], sizeof(s_pic_state[i]), "%s", key);
+        s_pic_cb(pg, i, px, ow, oh, zoom, name);
+    }
+}
+
+void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint16_t h[LAYOUT_MAX_ROWS])
+{
+    taskENTER_CRITICAL(&s_pic_lock);
+    s_pic_page = page;
+    memcpy(s_pic_w, w, sizeof(s_pic_w));
+    memcpy(s_pic_h, h, sizeof(s_pic_h));
+    taskEXIT_CRITICAL(&s_pic_lock);
+    if (s_events) xEventGroupSetBits(s_events, PIC_BIT);
+}
+
 static void ha_task(void *arg)
 {
     /* entity "switch.foo" -> domain "switch" */
@@ -566,14 +936,19 @@ static void ha_task(void *arg)
         static ha_layout_t cached;
         if (layout_store_load(&cached)) use_layout(&cached);
     }
-    TickType_t layout_at = 0;
+    TickType_t layout_at = 0, pic_at = 0;
     bool layout_read = false;
 
     for (;;) {
         xEventGroupWaitBits(s_events, WIFI_UP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
         /* wait for a tap, or poll the state every HA_POLL_INTERVAL_MS */
-        EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT | PRESS_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
+        EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT | PRESS_BIT | PIC_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
         s_err[0] = 0;
+        if (b == PIC_BIT) {               /* only a page switch: just its pictures */
+            fetch_pictures(true);
+            pic_at = xTaskGetTickCount();
+            continue;
+        }
         if (s_busy_cb) s_busy_cb(true);
         bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
@@ -617,6 +992,11 @@ static void ha_task(void *arg)
         for (int pg = 0; pg < s_layout.count; pg++)
             for (int i = 0; i < s_layout.pages[pg].count; i++)
                 if (s_layout.pages[pg].items[i].kind == LAYOUT_GRAPH) fetch_graph(pg, i);
+        bool pic_force = b & (PIC_BIT | REFRESH_BIT);
+        if (pic_force || xTaskGetTickCount() - pic_at >= pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS)) {
+            fetch_pictures(pic_force);
+            pic_at = xTaskGetTickCount();
+        }
         if (b & REFRESH_BIT) ok &= fetched;
         if (updated) {
             ESP_LOGI(TAG, "update %s", ok ? "succeeded" : "FAILED");

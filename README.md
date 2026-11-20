@@ -12,6 +12,11 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
 - `tile` cards = value rows (up to 4), in dashboard order; name = the card's name or the
   entity's friendly name
 - a `sensor` card with `graph: line` = a graph page (span = `hours_to_show`, default 24)
+- a `picture-entity` card = a picture fitted into its block, name along the bottom
+  (`show_name: false` hides it). Source: `camera_image`, else `image` (URL, absolute or relative
+  to HA; the HA token is only sent to HA), else the card's own `camera.*`/`image.*` entity.
+  Cameras refresh every 10 s while the page is shown (`HA_PICTURE_INTERVAL_MS`), image entities
+  when their state changes, URLs on each page visit. JPEG (baseline) and PNG (non-interlaced)
 - up to 8 pages; anything else (other cards, missing or non-numeric entities) is skipped
 
 The last good layout is kept in flash, so the board starts with it when HA isn't reachable.

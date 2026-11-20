@@ -57,6 +57,18 @@ typedef void (*ha_landscape_cb_t)(bool landscape);
 void ha_client_set_landscape_cb(ha_landscape_cb_t cb);  /* call before ha_client_start */
 void ha_client_toggle_landscape(void);
 
+/* Picture card (picture-entity): pixels = w*h RGB565 in LVGL's byte order (LV_COLOR_16_SWAP),
+ * the whole image scaled to fit w x h of the requested size; name = card name or friendly_name.
+ * zoom 2: decoded at half size for lack of memory, show it zoomed 2x.
+ * The callback owns pixels and must free() them. pixels NULL = drop the current picture
+ * (to make room for the next one when memory is short). */
+typedef void (*ha_picture_cb_t)(int page, int row, uint16_t *pixels, int w, int h, int zoom, const char *name);
+void ha_client_set_picture_cb(ha_picture_cb_t cb);  /* call before ha_client_start */
+
+/* The page now on screen and the size of each of its picture blocks (0 = no picture).
+ * Its pictures are fetched at once, then every HA_PICTURE_INTERVAL_MS while it stays shown. */
+void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint16_t h[LAYOUT_MAX_ROWS]);
+
 void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb, ha_sensor_cb_t scb,
                      ha_graph_cb_t gcb);
 void ha_client_toggle(void);

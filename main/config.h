@@ -30,6 +30,9 @@
 #define HA_VIEW               "main"
 #define HA_LAYOUT_INTERVAL_MS 60000
 
+/* Picture cards (picture-entity, camera.* / image.*): refresh interval while the page is shown */
+#define HA_PICTURE_INTERVAL_MS 10000
+
 /* Graph pages (the time span comes from the dashboard card's hours_to_show) */
 /* Line smoothing: Gaussian blur width in points (pixels); 0 = raw data, higher = smoother.
  * Write decimals with a point (3.0f or 3, not 3f). */

@@ -42,6 +42,13 @@ static bool is_tile(const cJSON *card)
     return type && !strcmp(type, "tile");
 }
 
+/* picture-entity card with a camera or image entity */
+static bool is_picture(const cJSON *card)
+{
+    const char *type = str(card, "type");
+    return type && !strcmp(type, "picture-entity");
+}
+
 static bool known_part(const char *t)
 {
     return !strcmp(t, "floor") || !strcmp(t, "area") || !strcmp(t, "device") || !strcmp(t, "entity");
@@ -88,7 +95,7 @@ static void set_item(layout_item_t *it, const cJSON *card)
 /* Fills *pg from one section; returns false if nothing usable. */
 /* Fills *pg from one section: every supported card becomes one item (block) with its own
  * kind, in dashboard order; returns false if nothing usable. */
-static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
+static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layout_t *l)
 {
     const char *type = str(sec, "type");
     if (type && strcmp(type, "grid")) {
@@ -109,8 +116,8 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             continue;
         }
         bool clock = ct && !strcmp(ct, "clock");
-        bool graph = is_graph(card), tile = is_tile(card), button = is_button(card);
-        if (!clock && !graph && !tile && !button) {
+        bool graph = is_graph(card), tile = is_tile(card), button = is_button(card), picture = is_picture(card);
+        if (!clock && !graph && !tile && !button && !picture) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
             continue;
         }
@@ -123,7 +130,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             continue;
         }
         layout_item_t *it = &pg->items[pg->count++];
-        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : LAYOUT_VALUES;
+        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : LAYOUT_VALUES;
         if (pg->count == 1) pg->kind = it->kind;
         if (clock) {
             const char *tf = str(card, "time_format"), *sz = str(card, "clock_size"), *tz = str(card, "time_zone");
@@ -136,6 +143,30 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg)
             continue;
         }
         set_item(it, card);
+        if (picture && cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_name"))) it->flags |= LAYOUT_PIC_NO_NAME;
+        const char *fit = picture ? str(card, "fit_mode") : NULL;
+        if (fit && !strcmp(fit, "cover")) it->flags |= LAYOUT_PIC_COVER;
+        else if (fit && !strcmp(fit, "fill")) it->flags |= LAYOUT_PIC_FILL;
+        const char *src = picture ? str(card, "camera_image") : NULL;   /* HA prefers the camera */
+        if (picture && !src) src = str(card, "image");
+        const cJSON *img = picture && !src ? cJSON_GetObjectItemCaseSensitive(card, "image") : NULL;
+        if (cJSON_IsObject(img)) {         /* UI editor: media selector {media_content_id: ...} */
+            src = str(img, "media_content_id");
+            const char *ent = src ? strstr(src, "media-source://image/") : NULL;
+            if (ent) src = ent + strlen("media-source://image/");   /* an image entity */
+        }
+        if (src && strlen(src) < LAYOUT_IMAGE_LEN) {
+            int k = 0;
+            while (k < LAYOUT_MAX_IMAGES && l->images[k][0] && strcmp(l->images[k], src)) k++;
+            if (k == LAYOUT_MAX_IMAGES) LOGW("section %d: more than %d picture sources, '%s' skipped", idx, LAYOUT_MAX_IMAGES, src);
+            else { copy(l->images[k], LAYOUT_IMAGE_LEN, src); it->image = k + 1; }
+        } else if (picture && !src) {
+            char *j = cJSON_PrintUnformatted(card);
+            LOGW("section %d: picture card without image: %.200s", idx, j ? j : "");
+            cJSON_free(j);
+        } else if (src) {
+            LOGW("section %d: picture source longer than %d characters, skipped", idx, LAYOUT_IMAGE_LEN - 1);
+        }
         if (graph) {
             const cJSON *h = cJSON_GetObjectItemCaseSensitive(card, "hours_to_show");
             int hours = cJSON_IsNumber(h) ? (int)h->valuedouble : 0;
@@ -178,7 +209,7 @@ int layout_parse(const char *json, const char *view_path, ha_layout_t *out)
             if (cJSON_IsObject(sec)) {
                 if (out->count == LAYOUT_MAX_PAGES) {
                     LOGW("more than %d pages, section %d skipped", LAYOUT_MAX_PAGES, idx);
-                } else if (parse_section(sec, idx, &out->pages[out->count])) {
+                } else if (parse_section(sec, idx, &out->pages[out->count], out)) {
                     out->count++;
                 } else {
                     memset(&out->pages[out->count], 0, sizeof(layout_page_t));
@@ -241,15 +272,16 @@ bool layout_sanitize(ha_layout_t *l)
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
         for (int i = 0; i < pg->count; i++)
-            if (pg->items[i].kind > LAYOUT_CLOCK) pg->items[i].kind = LAYOUT_VALUES;
+            if (pg->items[i].kind > LAYOUT_PICTURE) pg->items[i].kind = LAYOUT_VALUES;
         pg->kind = pg->items[0].kind;   /* kind of the first card */
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
             pg->items[i].entity[sizeof(pg->items[i].entity) - 1] = 0;
             pg->items[i].name[sizeof(pg->items[i].name) - 1] = 0;
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
+            if (pg->items[i].kind != LAYOUT_PICTURE || pg->items[i].image > LAYOUT_MAX_IMAGES) pg->items[i].image = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
-            pg->items[i].flags &= LAYOUT_CLOCK_FLAGS;
+            pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : LAYOUT_CLOCK_FLAGS;
             if ((pg->items[i].flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_SIZE) pg->items[i].flags &= ~LAYOUT_CLOCK_SIZE;
             uint16_t *h = &pg->items[i].hours;
             if (pg->items[i].kind != LAYOUT_GRAPH) *h = 0;   /* unused; as layout_parse leaves it */
@@ -257,6 +289,7 @@ bool layout_sanitize(ha_layout_t *l)
             else if (*h > LAYOUT_HOURS_MAX) *h = LAYOUT_HOURS_MAX;
         }
     }
+    for (int k = 0; k < LAYOUT_MAX_IMAGES; k++) l->images[k][LAYOUT_IMAGE_LEN - 1] = 0;
     if (!ok) memset(l, 0, sizeof(*l));
     return ok;
 }
@@ -268,7 +301,8 @@ int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t
         layout_page_t pg = l->pages[p];
         int n = 0;
         for (int i = 0; i < pg.count; i++)
-            if (pg.items[i].kind == LAYOUT_CLOCK || keep(pg.items[i].entity, pg.items[i].kind, ctx)) pg.items[n++] = pg.items[i];
+            if (pg.items[i].kind == LAYOUT_CLOCK ||
+                keep(pg.items[i].entity, pg.items[i].image ? LAYOUT_VALUES : pg.items[i].kind, ctx)) pg.items[n++] = pg.items[i];
         for (int i = n; i < LAYOUT_MAX_ROWS; i++) memset(&pg.items[i], 0, sizeof(layout_item_t));
         pg.count = n;
         if (n) { pg.kind = pg.items[0].kind; l->pages[np++] = pg; }

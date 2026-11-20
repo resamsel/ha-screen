@@ -83,6 +83,7 @@ static void show_status(ha_state_t state);
 static void ha_busy(bool busy);
 static void ha_button_changed(int page, int row, ha_btn_state_t state, const char *name);
 static void ha_button_pressed(int page, int row, bool ok);
+static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, int zoom, const char *name);
 static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
@@ -189,6 +190,7 @@ void app_main(void)
     ha_client_set_busy_cb(ha_busy);
     ha_client_set_button_cb(ha_button_changed);
     ha_client_set_press_cb(ha_button_pressed);
+    ha_client_set_picture_cb(ha_picture_changed);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -477,6 +479,111 @@ static void create_button(lv_obj_t *page, int pg, int i)
     btn_paint(pg, i);
 }
 
+/* ---- Picture cards (picture-entity): the camera/image fitted into the block, name below ---- */
+static lv_obj_t *s_pic[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];        /* lv_img */
+static lv_obj_t *s_pic_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_img_dsc_t s_pic_dsc[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static uint16_t *s_pic_px[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];     /* owned pixels (from ha_client) */
+
+/* Pixel size a picture may take: its block minus the 4 px margin on each side */
+static void pic_size(int pg, int i, uint16_t *w, uint16_t *h)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    *w = LV_MAX(lv_area_get_width(&blk) - 8, 1);
+    *h = LV_MAX(lv_area_get_height(&blk) - 8, 1);
+}
+
+/* Tell the network task which page is shown and how big its pictures are (LVGL lock held) */
+static void pic_report(void)
+{
+    uint16_t w[LAYOUT_MAX_ROWS] = {0}, h[LAYOUT_MAX_ROWS] = {0};
+    if (PAGE_COUNT && s_page < PAGE_COUNT)
+        for (int i = 0; i < ROWS(s_page); i++)
+            if (KIND(s_page, i) == LAYOUT_PICTURE) pic_size(s_page, i, &w[i], &h[i]);
+    ha_client_show_page(PAGE_COUNT ? s_page : -1, w, h);
+}
+
+static void pic_free_all(void)
+{
+    for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++) {
+            if (s_pic_px[pg][i]) lv_img_cache_invalidate_src(&s_pic_dsc[pg][i]);
+            free(s_pic_px[pg][i]);
+        }
+    memset(s_pic_px, 0, sizeof(s_pic_px));
+    memset(s_pic, 0, sizeof(s_pic));
+    memset(s_pic_name, 0, sizeof(s_pic_name));
+}
+
+static void create_picture(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    lv_obj_t *bg = lv_obj_create(page);   /* translucent card panel, picture clipped to it */
+    lv_obj_remove_style_all(bg);
+    lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(bg, 14, 0);
+    lv_obj_set_style_clip_corner(bg, true, 0);
+    lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);
+    lv_obj_set_style_bg_color(bg, lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+    lv_obj_set_size(bg, lv_area_get_width(&blk) - 8, lv_area_get_height(&blk) - 8);
+    lv_obj_set_pos(bg, blk.x1 + 4, blk.y1 + 4);
+    s_pic[pg][i] = lv_img_create(bg);
+    lv_obj_add_flag(s_pic[pg][i], LV_OBJ_FLAG_HIDDEN);   /* until the first image arrives */
+    lv_obj_center(s_pic[pg][i]);
+    if (it->flags & LAYOUT_PIC_NO_NAME) return;
+    lv_obj_t *n = lv_label_create(bg);   /* name on a dark strip along the bottom, like HA */
+    lv_obj_set_width(n, LV_PCT(100));
+    lv_obj_set_style_pad_all(n, 4, 0);
+    lv_obj_set_style_bg_color(n, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(n, LV_OPA_40, 0);
+    lv_obj_set_style_text_color(n, lv_color_white(), 0);
+    lv_obj_set_style_text_font(n, &lv_font_latin_14, 0);
+    lv_obj_set_style_text_align(n, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(n, lv_font_latin_14.line_height + 8);
+    lv_label_set_text(n, it->name[0] ? it->name : it->entity);
+    lv_obj_align(n, LV_ALIGN_BOTTOM_MID, 0, 0);
+    s_pic_name[pg][i] = n;
+}
+
+/* Network task: a new picture (or NULL = drop the current one to free memory) */
+static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, int zoom, const char *name)
+{
+    if (!lvgl_port_lock(0)) { free(px); return; }
+    if (page < 0 || page >= PAGE_COUNT || row < 0 || row >= ROWS(page) || KIND(page, row) != LAYOUT_PICTURE || !s_pic[page][row]) {
+        lvgl_port_unlock();
+        free(px);
+        return;
+    }
+    lv_img_dsc_t *d = &s_pic_dsc[page][row];
+    uint16_t *old = s_pic_px[page][row];
+    if (old) lv_img_cache_invalidate_src(d);
+    if (px) {
+        d->header.always_zero = 0;
+        d->header.cf = LV_IMG_CF_TRUE_COLOR;
+        d->header.w = w;
+        d->header.h = h;
+        d->data_size = (uint32_t)w * h * sizeof(lv_color_t);
+        d->data = (const uint8_t *)px;
+        s_pic_px[page][row] = px;
+        lv_img_set_src(s_pic[page][row], d);
+        lv_img_set_zoom(s_pic[page][row], zoom > 1 ? 256 * zoom : 256);   /* half-size decode */
+        lv_img_set_antialias(s_pic[page][row], false);
+        lv_obj_center(s_pic[page][row]);
+        lv_obj_clear_flag(s_pic[page][row], LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_pic[page][row], LV_OBJ_FLAG_HIDDEN);
+        lv_img_set_src(s_pic[page][row], NULL);
+        s_pic_px[page][row] = NULL;
+    }
+    free(old);
+    if (name && s_pic_name[page][row]) lv_label_set_text(s_pic_name[page][row], name);
+    lvgl_port_unlock();
+}
+
 /* ---- Clock pages: the board's time (set from HA's responses), updated every second ---- */
 /* one set per block, indexed GI(page, row) */
 static lv_obj_t *s_clk_time[GRAPHS], *s_clk_small[GRAPHS];   /* no date, like HA's card */
@@ -715,6 +822,7 @@ static void show_page(int page)
     lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
     lv_anim_start(&a);
     apply_temp_theme(s_light);
+    pic_report();
 }
 
 /* Network task: new value for one sensor */
@@ -965,6 +1073,7 @@ static void create_pages(lv_obj_t *scr)
             if (it->kind == LAYOUT_GRAPH) { s_gi = GI(pg, i); create_graph(page); continue; }
             if (it->kind == LAYOUT_BUTTONS) { create_button(page, pg, i); continue; }
             if (it->kind == LAYOUT_CLOCK) { create_clock(page, pg, i); continue; }
+            if (it->kind == LAYOUT_PICTURE) { create_picture(page, pg, i); continue; }
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
@@ -1360,6 +1469,7 @@ static void create_ui(void)
     lv_obj_t *scr = lv_scr_act();
     lv_anim_del_all();
     lv_obj_clean(scr);
+    pic_free_all();
     /* stay on the current page across rebuilds (rotation, new layout) when it still exists */
     if (s_page >= PAGE_COUNT) s_page = 0;
     s_sel = -1;
@@ -1392,6 +1502,7 @@ static void create_ui(void)
     /* Main screen: sensor pages and status line */
     create_pages(scr);
     if (s_strip) lv_obj_set_x(s_strip, -s_page * PAGE_W);
+    pic_report();
     create_status_icons(scr, 0);
 
     /* Config panel, parked just above the top edge */

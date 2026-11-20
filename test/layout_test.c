@@ -278,8 +278,50 @@ static void test_clock(void)
     assert(layout_sanitize(&l) && layout_hash(&l) == h);
 }
 
+static void test_picture(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"picture-entity\",\"entity\":\"camera.door\"}" ","
+                                  "{\"type\":\"picture-entity\",\"entity\":\"image.map\",\"show_name\":false,\"name\":\"Map\"}" ","
+                                  "{\"type\":\"picture-entity\"}") "]", &l) == 1);
+    assert(l.pages[0].kind == LAYOUT_PICTURE && l.pages[0].count == 2);   /* no entity: skipped */
+    assert(!strcmp(l.pages[0].items[0].entity, "camera.door") && l.pages[0].items[0].flags == 0);
+    assert(l.pages[0].items[1].flags == LAYOUT_PIC_NO_NAME && !strcmp(l.pages[0].items[1].name, "Map"));
+    uint32_t h = layout_hash(&l);
+    assert(layout_sanitize(&l) && layout_hash(&l) == h);
+    assert(parse_sections("[" SEC("{\"type\":\"picture-entity\",\"entity\":\"camera.a\",\"fit_mode\":\"cover\"}" ","
+                                  "{\"type\":\"picture-entity\",\"entity\":\"camera.b\",\"fit_mode\":\"fill\"}" ","
+                                  "{\"type\":\"picture-entity\",\"entity\":\"camera.c\",\"fit_mode\":\"contain\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].flags == LAYOUT_PIC_COVER && l.pages[0].items[1].flags == LAYOUT_PIC_FILL && !l.pages[0].items[2].flags);
+    /* UI editor stores the image as a media selector */
+    ha_layout_t m;
+    assert(parse_sections("[" SEC("{\"type\":\"picture-entity\",\"entity\":\"switch.a\",\"image\":{\"media_content_id\":\"https://x/a.png\"}}" ","
+                                  "{\"type\":\"picture-entity\",\"entity\":\"switch.b\",\"image\":{\"media_content_id\":\"media-source://image/image.map\"}}") "]", &m) == 1);
+    assert(!strcmp(m.images[m.pages[0].items[0].image - 1], "https://x/a.png"));
+    assert(!strcmp(m.images[m.pages[0].items[1].image - 1], "image.map"));
+    l.pages[0].items[2].flags = 0xFF;
+    layout_sanitize(&l);
+    assert(l.pages[0].items[2].flags == LAYOUT_PIC_FLAGS);
+    /* own picture source: image URL or camera_image (preferred), shared between cards */
+    assert(parse_sections("[" SEC("{\"type\":\"picture-entity\",\"entity\":\"switch.a\",\"image\":\"/local/a.png\"}" ","
+                                  "{\"type\":\"picture-entity\",\"entity\":\"switch.b\",\"image\":\"/local/x.png\",\"camera_image\":\"camera.c\"}" ","
+                                  "{\"type\":\"picture-entity\",\"entity\":\"switch.c\",\"image\":\"/local/a.png\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].image == 1 && !strcmp(l.images[0], "/local/a.png"));
+    assert(l.pages[0].items[1].image == 2 && !strcmp(l.images[1], "camera.c"));
+    assert(l.pages[0].items[2].image == 1 && !l.images[2][0]);
+    s_seen_kind = -1;
+    layout_filter(&l, keep_record, NULL);
+    assert(s_seen_kind == LAYOUT_VALUES);   /* entity only has to exist */
+    assert(layout_sanitize(&l) && l.pages[0].items[1].image == 2);
+    l.pages[0].items[0].image = 9;
+    assert(layout_sanitize(&l) && l.pages[0].items[0].image == 0);
+    l.pages[0].items[0].flags = 0xFF;
+    assert(layout_sanitize(&l) && l.pages[0].items[0].flags == LAYOUT_PIC_FLAGS);
+}
+
 int main(void)
 {
+    test_picture();
     test_clock();
     test_buttons();
     test_filter_kind();
