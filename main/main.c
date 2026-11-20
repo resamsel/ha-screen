@@ -228,7 +228,7 @@ void app_main(void)
 #define STATUS_H   30                    /* status line: page title, Wi-Fi icon, HA dot */
 #define CARD_INSET 0                     /* gap between a card panel and its block: none, cards
                                           * meet the screen edges and their neighbours */
-#define BTN_INSET  4                     /* buttons keep a gap inside their block */
+#define BTN_INSET  8                     /* buttons keep a gap inside their block */
 #define TOP_M      0                     /* pages start this close to the top: the status line
                                           * floats over them and fades out like the page dots */
 #define DOTS_H     22                    /* bottom strip for the page dots (config panel) */
@@ -686,8 +686,11 @@ static void create_button(lv_obj_t *page, int pg, int i)
     lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_radius(b, 14, 0);
     lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
-    lv_obj_set_size(b, lv_area_get_width(&blk) - 2 * BTN_INSET, lv_area_get_height(&blk) - 2 * BTN_INSET);
-    lv_obj_set_pos(b, blk.x1 + BTN_INSET, blk.y1 + BTN_INSET);
+    /* full gap at the screen edges, half towards a neighbour (whose half makes it whole) */
+    lv_coord_t l = blk.x1 <= 0 ? BTN_INSET : BTN_INSET / 2, r = blk.x2 >= SCR_W - 1 ? BTN_INSET : BTN_INSET / 2;
+    lv_coord_t t = blk.y1 <= TOP_M ? BTN_INSET : BTN_INSET / 2, bt = blk.y2 >= SCR_H - 1 - BOTTOM_M ? BTN_INSET : BTN_INSET / 2;
+    lv_obj_set_size(b, lv_area_get_width(&blk) - l - r, lv_area_get_height(&blk) - t - bt);
+    lv_obj_set_pos(b, blk.x1 + l, blk.y1 + t);
     lv_obj_update_layout(b);
     lv_coord_t inner = lv_obj_get_width(b) - 16;
     const layout_item_t *it = &s_layout.pages[pg].items[i];
