@@ -33,6 +33,10 @@
 /* Picture cards (picture-entity, camera.* / image.*): refresh interval while the page is shown */
 #define HA_PICTURE_INTERVAL_MS 60000
 
+/* Card data (values, graphs, buttons, weather, icons) is saved to flash so the board shows it
+ * right after booting: first a minute after start, then at most this often (flash wear) */
+#define HA_CACHE_INTERVAL_MS (15 * 60 * 1000)
+
 /* Graph pages (the time span comes from the dashboard card's hours_to_show) */
 /* Line smoothing: Gaussian blur width in points (pixels); 0 = raw data, higher = smoother.
  * Write decimals with a point (3.0f or 3, not 3f). */

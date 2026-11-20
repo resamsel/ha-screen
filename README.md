@@ -42,6 +42,13 @@ and compiled into the firmware. The build stops if one is missing. Keep them in 
 They end up in the generated `build/esp-idf/main/secrets_env.h` (in the build directory,
 never in the source tree). Anyone with the firmware binary can read them.
 
+## Start-up cache
+
+The last dashboard layout and card data (values, graph history, buttons, weather, icons, theme)
+are kept in the `cache` flash partition and shown right after booting, before Wi-Fi and HA
+answer. The layout is saved when it changes, the data a minute after start and then at most
+every 15 min (`HA_CACHE_INTERVAL_MS`). The partition table must be flashed once (see below).
+
 ## Screenshots
 
 With the board on USB, `python3 tools/screenshot.py [port] [out.png]` saves what is on screen
@@ -52,6 +59,6 @@ With the board on USB, `python3 tools/screenshot.py [port] [out.png]` saves what
 ```bash
 docker run --rm -v "$PWD":/project -v ha-screen-build:/build -w /project \
   --env-file .env \
-  espressif/idf:v5.3.2 sh -c 'idf.py -B /build build && cp /build/lvgl_example.bin out/'
-esptool --chip esp32c6 -p /dev/cu.usbmodem1101 -b 460800 write-flash 0x10000 out/lvgl_example.bin
+  espressif/idf:v5.3.2 sh -c 'idf.py -B /build build && cp /build/lvgl_example.bin /build/partition_table/partition-table.bin out/'
+esptool --chip esp32c6 -p /dev/cu.usbmodem1101 -b 460800 write-flash 0x8000 out/partition-table.bin 0x10000 out/lvgl_example.bin
 ```

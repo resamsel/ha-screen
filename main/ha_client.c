@@ -21,6 +21,7 @@ static void add_error(const char *fmt, ...);
 #include "ha_client.h"
 #include "dash_fetch.h"
 #include "icon_rule.h"
+#include "cache_store.h"
 #include "layout_store.h"
 #include "names.h"
 #include "rom/tjpgd.h"
@@ -297,6 +298,215 @@ static bool json_num(const char *json, const char *key, float *out)
     return true;
 }
 
+/* ---- Card data cache: the last data sent for every card, saved to flash (cache_store) and
+ * replayed through the same callbacks at boot, so the board shows it before HA answers ---- */
+enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_TYPES };
+static uint8_t *s_rec[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
+static uint16_t s_rec_len[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
+static uint8_t s_rec_theme = 0xFF;        /* HA_STATE_ON/OFF of the theme entity */
+static float s_rec_bri[3];
+static bool s_rec_bri_has, s_rec_dirty;
+
+static void rec_put(int type, int pg, int row, const void *d, size_t n)
+{
+    if (pg < 0 || pg >= LAYOUT_MAX_PAGES || row < 0 || row >= LAYOUT_MAX_ROWS || n > 4096) return;
+    if (s_rec[pg][row][type] && s_rec_len[pg][row][type] == n && !memcmp(s_rec[pg][row][type], d, n)) return;
+    uint8_t *b = realloc(s_rec[pg][row][type], n ? n : 1);
+    if (!b) return;
+    memcpy(b, d, n);
+    s_rec[pg][row][type] = b;
+    s_rec_len[pg][row][type] = n;
+    s_rec_dirty = true;
+}
+
+static void rec_clear(void)
+{
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++)
+            for (int t = 0; t < REC_TYPES; t++) { free(s_rec[p][i][t]); s_rec[p][i][t] = NULL; s_rec_len[p][i][t] = 0; }
+}
+
+/* strings back to back, each with its NUL */
+static size_t pack_strs(uint8_t *out, size_t cap, const char *const *a, int k)
+{
+    size_t n = 0;
+    for (int i = 0; i < k; i++) {
+        size_t l = strlen(a[i] ? a[i] : "") + 1;
+        if (n + l > cap) break;
+        memcpy(out + n, a[i] ? a[i] : "", l);
+        n += l;
+    }
+    return n;
+}
+
+static const char *unpack_str(const uint8_t **p, const uint8_t *end)
+{
+    const char *s = (const char *)*p;
+    const uint8_t *z = memchr(*p, 0, end - *p);
+    if (!z) return "";
+    *p = z + 1;
+    return s;
+}
+
+static void emit_sensor(int pg, int row, const char *text, const char *unit, const char *name)
+{
+    uint8_t b[96];
+    const char *a[] = { text, unit, name };
+    rec_put(REC_VALUE, pg, row, b, pack_strs(b, sizeof(b), a, 3));
+    if (s_sensor_cb) s_sensor_cb(pg, row, text, unit, name);
+}
+
+static void emit_graph(int pg, int row, const char *latest, const char *unit, const char *name,
+                       const float *pts, int n, int64_t end, int hours, bool zero_based)
+{
+    if (latest) {
+        uint8_t b[96];
+        const char *a[] = { latest, unit, name };
+        rec_put(REC_GLATEST, pg, row, b, pack_strs(b, sizeof(b), a, 3));
+    }
+    if (pts && n > 0 && n <= HA_GRAPH_POINTS) {
+        static uint8_t b[16 + HA_GRAPH_POINTS * sizeof(float)];
+        uint16_t hh = hours, nn = n;
+        b[0] = zero_based;
+        memcpy(b + 1, &hh, 2);
+        memcpy(b + 3, &nn, 2);
+        memcpy(b + 5, &end, 8);
+        memcpy(b + 13, pts, n * sizeof(float));
+        rec_put(REC_GPOINTS, pg, row, b, 13 + n * sizeof(float));
+    }
+    if (s_graph_cb) s_graph_cb(pg, row, latest, unit, name, pts, n, end, hours, zero_based);
+}
+
+static void emit_button(int pg, int row, ha_btn_state_t st, const char *name)
+{
+    uint8_t b[40];
+    b[0] = st;
+    const char *a[] = { name };
+    rec_put(REC_BUTTON, pg, row, b, 1 + pack_strs(b + 1, sizeof(b) - 1, a, 1));
+    if (s_button_cb) s_button_cb(pg, row, st, name);
+}
+
+static void emit_weather(int pg, int row, const char *cond, const char *temp, const char *unit,
+                         const char *hum, const char *name)
+{
+    uint8_t b[96];
+    const char *a[] = { cond, temp, unit, hum, name };
+    rec_put(REC_WEATHER, pg, row, b, pack_strs(b, sizeof(b), a, 5));
+    if (s_weather_cb) s_weather_cb(pg, row, cond, temp, unit, hum, name);
+}
+
+static void emit_icon(int pg, int row, const char *icon)
+{
+    uint8_t b[52];
+    const char *a[] = { icon };
+    rec_put(REC_ICON, pg, row, b, pack_strs(b, sizeof(b), a, 1));
+    if (s_icon_cb) s_icon_cb(pg, row, icon);
+}
+
+/* blob: u8 theme, u8 brightness valid, 3 floats brightness, then records
+ * (u8 type, u8 page, u8 row, u16 length, data); tagged with the layout hash */
+static void cache_save(void)
+{
+    size_t n = 2 + sizeof(s_rec_bri);
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++)
+            for (int t = 0; t < REC_TYPES; t++) if (s_rec[p][i][t]) n += 5 + s_rec_len[p][i][t];
+    uint8_t *b = malloc(n), *o = b;
+    if (!b) return;
+    *o++ = s_rec_theme;
+    *o++ = s_rec_bri_has;
+    memcpy(o, s_rec_bri, sizeof(s_rec_bri));
+    o += sizeof(s_rec_bri);
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++)
+            for (int t = 0; t < REC_TYPES; t++) {
+                if (!s_rec[p][i][t]) continue;
+                uint16_t l = s_rec_len[p][i][t];
+                *o++ = t; *o++ = p; *o++ = i;
+                memcpy(o, &l, 2); o += 2;
+                memcpy(o, s_rec[p][i][t], l); o += l;
+            }
+    if (cache_write(CACHE_DATA, b, n, s_layout_hash)) s_rec_dirty = false;
+    free(b);
+}
+
+/* The saved data of this layout, through the callbacks (before HA is reachable) */
+static void cache_replay(void)
+{
+    size_t n;
+    uint32_t tag;
+    uint8_t *b = cache_read(CACHE_DATA, &n, &tag);
+    if (!b) return;
+    if (tag != s_layout_hash || n < 2 + sizeof(s_rec_bri)) { free(b); return; }
+    const uint8_t *p = b, *end = b + n;
+    uint8_t theme = *p++, bri_has = *p++;
+    float bri[3];
+    memcpy(bri, p, sizeof(bri));
+    p += sizeof(bri);
+    if ((theme == HA_STATE_ON || theme == HA_STATE_OFF) && s_state_cb) {
+        s_rec_theme = theme;
+        s_state_cb(theme);
+        s_state_cb(HA_STATE_OFFLINE);    /* the theme only: not connected yet */
+    }
+    if (bri_has && s_brightness_cb) { memcpy(s_rec_bri, bri, sizeof(bri)); s_rec_bri_has = true; s_brightness_cb(bri[0], bri[1], bri[2]); }
+    int count = 0;
+    while (end - p >= 5) {
+        int t = p[0], pg = p[1], row = p[2];
+        uint16_t l;
+        memcpy(&l, p + 3, 2);
+        p += 5;
+        if (l > end - p) break;
+        const uint8_t *d = p, *de = p + l;
+        p += l;
+        if (t >= REC_TYPES || pg >= s_layout.count || row >= s_layout.pages[pg].count) continue;
+        count++;
+        switch (t) {
+        case REC_VALUE: {
+            const char *a = unpack_str(&d, de), *u = unpack_str(&d, de), *nm = unpack_str(&d, de);
+            emit_sensor(pg, row, a, u, nm);
+            break;
+        }
+        case REC_GLATEST: {
+            const char *a = unpack_str(&d, de), *u = unpack_str(&d, de), *nm = unpack_str(&d, de);
+            emit_graph(pg, row, a, u, nm, NULL, 0, 0, s_layout.pages[pg].items[row].hours, false);
+            break;
+        }
+        case REC_GPOINTS: {
+            if (l < 13) break;
+            uint16_t hh, nn;
+            int64_t e;
+            memcpy(&hh, d + 1, 2); memcpy(&nn, d + 3, 2); memcpy(&e, d + 5, 8);
+            if (nn > HA_GRAPH_POINTS || l != 13 + nn * sizeof(float)) break;
+            static float pts[HA_GRAPH_POINTS];
+            memcpy(pts, d + 13, nn * sizeof(float));
+            emit_graph(pg, row, NULL, NULL, NULL, pts, nn, e, hh, d[0]);
+            break;
+        }
+        case REC_BUTTON: {
+            if (l < 1) break;
+            const uint8_t *q = d + 1;
+            emit_button(pg, row, (ha_btn_state_t)d[0], unpack_str(&q, de));
+            break;
+        }
+        case REC_WEATHER: {
+            const char *c = unpack_str(&d, de), *tp = unpack_str(&d, de), *u = unpack_str(&d, de);
+            const char *h = unpack_str(&d, de), *nm = unpack_str(&d, de);
+            emit_weather(pg, row, c, tp, u, h, nm);
+            break;
+        }
+        case REC_ICON: {
+            const char *ic = unpack_str(&d, de);
+            snprintf(s_icon_last[pg][row], sizeof(s_icon_last[pg][row]), "%s", ic);
+            emit_icon(pg, row, ic);
+            break;
+        }
+        }
+    }
+    free(b);
+    s_rec_dirty = false;
+    ESP_LOGI(TAG, "cache: %d cards shown from flash", count);
+}
+
 static float read_entity(int pg, int row, char text[24], char unit[8], char name[32]);
 static void report_icon(int pg, int row, const char *json);
 static void utf8_trim(char *s);
@@ -314,6 +524,7 @@ static bool fetch_state(void)
     } else {
         s = HA_STATE_ERROR;
     }
+    if ((s == HA_STATE_ON || s == HA_STATE_OFF) && s != s_rec_theme) { s_rec_theme = s; s_rec_dirty = true; }
     if (s_state_cb) s_state_cb(s);
 
     if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_LANDSCAPE_ENTITY, NULL, &r) == 200) {
@@ -330,6 +541,10 @@ static bool fetch_state(void)
             json_num(r.buf, "\"max\":", &mx);
             static float lv = -1e9f, lmn, lmx;
             if ((s_force_report || v != lv || mn != lmn || mx != lmx) && s_brightness_cb) s_brightness_cb(v, mn, mx);
+            if (!s_rec_bri_has || s_rec_bri[0] != v || s_rec_bri[1] != mn || s_rec_bri[2] != mx) {
+                s_rec_bri[0] = v; s_rec_bri[1] = mn; s_rec_bri[2] = mx;
+                s_rec_bri_has = s_rec_dirty = true;
+            }
             lv = v; lmn = mn; lmx = mx;
             s_force_report = false;
         }
@@ -343,7 +558,7 @@ static bool fetch_state(void)
             if (it->kind != LAYOUT_VALUES) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
             read_entity(pg, i, text, unit, name);
-            if (s_sensor_cb) s_sensor_cb(pg, i, text, unit, name);
+            emit_sensor(pg, i, text, unit, name);
         }
     }
     return st == 200;
@@ -399,7 +614,7 @@ static void fetch_graph(int pg, int row)
     char latest[24], unit[8], name[32], path[256];
     read_entity(pg, row, latest, unit, name);
     bool zero_based = !strcmp(unit, "%");
-    if (s_graph_cb) s_graph_cb(pg, row, latest, unit, name, NULL, 0, 0, it->hours, zero_based);
+    emit_graph(pg, row, latest, unit, name, NULL, 0, 0, it->hours, zero_based);
 
     if (!s_now) return;                   /* need the server time to place points */
 
@@ -434,7 +649,7 @@ static void fetch_graph(int pg, int row)
         else pts[i] = carry;
     }
     ESP_LOGD(TAG, "history %dh: %d of %d buckets with data", it->hours, known, HA_GRAPH_POINTS);
-    if (s_graph_cb) s_graph_cb(pg, row, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, it->hours, zero_based);
+    emit_graph(pg, row, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, it->hours, zero_based);
 }
 
 static bool is_domain(const char *entity, const char *domain)
@@ -462,7 +677,7 @@ static void fetch_button(int pg, int row)
         else if (!strcmp(state, "on")) bs = HA_BTN_ON;
         else if (!strcmp(state, "off")) bs = HA_BTN_OFF;
     }
-    if (s_button_cb) s_button_cb(pg, row, bs, name);
+    emit_button(pg, row, bs, name);
 }
 
 /* Toggle / run / activate the tapped button's entity */
@@ -548,7 +763,7 @@ static void fetch_weather(int pg, int row)
         json_numtext(r.buf, "\"humidity\":", hum, sizeof(hum));
         json_str(r.buf, "\"temperature_unit\":\"", unit, sizeof(unit));
     }
-    if (s_weather_cb) s_weather_cb(pg, row, cond, temp, unit, hum, name);
+    emit_weather(pg, row, cond, temp, unit, hum, name);
 }
 
 /* Drop a UTF-8 sequence cut off at the end of s by truncation */
@@ -607,6 +822,7 @@ static void load_icon_rules(void)
             const layout_item_t *it = &s_layout.pages[p].items[i];
             if (!has_icon(it) || it->icon[0]) continue;
             if (!ws) {
+                if (!(xEventGroupGetBits(s_events) & WIFI_UP_BIT)) { s_icon_rules_pending = true; return; }
                 if (s_http) {             /* two TLS sessions at once don't fit in RAM */
                     esp_http_client_cleanup(s_http);
                     s_http = NULL;
@@ -658,11 +874,12 @@ static void report_icon(int pg, int row, const char *json)
     }
     if (!strcmp(icon, s_icon_last[pg][row])) return;
     strcpy(s_icon_last[pg][row], icon);
-    if (s_icon_cb) s_icon_cb(pg, row, icon);
+    emit_icon(pg, row, icon);
 }
 
 static void use_layout(const ha_layout_t *l)
 {
+    if (layout_hash(l) != s_layout_hash) rec_clear();   /* the rows mean something else now */
     s_layout = *l;
     s_layout_hash = layout_hash(l);
     if (s_layout_cb) s_layout_cb(&s_layout);
@@ -1059,7 +1276,10 @@ static void ha_task(void *arg)
 
     {   /* start with the cached layout, if any */
         static ha_layout_t cached;
-        if (layout_store_load(&cached)) use_layout(&cached);
+        if (layout_store_load(&cached)) {
+            use_layout(&cached);
+            cache_replay();               /* the last data, until HA answers */
+        }
     }
     TickType_t layout_at = 0, pic_at = 0;
     bool layout_read = false;
@@ -1115,6 +1335,17 @@ static void ha_task(void *arg)
         }
         if (s_icon_rules_pending) load_icon_rules();
         bool fetched = fetch_state();
+        {   /* card data to flash: a minute after start, then at most every HA_CACHE_INTERVAL_MS */
+            static TickType_t saved_at;
+            static bool saved;
+            TickType_t now = xTaskGetTickCount();
+            if (s_rec_dirty && fetched && (saved ? now - saved_at >= pdMS_TO_TICKS(HA_CACHE_INTERVAL_MS)
+                                                 : now >= pdMS_TO_TICKS(60000))) {
+                cache_save();
+                saved = true;
+                saved_at = now;
+            }
+        }
         for (int pg = 0; pg < s_layout.count; pg++)
             for (int i = 0; i < s_layout.pages[pg].count; i++)
                 if (s_layout.pages[pg].items[i].kind == LAYOUT_GRAPH) fetch_graph(pg, i);

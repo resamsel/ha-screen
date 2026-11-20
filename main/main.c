@@ -226,13 +226,15 @@ void app_main(void)
  * Sensor pages (temperature, humidity) first, then the graph page.
  * Rows share the height between the status line and the dots evenly. */
 #define STATUS_H   30                    /* status line: page title, Wi-Fi icon, HA dot */
-#define TOP_M      4                     /* pages start this close to the top: the status line
+#define CARD_INSET 0                     /* gap between a card panel and its block: none, cards
+                                          * meet the screen edges and their neighbours */
+#define BTN_INSET  4                     /* buttons keep a gap inside their block */
+#define TOP_M      0                     /* pages start this close to the top: the status line
                                           * floats over them and fades out like the page dots */
 #define DOTS_H     22                    /* bottom strip for the page dots (config panel) */
-#define BOTTOM_M   4                     /* page content reaches this close to the bottom: the
+#define BOTTOM_M   0                     /* page content reaches this close to the bottom: the
                                           * page dots float over it and fade out */
 #define DOTS_SHOW_MS 3000                /* page dots fade out this long after the last touch */
-#define ROW_BLOCK  64                    /* value (36 px font) + name below it */
 #define PAGE_W     SCR_W
 #define SWIPE_MIN  40                    /* drag distance that flips the page */
 static ha_layout_t s_layout;                  /* pages from the HA dashboard (LVGL lock) */
@@ -243,10 +245,20 @@ static ha_layout_t s_layout;                  /* pages from the HA dashboard (LV
 /* Where row i's value goes: portrait = rows stacked, landscape = side-by-side columns.
  * cx = horizontal centre, y = top of the value. */
 static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y);
+/* Top of a value label whose digits are centred on y = c (name and icon hang off it) */
+static lv_coord_t value_top(lv_coord_t c)
+{
+    const lv_font_t *f = s_landscape ? &lv_font_montserrat_28 : &lv_font_montserrat_36;
+    lv_font_glyph_dsc_t g;
+    lv_coord_t digit_h = lv_font_get_glyph_dsc(f, &g, '0', 0) ? g.box_h + g.ofs_y : f->line_height / 2;
+    lv_coord_t baseline = f->line_height - f->base_line;   /* from the label's top */
+    return c - baseline + digit_h / 2;
+}
+
 static lv_coord_t row_y(int i, int rows)
 {
     lv_coord_t slot = (SCR_H - TOP_M - BOTTOM_M) / LV_MAX(rows, 1);
-    return TOP_M + i * slot + (slot - ROW_BLOCK) / 2;
+    return value_top(TOP_M + i * slot + slot / 2);
 }
 
 static lv_obj_t *s_strip = NULL;                         /* all pages side by side */
@@ -340,6 +352,7 @@ static uint8_t *s_icon_px[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];   /* resampled bit
 static uint8_t s_icon_sz[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static char s_icon_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][48];   /* kept across UI rebuilds */
 #define ICON_GAP 6
+#define GRAPH_ICON 32   /* px, the icon at a graph card's top right */
 /* the card has room set aside for an icon (unless show_icon: false) */
 static bool icon_slot(int pg, int i)
 {
@@ -347,7 +360,9 @@ static bool icon_slot(int pg, int i)
     return (k == LAYOUT_VALUES || k == LAYOUT_GRAPH || k == LAYOUT_BUTTONS) && s_layout.pages[pg].items[i].icon[0] != '-';
 }
 /* portrait tiles: icon on the left of the value, which moves right by this much */
-#define ICON_SHIFT(pg, i) (!s_landscape && KIND(pg, i) == LAYOUT_VALUES && icon_slot(pg, i) ? (ICON_SIZE + ICON_GAP) / 2 : 0)
+/* portrait tiles: the icon sits left of the centred value; this much room is kept free on
+ * both sides of it */
+#define ICON_SHIFT(pg, i) (!s_landscape && KIND(pg, i) == LAYOUT_VALUES && icon_slot(pg, i) ? ICON_SIZE + ICON_GAP : 0)
 
 static void icon_show(int pg, int i)
 {
@@ -440,14 +455,21 @@ static void icon_place(int pg, int i)
     if (KIND(pg, i) == LAYOUT_GRAPH) {
         lv_area_t b;
         graph_block(GI(pg, i), &b);
-        lv_obj_set_pos(o, b.x2 + 1 - GRAPH_X - ICON_SIZE, b.y1 + 1);
+        lv_obj_set_pos(o, b.x2 + 1 - GRAPH_X + 2 - GRAPH_ICON, b.y1 + 2);
         return;
     }
     lv_coord_t cx, y;
     value_pos(pg, i, &cx, &y);
     const lv_font_t *vf = s_landscape ? &lv_font_montserrat_28 : &lv_font_montserrat_36;
     if (s_landscape) lv_obj_set_pos(o, cx - ICON_SIZE / 2, y - ICON_SIZE - 2);
-    else lv_obj_set_pos(o, 6, y + (vf->line_height - ICON_SIZE) / 2);
+    else {                                /* just left of the (centred) value */
+        lv_coord_t x = 6;
+        if (s_val[pg][i]) {
+            lv_obj_update_layout(s_val[pg][i]);
+            x = LV_MAX(lv_obj_get_x(s_val[pg][i]) - ICON_GAP - ICON_SIZE, 4);
+        }
+        lv_obj_set_pos(o, x, y + (vf->line_height - ICON_SIZE) / 2);
+    }
 }
 
 /* Centre the value horizontally in its row and hang the unit off its right side,
@@ -457,9 +479,9 @@ static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y)
     if (s_landscape) {
         lv_coord_t colw = SCR_W / LV_MAX(ROWS(pg), 1);
         *cx = i * colw + colw / 2;
-        *y = TOP_M + (SCR_H - TOP_M - BOTTOM_M - 52) / 2;
+        *y = value_top(TOP_M + (SCR_H - TOP_M - BOTTOM_M) / 2);
     } else {
-        *cx = SCR_W / 2 + ICON_SHIFT(pg, i);
+        *cx = SCR_W / 2;
         *y = row_y(i, ROWS(pg));
     }
 }
@@ -482,7 +504,7 @@ static lv_coord_t name_max_w(int pg, int i)
     graph_block(GI(pg, i), &b);
     lv_coord_t w = lv_area_get_width(&b) - (KIND(pg, i) == LAYOUT_GRAPH ? 2 * GRAPH_X : 8);
     /* room for the icon: right of a graph's name, left of a portrait tile's centred value */
-    if (KIND(pg, i) == LAYOUT_GRAPH && icon_slot(pg, i)) w -= ICON_SIZE + ICON_GAP;
+    if (KIND(pg, i) == LAYOUT_GRAPH && icon_slot(pg, i)) w -= GRAPH_ICON + ICON_GAP - 2;
     w -= 2 * ICON_SHIFT(pg, i);
     return w;
 }
@@ -568,12 +590,20 @@ static void place_pair(lv_obj_t *val, lv_obj_t *unit, lv_coord_t x, lv_coord_t y
                     -(((const lv_font_t *)VFONT)->base_line - ((const lv_font_t *)UFONT)->base_line));
 }
 
+static bool s_crisp[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS];   /* see "Tapped value grows" */
+static void crisp_off(int g);
+static void crisp_on(int g);
 static void place_value(int pg, int row)
 {
     lv_coord_t cx, y;
+    int g = GI(pg, row);
+    bool crisp = s_crisp[g];
+    crisp_off(g);
     value_pos(pg, row, &cx, &y);
     place_pair(s_val[pg][row], s_unit[pg][row], cx, y, false);
+    icon_place(pg, row);                  /* follows the value's width */
     page_relayout(pg);
+    if (crisp) crisp_on(g);
 }
 
 /* Sensor text and page dot colours for the current theme. LVGL lock must be held. */
@@ -656,8 +686,8 @@ static void create_button(lv_obj_t *page, int pg, int i)
     lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_radius(b, 14, 0);
     lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
-    lv_obj_set_size(b, lv_area_get_width(&blk) - 8, lv_area_get_height(&blk) - 8);
-    lv_obj_set_pos(b, blk.x1 + 4, blk.y1 + 4);
+    lv_obj_set_size(b, lv_area_get_width(&blk) - 2 * BTN_INSET, lv_area_get_height(&blk) - 2 * BTN_INSET);
+    lv_obj_set_pos(b, blk.x1 + BTN_INSET, blk.y1 + BTN_INSET);
     lv_obj_update_layout(b);
     lv_coord_t inner = lv_obj_get_width(b) - 16;
     const layout_item_t *it = &s_layout.pages[pg].items[i];
@@ -705,8 +735,8 @@ static void pic_size(int pg, int i, uint16_t *w, uint16_t *h)
 {
     lv_area_t blk;
     graph_block(GI(pg, i), &blk);
-    *w = LV_MAX(lv_area_get_width(&blk) - 8, 1);
-    *h = LV_MAX(lv_area_get_height(&blk) - 8, 1);
+    *w = LV_MAX(lv_area_get_width(&blk) - 2 * CARD_INSET, 1);
+    *h = LV_MAX(lv_area_get_height(&blk) - 2 * CARD_INSET, 1);
 }
 
 /* Tell the network task which page is shown and how big its pictures are (LVGL lock held) */
@@ -756,8 +786,8 @@ static void create_picture(lv_obj_t *page, int pg, int i)
     lv_obj_set_style_clip_corner(bg, true, 0);
     lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);
     lv_obj_set_style_bg_color(bg, lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
-    lv_obj_set_size(bg, lv_area_get_width(&blk) - 8, lv_area_get_height(&blk) - 8);
-    lv_obj_set_pos(bg, blk.x1 + 4, blk.y1 + 4);
+    lv_obj_set_size(bg, lv_area_get_width(&blk) - 2 * CARD_INSET, lv_area_get_height(&blk) - 2 * CARD_INSET);
+    lv_obj_set_pos(bg, blk.x1 + CARD_INSET, blk.y1 + CARD_INSET);
     s_pic[pg][i] = lv_img_create(bg);
     lv_obj_add_flag(s_pic[pg][i], LV_OBJ_FLAG_HIDDEN);   /* until the first image arrives */
     lv_obj_center(s_pic[pg][i]);
@@ -927,12 +957,12 @@ static void create_weather(lv_obj_t *page, int pg, int i)
 {
     lv_area_t blk;
     graph_block(GI(pg, i), &blk);
-    int w = lv_area_get_width(&blk) - 8, h = lv_area_get_height(&blk) - 8;
+    int w = lv_area_get_width(&blk) - 2 * CARD_INSET, h = lv_area_get_height(&blk) - 2 * CARD_INSET;
     lv_obj_t *bg = lv_obj_create(page);   /* invisible container, no card background */
     lv_obj_remove_style_all(bg);
     lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(bg, w, h);
-    lv_obj_set_pos(bg, blk.x1 + 4, blk.y1 + 4);
+    lv_obj_set_pos(bg, blk.x1 + CARD_INSET, blk.y1 + CARD_INSET);
     lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light);
     bool stacked = w < 240 && h >= 96;    /* portrait: icon + temperature on top, text below */
     int S = stacked ? LV_MIN(52, h / 2) : LV_MIN(52, h - 16), pad = 10;
@@ -993,6 +1023,14 @@ static void wx_place(int pg, int i)
     lv_obj_update_layout(bg);
     int w = lv_obj_get_width(bg), h = lv_obj_get_height(bg), pad = 10;
     int top = (int)(intptr_t)lv_obj_get_user_data(bg);
+    if (top >= 0) {                       /* stacked: centre icon, condition and name (1-2 lines) */
+        lv_obj_t *ic = s_wx_icon[pg][i], *c = s_wx_cond[pg][i], *n = s_wx_name[pg][i];
+        int S = lv_obj_get_height(ic), ch = lv_obj_get_height(c), nh = lv_obj_get_height(n);
+        top = LV_MAX((h - (S + 6 + ch + nh)) / 2, 0);
+        lv_obj_set_y(ic, top);
+        lv_obj_set_y(c, top + S + 6);
+        lv_obj_set_y(n, top + S + 6 + ch);
+    }
     int tw = lv_obj_get_width(t), uw = lv_obj_get_width(u), th = lv_obj_get_height(t);
     int y = top >= 0 ? top + 2 : h / 2 - th + 4;
     lv_obj_set_pos(u, w - pad - uw, y + 3);
@@ -1133,8 +1171,8 @@ static void create_clock(lv_obj_t *page, int pg, int i)
         lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_radius(bg, 14, 0);
         lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);     /* 60 % transparent, like the buttons */
-        lv_obj_set_size(bg, lv_area_get_width(&blk) - 8, lv_area_get_height(&blk) - 8);
-        lv_obj_set_pos(bg, blk.x1 + 4, blk.y1 + 4);
+        lv_obj_set_size(bg, lv_area_get_width(&blk) - 2 * CARD_INSET, lv_area_get_height(&blk) - 2 * CARD_INSET);
+        lv_obj_set_pos(bg, blk.x1 + CARD_INSET, blk.y1 + CARD_INSET);
         s_clk_bg[gi] = bg;
     }
     if (it->entity[0] && !tz_posix(it->entity))
@@ -1425,9 +1463,13 @@ static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y)
 static void place_graph_value(void)
 {
     lv_coord_t cx, y;
+    int g = s_gi;
+    bool crisp = s_crisp[g];
+    crisp_off(g);
     graph_value_pos(&cx, &y);
     place_pair(s_g_val, s_g_unit, cx, y, true);
     if (s_g_name) page_relayout(GPG(s_gi));
+    if (crisp && s_g_name) crisp_on(g);
 }
 
 /* Fills the area under each line segment down to the chart's bottom edge, in the line's
@@ -1440,16 +1482,22 @@ static void chart_fill_cb(lv_event_t *e)
     lv_area_t a;
     lv_obj_get_coords(chart, &a);
     lv_coord_t bottom = a.y2 - lv_obj_get_style_pad_bottom(chart, 0);
-    lv_point_t pts[4] = {
-        { d->p1->x, d->p1->y }, { d->p2->x, d->p2->y }, { d->p2->x, bottom }, { d->p1->x, bottom },
-    };
     lv_draw_rect_dsc_t r;
     lv_draw_rect_dsc_init(&r);
     r.bg_color = d->line_dsc ? d->line_dsc->color : lv_color_hex(0x18BCF2);
     r.bg_opa = s_light ? LV_OPA_20 : 41;   /* about 20 % / 16 %, like HA's sensor card */
     r.border_width = 0;
     r.radius = 0;
-    lv_draw_polygon(d->draw_ctx, &r, pts, 4);
+    /* one column per pixel from p1 up to (not including) p2: neighbouring segments never
+     * overlap, so no darker seams where antialiased polygon edges met */
+    lv_coord_t x1 = d->p1->x, x2 = d->p2->x, y1 = d->p1->y, y2 = d->p2->y;
+    if (x2 <= x1) return;
+    for (lv_coord_t x = x1; x < x2; x++) {
+        lv_coord_t y = y1 + (lv_coord_t)((int32_t)(y2 - y1) * (x - x1) / (x2 - x1));
+        if (y >= bottom) continue;
+        lv_area_t col = { x, y, x, bottom };
+        lv_draw_rect(d->draw_ctx, &r, &col);
+    }
 }
 
 static lv_obj_t *make_page(int pg)
@@ -1482,7 +1530,7 @@ static void create_graph(lv_obj_t *page)
     snprintf(s_full[GPG(s_gi)][GROW(s_gi)], 32, "%.31s", it->name[0] ? it->name : it->entity);
     (void)ny;
     if (icon_slot(GPG(s_gi), GROW(s_gi))) {
-        icon_create(page, GPG(s_gi), GROW(s_gi), icon_color(), ICON_SIZE);
+        icon_create(page, GPG(s_gi), GROW(s_gi), icon_color(), GRAPH_ICON);
         icon_place(GPG(s_gi), GROW(s_gi));
     }
 
@@ -1608,6 +1656,10 @@ static void create_pages(lv_obj_t *scr)
 #define ZOOM_BIG   ((uint16_t)(HA_ACTIVE_SCALE * 256 + 0.5f))   /* LVGL zoom: 256 = 100 % */
 static int s_sel = -1;
 static uint16_t s_zoom[GROUPS];
+/* A grown value is drawn in a real font of its size once the animation ends (LVGL's scaling
+ * of a rendered label looks washed out); s_base = its area in the normal font */
+static lv_area_t s_base[GROUPS];
+#define BIG_FONT (s_landscape ? &lv_font_clock_44 : &lv_font_clock_56)   /* ~1.6 x VFONT */
 
 /* o[0] = NULL when group g doesn't exist in the current layout */
 static void group_objs(int g, lv_obj_t *o[3])
@@ -1685,6 +1737,7 @@ static void page_relayout(int pg)
             lv_obj_get_coords(o[k][i], ar[i]);
             lv_area_move(ar[i], -lv_obj_get_style_translate_x(o[k][i], 0), -lv_obj_get_style_translate_y(o[k][i], 0));
         }
+        if (s_crisp[gs[k]]) va[k] = s_base[gs[k]];   /* lay out as the scaled normal-font value */
     }
     /* a page of only tiles keeps the old behaviour (rows/columns make room for a grown value);
      * on mixed pages every value stays inside its own block */
@@ -1726,9 +1779,27 @@ static void page_relayout(int pg)
         else if (left < lo) tx += lo - left;
         lv_obj_set_style_transform_pivot_x(o[k][0], corner ? 0 : w / 2, 0);
         lv_obj_set_style_transform_pivot_y(o[k][0], corner ? 0 : h / 2, 0);
-        lv_obj_set_style_transform_zoom(o[k][0], (lv_coord_t)(256 + f[k] * 256 + 0.5f), 0);
-        lv_obj_set_style_translate_x(o[k][0], tx, 0);
-        lv_obj_set_style_translate_y(o[k][0], ty, 0);
+        if (s_crisp[gs[k]]) {
+            /* big font, no scaling: put it where the scaled value would be (same baseline,
+             * left edge for graphs, centre for tiles) */
+            const lv_font_t *bf = BIG_FONT;
+            float z = 1 + f[k];
+            lv_coord_t px = corner ? 0 : w / 2, py = corner ? 0 : h / 2;
+            lv_coord_t sx1 = va[k].x1 + px - (lv_coord_t)(px * z), sy1 = va[k].y1 + py - (lv_coord_t)(py * z);
+            lv_area_t ra;
+            lv_obj_get_coords(o[k][0], &ra);
+            lv_area_move(&ra, -lv_obj_get_style_translate_x(o[k][0], 0), -lv_obj_get_style_translate_y(o[k][0], 0));
+            lv_coord_t want_x1 = corner ? sx1 : sx1 + ((lv_coord_t)(w * z) - lv_area_get_width(&ra)) / 2;
+            lv_coord_t base_scaled = sy1 + (lv_coord_t)((vf->line_height - vf->base_line) * z);
+            lv_coord_t base_real = ra.y1 + (bf->line_height - bf->base_line);
+            lv_obj_set_style_transform_zoom(o[k][0], 256, 0);
+            lv_obj_set_style_translate_x(o[k][0], want_x1 - ra.x1 + tx, 0);
+            lv_obj_set_style_translate_y(o[k][0], base_scaled - base_real + ty, 0);
+        } else {
+            lv_obj_set_style_transform_zoom(o[k][0], (lv_coord_t)(256 + f[k] * 256 + 0.5f), 0);
+            lv_obj_set_style_translate_x(o[k][0], tx, 0);
+            lv_obj_set_style_translate_y(o[k][0], ty, 0);
+        }
         lv_obj_set_style_translate_x(o[k][1], tx + udx, 0);
         lv_obj_set_style_translate_y(o[k][1], ty + udy, 0);
         lv_obj_set_style_translate_x(o[k][2], tx, 0);
@@ -1737,15 +1808,48 @@ static void page_relayout(int pg)
     }
 }
 
+/* only number-like text: the big fonts are digits and signs */
+static bool crisp_ok(const char *t)
+{
+    if (!t[0]) return false;
+    for (; *t; t++) if (!strchr("0123456789.,-+%: ", *t)) return false;
+    return true;
+}
+
+static void crisp_off(int g)
+{
+    if (g < 0 || !s_crisp[g]) return;
+    lv_obj_t *o[3];
+    group_objs(g, o);
+    s_crisp[g] = false;
+    if (o[0]) { lv_obj_set_style_text_font(o[0], VFONT, 0); lv_obj_update_layout(o[0]); }
+}
+
+static void crisp_on(int g)
+{
+    lv_obj_t *o[3];
+    group_objs(g, o);
+    if (!o[0] || s_crisp[g] || !crisp_ok(lv_label_get_text(o[0]))) return;
+    lv_obj_update_layout(o[0]);
+    lv_obj_get_coords(o[0], &s_base[g]);   /* normal font, untranslated */
+    lv_area_move(&s_base[g], -lv_obj_get_style_translate_x(o[0], 0), -lv_obj_get_style_translate_y(o[0], 0));
+    lv_obj_set_style_text_font(o[0], BIG_FONT, 0);
+    lv_obj_update_layout(o[0]);
+    s_crisp[g] = true;
+    page_relayout(group_page(g));
+}
+
 static void group_zoom_cb(void *var, int32_t z)
 {
     int g = (int)((uint16_t *)var - s_zoom);
     s_zoom[g] = (uint16_t)z;
     page_relayout(group_page(g));
+    if (z == ZOOM_BIG && g == s_sel) crisp_on(g);   /* animation done: sharp text */
 }
 
 static void group_animate(int g, uint16_t to)
 {
+    crisp_off(g);                         /* animate the normal font */
     lv_anim_del(&s_zoom[g], group_zoom_cb);
     if (!s_zoom[g]) s_zoom[g] = 256;
     lv_anim_t a;
@@ -1762,8 +1866,9 @@ static void group_animate(int g, uint16_t to)
 static void value_select(int g)
 {
     if (g == s_sel) return;
-    if (s_sel >= 0) group_animate(s_sel, 256);
-    s_sel = g;
+    int old = s_sel;
+    s_sel = g;                            /* first: an animation applies its start value at once */
+    if (old >= 0) group_animate(old, 256);
     if (g >= 0) group_animate(g, ZOOM_BIG);
 }
 
@@ -1964,6 +2069,7 @@ static void create_ui(void)
     if (s_page >= PAGE_COUNT) s_page = 0;
     s_sel = -1;
     memset(s_zoom, 0, sizeof(s_zoom));
+    memset(s_crisp, 0, sizeof(s_crisp));
     s_cfg_page = 0;
     s_cfg_open = false;
     s_dragging = s_paging = false;

@@ -12,7 +12,7 @@ SIZES = [12, 14, 16, 22]
 RANGES = [(0x20, 0x7F), (0xA0, 0xFF)]   # inclusive
 # digits-only fonts for the clock page: space, 0-9 and ':'
 CLOCK_SIZES = [24, 28, 32, 36, 40, 44, 48, 56, 64, 72]
-CLOCK_RANGES = [(0x20, 0x20), (0x30, 0x3A)]
+CLOCK_RANGES = [(0x20, 0x20), (0x25, 0x25), (0x2B, 0x2E), (0x30, 0x3A)]   # also number signs: zoomed values use them
 
 
 def glyph(font, ascent, ch):
