@@ -1852,6 +1852,14 @@ static void page_relayout(int pg)
         lv_obj_set_style_translate_x(o[k][2], tx, 0);
         /* the name below a row moves down with the growing value; the graph name above stays */
         lv_obj_set_style_translate_y(o[k][2], corner ? 0 : ty + gh / 2, 0);
+        /* a tile's icon moves with the growing value: out to its left (portrait) or up
+         * above it (landscape) */
+        int pg_k = group_page(gs[k]), row_k = gs[k] % LAYOUT_MAX_ROWS;
+        lv_obj_t *ic = !corner ? s_icon[pg_k][row_k] : NULL;
+        if (ic) {
+            lv_obj_set_style_translate_x(ic, s_landscape ? tx : tx - gw / 2, 0);
+            lv_obj_set_style_translate_y(ic, s_landscape ? ty - gh / 2 : ty, 0);
+        }
     }
 }
 
