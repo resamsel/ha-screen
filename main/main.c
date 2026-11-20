@@ -1092,7 +1092,7 @@ static void ha_weather_changed(int page, int row, const char *cond, const char *
 /* ---- Gauge cards: the value on a half-circle arc, like HA's gauge card ---- */
 static lv_obj_t *s_gz_arc[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_val[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_gz_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
-static lv_coord_t s_gz_cx[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], s_gz_flat[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_coord_t s_gz_cx[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], s_gz_flat[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];   /* flat = value baseline */
 #define GZ_SCALE 1000
 
 static void gauge_place(int pg, int i)
@@ -1107,16 +1107,68 @@ static void gauge_place(int pg, int i)
     lv_obj_set_pos(u, x + vw + 3, base - (uf->line_height - uf->base_line));
 }
 
-static void create_gauge(lv_obj_t *page, int pg, int i)
+/* Arc, value and name sized to the block; the name takes one or two lines (then the arc
+ * gets smaller), ending in "..." only after the second */
+static void gauge_layout(int pg, int i)
 {
     lv_area_t blk;
     graph_block(GI(pg, i), &blk);
     int w = lv_area_get_width(&blk), h = lv_area_get_height(&blk);
-    const lv_font_t *nf = &lv_font_latin_16;
-    lv_coord_t D = LV_MIN(w - 24, 2 * (h - nf->line_height - 20));
-    D = LV_MAX(D, 40);
-    lv_coord_t top = blk.y1 + (h - (D / 2 + 6 + nf->line_height)) / 2;
-    lv_coord_t cx = blk.x1 + w / 2;
+    lv_obj_t *a = s_gz_arc[pg][i], *n = s_gz_name[pg][i];
+    const lv_font_t *nf = lv_obj_get_style_text_font(n, 0);
+    lv_point_t sz;
+    lv_txt_get_size(&sz, lv_label_get_text(n), nf, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    /* two lines only between words: a single word too wide ends in "..." instead of
+     * breaking inside it */
+    const char *t = lv_label_get_text(n);
+    bool wrap = sz.x > w - 4 && strchr(t, ' ');
+    for (const char *p = t; wrap && *p; ) {   /* every word must fit a line */
+        size_t l = strcspn(p, " ");
+        char word[40];
+        snprintf(word, sizeof(word), "%.*s", (int)LV_MIN(l, sizeof(word) - 1), p);
+        lv_point_t ws;
+        lv_txt_get_size(&ws, word, nf, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        if (ws.x > w - 4) wrap = false;
+        p += l;
+        while (*p == ' ') p++;
+    }
+    lv_coord_t nh = nf->line_height * (wrap ? 2 : 1);
+    /* landscape: the value's digits centred on the block, the flat edge of the (small) arc
+     * through the value's middle; portrait: arc, value and name centred as a whole, the
+     * value's baseline on the flat edge */
+    lv_coord_t cy = blk.y1 + h / 2, cx = blk.x1 + w / 2;
+    const lv_font_t *vf = &lv_font_montserrat_28;
+    lv_coord_t D = 0, base = 0, flat = 0;
+    for (int pass = 0; pass < 3; pass++) {
+        lv_font_glyph_dsc_t g;
+        lv_coord_t dh = lv_font_get_glyph_dsc(vf, &g, '0', 0) ? g.box_h : vf->line_height / 2;
+        if (s_landscape) {                /* centred on the value, which sits lower */
+            base = cy + dh / 2;
+            flat = cy;
+            D = LV_MAX(LV_MIN(w - 24, 2 * (flat - blk.y1 - 4)), 40);
+        } else {                          /* arc, value and name centred as a whole */
+            D = LV_MAX(LV_MIN(w - 24, 2 * (h - nh - 6 - 2 * 12)), 40);   /* 12 px above and below */
+            flat = blk.y1 + (h - (D / 2 + 6 + nh)) / 2 + D / 2;
+            base = flat;
+        }
+        const lv_font_t *want = D >= 120 ? &lv_font_montserrat_28 : D >= 96 ? &lv_font_montserrat_20 : &lv_font_montserrat_16;
+        if (want == vf) break;
+        vf = want;
+    }
+    lv_obj_set_size(a, D, D);
+    lv_obj_set_pos(a, cx - D / 2, flat - D / 2);
+    lv_obj_set_style_arc_width(a, LV_MAX(D / 8, 6), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(a, LV_MAX(D / 8, 6), LV_PART_INDICATOR);
+    s_gz_cx[pg][i] = cx;
+    s_gz_flat[pg][i] = base + 2;          /* gauge_place puts the baseline 2 px above this */
+    if (!s_crisp[GI(pg, i)]) lv_obj_set_style_text_font(s_gz_val[pg][i], vf, 0);
+    lv_obj_set_size(n, w - 4, nh);
+    lv_obj_set_pos(n, blk.x1 + 2, base + 6);
+    gauge_place(pg, i);
+}
+
+static void create_gauge(lv_obj_t *page, int pg, int i)
+{
     lv_obj_t *a = lv_arc_create(page);
     lv_obj_remove_style(a, NULL, LV_PART_KNOB);
     lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
@@ -1124,24 +1176,17 @@ static void create_gauge(lv_obj_t *page, int pg, int i)
     lv_arc_set_bg_angles(a, 0, 180);
     lv_arc_set_range(a, 0, GZ_SCALE);
     lv_arc_set_value(a, 0);
-    lv_obj_set_size(a, D, D);
-    lv_obj_set_pos(a, cx - D / 2, top);
     lv_obj_set_style_pad_all(a, 0, 0);
-    lv_obj_set_style_arc_width(a, LV_MAX(D / 8, 6), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(a, LV_MAX(D / 8, 6), LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(a, false, LV_PART_MAIN);
     lv_obj_set_style_arc_rounded(a, false, LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(a, LV_OPA_30, LV_PART_MAIN);
     lv_obj_set_style_arc_color(a, COL_SEC(s_light), LV_PART_MAIN);
     lv_obj_set_style_arc_color(a, lv_color_hex(0x03A9F4), LV_PART_INDICATOR);   /* HA's primary */
     s_gz_arc[pg][i] = a;
-    s_gz_cx[pg][i] = cx;
-    s_gz_flat[pg][i] = top + D / 2;
 
     lv_obj_t *v = lv_label_create(page), *u = lv_label_create(page), *n = lv_label_create(page);
-    lv_obj_set_style_text_font(v, D >= 120 ? &lv_font_montserrat_28 : &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_font(u, &lv_font_latin_14, 0);
-    lv_obj_set_style_text_font(n, nf, 0);
+    lv_obj_set_style_text_font(n, &lv_font_latin_16, 0);
     lv_obj_set_style_text_color(v, COL_MAIN(s_light), 0);
     lv_obj_set_style_text_color(u, COL_SEC(s_light), 0);
     lv_obj_set_style_text_color(n, COL_SEC(s_light), 0);
@@ -1150,11 +1195,9 @@ static void create_gauge(lv_obj_t *page, int pg, int i)
     const layout_item_t *it = &s_layout.pages[pg].items[i];
     lv_label_set_text(n, it->name[0] ? it->name : it->entity);
     lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
-    lv_obj_set_size(n, w - 16, nf->line_height);
     lv_obj_set_style_text_align(n, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(n, blk.x1 + 8, top + D / 2 + 6);
     s_gz_val[pg][i] = v; s_gz_unit[pg][i] = u; s_gz_name[pg][i] = n;
-    gauge_place(pg, i);
+    gauge_layout(pg, i);
 }
 
 static void gauge_update(int pg, int i, const char *value, const char *unit, const char *name)
@@ -1165,7 +1208,10 @@ static void gauge_update(int pg, int i, const char *value, const char *unit, con
     crisp_off(g);
     lv_label_set_text(s_gz_val[pg][i], value);
     lv_label_set_text(s_gz_unit[pg][i], unit);
-    if (!it->name[0] && name) lv_label_set_text(s_gz_name[pg][i], name);
+    if (!it->name[0] && name && strcmp(lv_label_get_text(s_gz_name[pg][i]), name)) {
+        lv_label_set_text(s_gz_name[pg][i], name);
+        gauge_layout(pg, i);              /* one or two name lines */
+    }
     gauge_place(pg, i);
     page_relayout(pg);                    /* re-applies a tapped gauge's growth */
     if (crisp) crisp_on(g);
