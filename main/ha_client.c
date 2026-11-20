@@ -63,6 +63,8 @@ void ha_client_set_busy_cb(ha_busy_cb_t cb) { s_busy_cb = cb; }
 static ha_layout_t s_layout;              /* current layout, used only by the network task */
 static ha_picture_cb_t s_pic_cb;
 void ha_client_set_picture_cb(ha_picture_cb_t cb) { s_pic_cb = cb; }
+static ha_weather_cb_t s_weather_cb;
+void ha_client_set_weather_cb(ha_weather_cb_t cb) { s_weather_cb = cb; }
 static portMUX_TYPE s_pic_lock = portMUX_INITIALIZER_UNLOCKED;
 static int s_pic_page = -1;               /* page on screen, and its picture block sizes */
 static uint16_t s_pic_w[LAYOUT_MAX_ROWS], s_pic_h[LAYOUT_MAX_ROWS];
@@ -292,6 +294,7 @@ static bool json_num(const char *json, const char *key, float *out)
 
 static float read_entity(const layout_item_t *it, char text[24], char unit[8], char name[32]);
 static void utf8_trim(char *s);
+static void fetch_weather(int pg, int row);
 static void fetch_button(int pg, int row);
 
 static bool fetch_state(void)
@@ -330,6 +333,7 @@ static bool fetch_state(void)
         for (int i = 0; i < s_layout.pages[pg].count; i++) {
             const layout_item_t *it = &s_layout.pages[pg].items[i];
             if (it->kind == LAYOUT_BUTTONS) { fetch_button(pg, i); continue; }
+            if (it->kind == LAYOUT_WEATHER) { fetch_weather(pg, i); continue; }
             if (it->kind != LAYOUT_VALUES) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
             read_entity(it, text, unit, name);
@@ -490,6 +494,11 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
         return false;
     }
     if (kind == LAYOUT_VALUES) return true;   /* text states are shown as text */
+    if (kind == LAYOUT_WEATHER) {
+        if (is_domain(entity, "weather")) return true;
+        ESP_LOGW(TAG, "layout: %s is not a weather entity, skipped", entity);
+        return false;
+    }
     if (kind == LAYOUT_PICTURE) {
         if (is_domain(entity, "camera") || is_domain(entity, "image")) return true;
         ESP_LOGW(TAG, "layout: %s is not a camera or image, no picture", entity);
@@ -500,6 +509,37 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
     if (end != state) return true;
     ESP_LOGW(TAG, "layout: %s is not numeric ('%s'), no graph", entity, state);
     return false;
+}
+
+/* The number after `key` as HA wrote it (e.g. "4.5"); "" if missing */
+static void json_numtext(const char *json, const char *key, char *out, size_t n)
+{
+    out[0] = 0;
+    const char *p = strstr(json, key);
+    if (!p) return;
+    p += strlen(key);
+    size_t k = 0;
+    while (k + 1 < n && (p[k] == '-' || p[k] == '.' || (p[k] >= '0' && p[k] <= '9'))) { out[k] = p[k]; k++; }
+    out[k] = 0;
+}
+
+/* Weather card: condition, temperature and humidity from the entity's attributes */
+static void fetch_weather(int pg, int row)
+{
+    static resp_t r;
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    char path[96], cond[24] = "", temp[12] = "", hum[8] = "", unit[8] = "", name[32];
+    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    snprintf(path, sizeof(path), "/api/states/%s", it->entity);
+    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+        if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+        json_str(r.buf, "\"state\":\"", cond, sizeof(cond));
+        if (!strcmp(cond, "unavailable") || !strcmp(cond, "unknown")) cond[0] = 0;
+        json_numtext(r.buf, "\"temperature\":", temp, sizeof(temp));
+        json_numtext(r.buf, "\"humidity\":", hum, sizeof(hum));
+        json_str(r.buf, "\"temperature_unit\":\"", unit, sizeof(unit));
+    }
+    if (s_weather_cb) s_weather_cb(pg, row, cond, temp, unit, hum, name);
 }
 
 /* Drop a UTF-8 sequence cut off at the end of s by truncation */

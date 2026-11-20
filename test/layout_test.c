@@ -319,9 +319,19 @@ static void test_picture(void)
     assert(layout_sanitize(&l) && l.pages[0].items[0].flags == LAYOUT_PIC_FLAGS);
 }
 
+static void test_weather(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"weather-forecast\",\"entity\":\"weather.home\",\"show_forecast\":false}") "]", &l) == 1);
+    assert(l.pages[0].kind == LAYOUT_WEATHER && l.pages[0].count == 1 && !strcmp(l.pages[0].items[0].entity, "weather.home"));
+    l.pages[0].items[0].flags = 0xFF;
+    assert(layout_sanitize(&l) && l.pages[0].kind == LAYOUT_WEATHER && !l.pages[0].items[0].flags);
+}
+
 int main(void)
 {
     test_picture();
+    test_weather();
     test_clock();
     test_buttons();
     test_filter_kind();

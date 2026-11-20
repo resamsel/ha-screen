@@ -65,6 +65,12 @@ void ha_client_toggle_landscape(void);
 typedef void (*ha_picture_cb_t)(int page, int row, uint16_t *pixels, int w, int h, int zoom, const char *name);
 void ha_client_set_picture_cb(ha_picture_cb_t cb);  /* call before ha_client_start */
 
+/* Weather card: condition = HA state (sunny, fog, ...; "" when unavailable), temperature
+ * and humidity as HA sends them ("" when missing), unit like "°C". */
+typedef void (*ha_weather_cb_t)(int page, int row, const char *condition, const char *temp, const char *unit,
+                                const char *humidity, const char *name);
+void ha_client_set_weather_cb(ha_weather_cb_t cb);  /* call before ha_client_start */
+
 /* The page now on screen and the size of each of its picture blocks (0 = no picture).
  * Its pictures are fetched at once, then every HA_PICTURE_INTERVAL_MS while it stays shown. */
 void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint16_t h[LAYOUT_MAX_ROWS]);

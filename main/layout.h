@@ -10,7 +10,7 @@
 #define LAYOUT_MAX_IMAGES    4      /* picture cards with an image:/camera_image: source */
 #define LAYOUT_IMAGE_LEN     128
 
-typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE } layout_kind_t;
+typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER } layout_kind_t;
 
 /* clock card options (layout_item_t.flags) */
 #define LAYOUT_CLOCK_SECONDS 0x01

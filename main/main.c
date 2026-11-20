@@ -84,6 +84,8 @@ static void ha_busy(bool busy);
 static void ha_button_changed(int page, int row, ha_btn_state_t state, const char *name);
 static void ha_button_pressed(int page, int row, bool ok);
 static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, int zoom, const char *name);
+static void ha_weather_changed(int page, int row, const char *cond, const char *temp, const char *unit,
+                               const char *hum, const char *name);
 static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
@@ -191,6 +193,7 @@ void app_main(void)
     ha_client_set_button_cb(ha_button_changed);
     ha_client_set_press_cb(ha_button_pressed);
     ha_client_set_picture_cb(ha_picture_changed);
+    ha_client_set_weather_cb(ha_weather_changed);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
 
@@ -592,6 +595,222 @@ static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, in
     }
     free(old);
     if (name && s_pic_name[page][row]) pic_name_set(s_pic_name[page][row], name);
+    lvgl_port_unlock();
+}
+
+/* ---- Weather cards (weather-forecast: current weather only, like HA without forecast) ---- */
+static lv_obj_t *s_wx_icon[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_wx_cond[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_wx_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_wx_temp[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static lv_obj_t *s_wx_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_wx_hum[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static char s_wx_last[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][24];   /* condition the icon shows */
+
+static const struct { const char *state, *text; } WX_TEXT[] = {
+    { "clear-night", "Clear, night" }, { "cloudy", "Cloudy" }, { "exceptional", "Exceptional" },
+    { "fog", "Fog" }, { "hail", "Hail" }, { "lightning", "Lightning" }, { "lightning-rainy", "Lightning, rainy" },
+    { "partlycloudy", "Partly cloudy" }, { "pouring", "Pouring" }, { "rainy", "Rainy" }, { "snowy", "Snowy" },
+    { "snowy-rainy", "Snowy, rainy" }, { "sunny", "Sunny" }, { "windy", "Windy" }, { "windy-variant", "Windy" },
+};
+
+static lv_obj_t *wx_shape(lv_obj_t *p, int x, int y, int w, int h, uint32_t col, lv_coord_t radius)
+{
+    lv_obj_t *o = lv_obj_create(p);
+    lv_obj_remove_style_all(o);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(o, lv_color_hex(col), 0);
+    lv_obj_set_style_radius(o, radius, 0);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, LV_MAX(w, 1), LV_MAX(h, 1));
+    return o;
+}
+#define WX_DOT(p, x, y, d, col) wx_shape(p, x, y, d, d, col, LV_RADIUS_CIRCLE)
+
+static void wx_cloud(lv_obj_t *p, int S, int x0, int y0, int w, uint32_t col)   /* cloud of width w */
+{
+    WX_DOT(p, x0 + w * 12 / 100, y0 + w * 22 / 100, w * 40 / 100, col);
+    WX_DOT(p, x0 + w * 32 / 100, y0, w * 56 / 100, col);
+    wx_shape(p, x0, y0 + w * 34 / 100, w, w * 30 / 100, col, LV_RADIUS_CIRCLE);
+    (void)S;
+}
+
+static void wx_sun(lv_obj_t *p, int x, int y, int d)
+{
+    lv_obj_t *s = WX_DOT(p, x, y, d, 0xFDD93C);
+    lv_obj_set_style_shadow_color(s, lv_color_hex(0xFDD93C), 0);
+    lv_obj_set_style_shadow_width(s, d / 3, 0);
+    lv_obj_set_style_shadow_opa(s, LV_OPA_50, 0);
+}
+
+/* Draws the condition's icon into the S x S box p (made of plain shapes, no image data) */
+static void wx_draw_icon(lv_obj_t *p, int S, const char *c)
+{
+    lv_obj_clean(p);
+    uint32_t cloud = s_light ? 0xC4C9CE : 0xDDE1E5, grey = s_light ? 0xA9AFB5 : 0xB8BDC2;
+    uint32_t rain = 0x30B3FF, snow = s_light ? 0x9FD8FF : 0xFFFFFF;
+    bool rainy = !strcmp(c, "rainy") || !strcmp(c, "pouring") || !strcmp(c, "lightning-rainy") || !strcmp(c, "snowy-rainy");
+    bool snowy = !strcmp(c, "snowy") || !strcmp(c, "snowy-rainy"), hail = !strcmp(c, "hail");
+    bool bolt = !strncmp(c, "lightning", 9), fog = !strcmp(c, "fog");
+    if (!strcmp(c, "sunny")) { wx_sun(p, S / 5, S / 5, S * 3 / 5); return; }
+    if (!strcmp(c, "clear-night")) {      /* crescent: thick arc */
+        lv_obj_t *a = lv_arc_create(p);
+        lv_obj_remove_style_all(a);
+        lv_obj_set_size(a, S * 3 / 5, S * 3 / 5);
+        lv_obj_set_pos(a, S / 5, S / 5);
+        lv_arc_set_bg_angles(a, 60, 300);
+        lv_obj_set_style_arc_width(a, S / 6, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(a, lv_color_hex(0xF0E6A8), LV_PART_MAIN);
+        lv_obj_set_style_arc_rounded(a, true, LV_PART_MAIN);
+        lv_obj_set_style_arc_opa(a, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
+        return;
+    }
+    if (!strncmp(c, "windy", 5)) {
+        wx_shape(p, S / 10, S * 3 / 10, S * 6 / 10, S / 10, grey, LV_RADIUS_CIRCLE);
+        wx_shape(p, S / 10, S * 5 / 10, S * 8 / 10, S / 10, grey, LV_RADIUS_CIRCLE);
+        wx_shape(p, S * 3 / 10, S * 7 / 10, S * 5 / 10, S / 10, grey, LV_RADIUS_CIRCLE);
+        return;
+    }
+    if (!strcmp(c, "exceptional")) {
+        lv_obj_t *e = WX_DOT(p, S / 6, S / 6, S * 2 / 3, 0xE53935);
+        lv_obj_t *l = lv_label_create(e);
+        lv_label_set_text(l, "!");
+        lv_obj_set_style_text_color(l, lv_color_white(), 0);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_22, 0);
+        lv_obj_center(l);
+        return;
+    }
+    if (!strcmp(c, "partlycloudy")) {
+        wx_sun(p, S * 42 / 100, S * 8 / 100, S / 2);
+        wx_cloud(p, S, S * 4 / 100, S * 36 / 100, S * 76 / 100, cloud);
+        return;
+    }
+    bool below = rainy || snowy || hail || bolt || fog;   /* cloud moves up to make room */
+    wx_cloud(p, S, S / 10, below ? S * 6 / 100 : S / 5, S * 8 / 10, cloud);
+    int y = S * 62 / 100;
+    if (fog) {
+        wx_shape(p, S * 18 / 100, y + S / 20, S * 64 / 100, S / 12, grey, LV_RADIUS_CIRCLE);
+        wx_shape(p, S * 18 / 100, y + S * 2 / 10, S * 64 / 100, S / 12, grey, LV_RADIUS_CIRCLE);
+        return;
+    }
+    if (bolt) {
+        lv_obj_t *b = lv_label_create(p);
+        lv_label_set_text(b, LV_SYMBOL_CHARGE);
+        lv_obj_set_style_text_color(b, lv_color_hex(0xFDD93C), 0);
+        lv_obj_set_style_text_font(b, S >= 44 ? &lv_font_montserrat_20 : &lv_font_montserrat_16, 0);
+        lv_obj_set_pos(b, S * 42 / 100, y - S / 20);
+    }
+    int n = !strcmp(c, "pouring") ? 5 : 3, dw = LV_MAX(S / 16, 2);
+    for (int k = 0; k < n; k++) {
+        int x = S * 22 / 100 + k * (S * 56 / 100) / (n - 1) - dw / 2;
+        if (bolt && k == 1) continue;     /* the bolt sits in the middle */
+        bool flake = snowy && (!rainy || k % 2 == 0);
+        if (hail) WX_DOT(p, x - dw / 2, y + S / 10 + (k % 2) * S / 10, dw * 2, s_light ? 0xB0C4D4 : 0xFFFFFF);
+        else if (flake) WX_DOT(p, x - dw / 2, y + S / 10 + (k % 2) * S / 10, dw * 2, snow);
+        else if (rainy) wx_shape(p, x, y + S / 12 + (k % 2) * S / 12, dw, S / 5, rain, LV_RADIUS_CIRCLE);
+    }
+}
+
+static void create_weather(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    int w = lv_area_get_width(&blk) - 8, h = lv_area_get_height(&blk) - 8;
+    lv_obj_t *bg = lv_obj_create(page);   /* invisible container, no card background */
+    lv_obj_remove_style_all(bg);
+    lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(bg, w, h);
+    lv_obj_set_pos(bg, blk.x1 + 4, blk.y1 + 4);
+    lv_color_t fg = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
+    bool stacked = w < 240 && h >= 96;    /* portrait: icon + temperature on top, text below */
+    int S = stacked ? LV_MIN(52, h / 2) : LV_MIN(52, h - 16), pad = 10;
+
+    lv_obj_t *ic = lv_obj_create(bg);
+    lv_obj_remove_style_all(ic);
+    lv_obj_clear_flag(ic, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(ic, S, S);
+
+    lv_obj_t *t = lv_label_create(bg), *u = lv_label_create(bg), *hm = lv_label_create(bg);
+    lv_label_set_text(t, "--");
+    lv_label_set_text(u, "");
+    lv_label_set_text(hm, "");
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(u, &lv_font_latin_16, 0);
+    lv_obj_set_style_text_font(hm, &lv_font_montserrat_14, 0);   /* has the drop symbol */
+    lv_obj_set_style_text_color(t, fg, 0);
+    lv_obj_set_style_text_color(u, fg, 0);
+    lv_obj_set_style_text_color(hm, fg, 0);
+    lv_obj_set_style_text_opa(hm, LV_OPA_70, 0);
+
+    lv_obj_t *c = lv_label_create(bg), *n = lv_label_create(bg);
+    lv_label_set_text(c, "");
+    lv_label_set_text(n, s_layout.pages[pg].items[i].name[0] ? s_layout.pages[pg].items[i].name : s_layout.pages[pg].items[i].entity);
+    lv_obj_set_style_text_font(c, &lv_font_latin_22, 0);
+    lv_obj_set_style_text_font(n, &lv_font_latin_14, 0);
+    lv_obj_set_style_text_color(c, fg, 0);
+    lv_obj_set_style_text_color(n, fg, 0);
+    lv_obj_set_style_text_opa(n, LV_OPA_70, 0);
+    lv_label_set_long_mode(c, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
+
+    if (stacked) {
+        int top = (h - S - 8 - 26 - 18) / 2;   /* icon row, condition, name: centred */
+        if (top < 4) top = 4;
+        lv_obj_set_pos(ic, pad - 4, top);
+        lv_obj_set_width(c, w - 2 * pad);
+        lv_obj_set_width(n, w - 2 * pad);
+        lv_obj_set_pos(c, pad, top + S + 6);
+        lv_obj_set_pos(n, pad, top + S + 6 + 26);
+        lv_obj_set_user_data(bg, (void *)(intptr_t)top);
+    } else {
+        lv_obj_set_pos(ic, pad - 2, (h - S) / 2);
+        int tx = pad + S + 8, tw = w - tx - pad - 90;   /* temperature takes about 90 px */
+        lv_obj_set_width(c, LV_MAX(tw, 20));
+        lv_obj_set_width(n, LV_MAX(tw, 20));
+        lv_obj_set_pos(c, tx, h / 2 - 25);
+        lv_obj_set_pos(n, tx, h / 2 + 1);
+        lv_obj_set_user_data(bg, (void *)(intptr_t)-1);
+    }
+    s_wx_icon[pg][i] = ic; s_wx_cond[pg][i] = c; s_wx_name[pg][i] = n;
+    s_wx_temp[pg][i] = t; s_wx_unit[pg][i] = u; s_wx_hum[pg][i] = hm;
+    s_wx_last[pg][i][0] = 0;
+}
+
+/* Temperature (number + unit) and humidity, right-aligned */
+static void wx_place(int pg, int i)
+{
+    lv_obj_t *t = s_wx_temp[pg][i], *u = s_wx_unit[pg][i], *hm = s_wx_hum[pg][i], *bg = lv_obj_get_parent(t);
+    lv_obj_update_layout(bg);
+    int w = lv_obj_get_width(bg), h = lv_obj_get_height(bg), pad = 10;
+    int top = (int)(intptr_t)lv_obj_get_user_data(bg);
+    int tw = lv_obj_get_width(t), uw = lv_obj_get_width(u), th = lv_obj_get_height(t);
+    int y = top >= 0 ? top + 2 : h / 2 - th + 4;
+    lv_obj_set_pos(u, w - pad - uw, y + 3);
+    lv_obj_set_pos(t, w - pad - uw - 3 - tw, y);
+    lv_obj_set_pos(hm, w - pad - lv_obj_get_width(hm), y + th + 1);
+}
+
+static void ha_weather_changed(int page, int row, const char *cond, const char *temp, const char *unit,
+                               const char *hum, const char *name)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page < 0 || page >= PAGE_COUNT || row < 0 || row >= ROWS(page) || KIND(page, row) != LAYOUT_WEATHER || !s_wx_temp[page][row]) {
+        lvgl_port_unlock();
+        return;
+    }
+    const char *text = cond[0] ? cond : "Unavailable";
+    for (size_t k = 0; k < sizeof(WX_TEXT) / sizeof(WX_TEXT[0]); k++)
+        if (!strcmp(cond, WX_TEXT[k].state)) text = WX_TEXT[k].text;
+    lv_label_set_text(s_wx_cond[page][row], text);
+    if (name) lv_label_set_text(s_wx_name[page][row], name);
+    lv_label_set_text(s_wx_temp[page][row], temp[0] ? temp : "--");
+    lv_label_set_text(s_wx_unit[page][row], unit);
+    if (hum[0]) lv_label_set_text_fmt(s_wx_hum[page][row], LV_SYMBOL_TINT " %s%%", hum);   /* drop */
+    else lv_label_set_text(s_wx_hum[page][row], "");
+    if (strcmp(s_wx_last[page][row], cond)) {
+        snprintf(s_wx_last[page][row], sizeof(s_wx_last[page][row]), "%s", cond);
+        wx_draw_icon(s_wx_icon[page][row], lv_obj_get_width(s_wx_icon[page][row]), cond);
+    }
+    wx_place(page, row);
     lvgl_port_unlock();
 }
 
@@ -1093,6 +1312,7 @@ static void create_pages(lv_obj_t *scr)
             if (it->kind == LAYOUT_BUTTONS) { create_button(page, pg, i); continue; }
             if (it->kind == LAYOUT_CLOCK) { create_clock(page, pg, i); continue; }
             if (it->kind == LAYOUT_PICTURE) { create_picture(page, pg, i); continue; }
+            if (it->kind == LAYOUT_WEATHER) { create_weather(page, pg, i); continue; }
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
@@ -1129,6 +1349,8 @@ static void create_pages(lv_obj_t *scr)
 
     s_page_title = lv_label_create(scr);
     lv_obj_set_style_text_font(s_page_title, &lv_font_latin_16, 0);
+    lv_label_set_long_mode(s_page_title, LV_LABEL_LONG_DOT);   /* ends in "..." when too long */
+    lv_obj_set_size(s_page_title, SCR_W - 10 - 52, lv_font_latin_16.line_height);   /* one line, short of the status icons */
     /* vertically centred on the status icons (HA dot centre is at y = 14 + 10/2) */
     lv_obj_align(s_page_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_latin_16.line_height / 2);
     lv_label_set_text(s_page_title, s_layout.pages[s_page].title);
@@ -1511,6 +1733,7 @@ static void create_ui(void)
     memset(s_clk_time, 0, sizeof(s_clk_time));
     memset(s_clk_small, 0, sizeof(s_clk_small));
     memset(s_clk_bg, 0, sizeof(s_clk_bg));
+    memset(s_wx_temp, 0, sizeof(s_wx_temp));
     memset(s_full, 0, sizeof(s_full));
     s_err_box = s_err_label = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));

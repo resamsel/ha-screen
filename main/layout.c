@@ -116,8 +116,9 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             continue;
         }
         bool clock = ct && !strcmp(ct, "clock");
+        bool weather = ct && !strcmp(ct, "weather-forecast");   /* current weather; forecast not shown */
         bool graph = is_graph(card), tile = is_tile(card), button = is_button(card), picture = is_picture(card);
-        if (!clock && !graph && !tile && !button && !picture) {
+        if (!clock && !graph && !tile && !button && !picture && !weather) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
             continue;
         }
@@ -130,7 +131,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             continue;
         }
         layout_item_t *it = &pg->items[pg->count++];
-        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : LAYOUT_VALUES;
+        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : LAYOUT_VALUES;
         if (pg->count == 1) pg->kind = it->kind;
         if (clock) {
             const char *tf = str(card, "time_format"), *sz = str(card, "clock_size"), *tz = str(card, "time_zone");
@@ -272,7 +273,7 @@ bool layout_sanitize(ha_layout_t *l)
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
         for (int i = 0; i < pg->count; i++)
-            if (pg->items[i].kind > LAYOUT_PICTURE) pg->items[i].kind = LAYOUT_VALUES;
+            if (pg->items[i].kind > LAYOUT_WEATHER) pg->items[i].kind = LAYOUT_VALUES;
         pg->kind = pg->items[0].kind;   /* kind of the first card */
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
@@ -281,7 +282,7 @@ bool layout_sanitize(ha_layout_t *l)
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
             if (pg->items[i].kind != LAYOUT_PICTURE || pg->items[i].image > LAYOUT_MAX_IMAGES) pg->items[i].image = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
-            pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : LAYOUT_CLOCK_FLAGS;
+            pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : pg->items[i].kind == LAYOUT_CLOCK ? LAYOUT_CLOCK_FLAGS : 0;
             if ((pg->items[i].flags & LAYOUT_CLOCK_SIZE) == LAYOUT_CLOCK_SIZE) pg->items[i].flags &= ~LAYOUT_CLOCK_SIZE;
             uint16_t *h = &pg->items[i].hours;
             if (pg->items[i].kind != LAYOUT_GRAPH) *h = 0;   /* unused; as layout_parse leaves it */

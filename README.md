@@ -17,6 +17,8 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD`/`HA_VIEW`
   to HA; the HA token is only sent to HA), else the card's own `camera.*`/`image.*` entity.
   Cameras refresh every 60 s while the page is shown (`HA_PICTURE_INTERVAL_MS`), image entities
   when their state changes, URLs on each page visit. JPEG (baseline) and PNG (non-interlaced)
+- a `weather-forecast` card = current weather of a `weather.*` entity: icon, condition, name,
+  temperature and humidity (the forecast is not shown)
 - up to 8 pages; anything else (other cards, missing or non-numeric entities) is skipped
 
 The last good layout is kept in flash, so the board starts with it when HA isn't reachable.
