@@ -1381,7 +1381,7 @@ static void fetch_pictures(bool force)
         const char *src = it->image ? s_layout.images[it->image - 1] : it->entity;
         bool camera = is_domain(src, "camera"), entity = camera || is_domain(src, "image");
         snprintf(path, sizeof(path), "/api/states/%s", it->entity);
-        if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+        if (it->entity[0] && ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {   /* picture-glance: no entity */
             if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
             if (!it->image) json_str(r.buf, "\"state\":\"", key, sizeof(key));
         }

@@ -368,6 +368,20 @@ static void test_new_cards(void)
     assert(layout_sanitize(&l) && l.pages[0].items[0].flags == LAYOUT_GLANCE_NO_STATE);
 }
 
+static bool keep_none(const char *entity, layout_kind_t kind, void *ctx) { (void)entity; (void)kind; (void)ctx; return false; }
+
+/* picture-glance: an image URL without entity, named by its title (issue #3) */
+static void test_picture_glance(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"picture-glance\",\"title\":\"Kitchen\",\"image\":\"https://x/k.png\",\"entities\":[\"sensor.a\"]}") "]", &l) == 1);
+    const layout_item_t *it = &l.pages[0].items[0];
+    assert(l.pages[0].kind == LAYOUT_PICTURE && it->image == 1 && !strcmp(l.images[0], "https://x/k.png"));
+    assert(!it->entity[0] && !strcmp(it->name, "Kitchen") && it->flags == LAYOUT_PIC_COVER);   /* fills the block, as in HA */
+    assert(layout_sanitize(&l) && layout_filter(&l, keep_none, NULL) == 1);   /* kept without an entity check */
+    assert(parse_sections("[" SEC("{\"type\":\"picture-glance\",\"entities\":[\"sensor.a\"]}") "]", &l) == 0);   /* no image */
+}
+
 static void test_weather(void)
 {
     ha_layout_t l;
@@ -389,6 +403,7 @@ int main(void)
 {
     test_picture();
     test_weather();
+    test_picture_glance();
     test_icons();
     test_heading_icon();
     test_new_cards();
