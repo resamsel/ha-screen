@@ -13,6 +13,7 @@ static void add_error(const char *fmt, ...);
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -43,6 +44,7 @@ static const char *TAG = "ha";
 #define PIC_BIT     BIT6  /* another page is shown: fetch its pictures now */
 
 static volatile float s_set_value;
+static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
 
 static EventGroupHandle_t s_events;
 static ha_state_cb_t s_state_cb;
@@ -314,23 +316,36 @@ static uint8_t s_rec_theme = 0xFF;        /* HA_STATE_ON/OFF of the theme entity
 static float s_rec_bri[3];
 static bool s_rec_bri_has, s_rec_dirty;
 
+/* Guards the records and s_layout against ha_client_replay from the UI task. Recursive:
+ * a replay re-enters rec_put through the emit_* functions. Never held while waiting for the
+ * LVGL lock from the network task (callbacks run after rec_put has released it). */
+static SemaphoreHandle_t s_rec_mx;
+static void rec_lock(void) { if (s_rec_mx) xSemaphoreTakeRecursive(s_rec_mx, portMAX_DELAY); }
+static void rec_unlock(void) { if (s_rec_mx) xSemaphoreGiveRecursive(s_rec_mx); }
+
 static void rec_put(int type, int pg, int row, const void *d, size_t n)
 {
     if (pg < 0 || pg >= LAYOUT_MAX_PAGES || row < 0 || row >= LAYOUT_MAX_ROWS || n > 4096) return;
-    if (s_rec[pg][row][type] && s_rec_len[pg][row][type] == n && !memcmp(s_rec[pg][row][type], d, n)) return;
-    uint8_t *b = realloc(s_rec[pg][row][type], n ? n : 1);
-    if (!b) return;
-    memcpy(b, d, n);
-    s_rec[pg][row][type] = b;
-    s_rec_len[pg][row][type] = n;
-    s_rec_dirty = true;
+    rec_lock();
+    if (!(s_rec[pg][row][type] && s_rec_len[pg][row][type] == n && !memcmp(s_rec[pg][row][type], d, n))) {
+        uint8_t *b = realloc(s_rec[pg][row][type], n ? n : 1);
+        if (b) {
+            memmove(b, d, n);
+            s_rec[pg][row][type] = b;
+            s_rec_len[pg][row][type] = n;
+            s_rec_dirty = true;
+        }
+    }
+    rec_unlock();
 }
 
 static void rec_clear(void)
 {
+    rec_lock();
     for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++)
             for (int t = 0; t < REC_TYPES; t++) { free(s_rec[p][i][t]); s_rec[p][i][t] = NULL; s_rec_len[p][i][t] = 0; }
+    rec_unlock();
 }
 
 /* strings back to back, each with its NUL */
@@ -438,6 +453,52 @@ static void cache_save(void)
 }
 
 /* The saved data of this layout, through the callbacks (before HA is reachable) */
+/* Send one record through its callback (d .. de = its data, l bytes) */
+static void rec_emit(int t, int pg, int row, const uint8_t *d, const uint8_t *de, uint16_t l)
+{
+    switch (t) {
+    case REC_VALUE: {
+        const char *a = unpack_str(&d, de), *u = unpack_str(&d, de), *nm = unpack_str(&d, de);
+        emit_sensor(pg, row, a, u, nm);
+        break;
+    }
+    case REC_GLATEST: {
+        const char *a = unpack_str(&d, de), *u = unpack_str(&d, de), *nm = unpack_str(&d, de);
+        emit_graph(pg, row, a, u, nm, NULL, 0, 0, s_layout.pages[pg].items[row].hours, false);
+        break;
+    }
+    case REC_GPOINTS: {
+        if (l < 13) break;
+        uint16_t hh, nn;
+        int64_t e;
+        memcpy(&hh, d + 1, 2); memcpy(&nn, d + 3, 2); memcpy(&e, d + 5, 8);
+        if (nn > HA_GRAPH_POINTS || l != 13 + nn * sizeof(float)) break;
+        static float pts[HA_GRAPH_POINTS];
+        memcpy(pts, d + 13, nn * sizeof(float));
+        emit_graph(pg, row, NULL, NULL, NULL, pts, nn, e, hh, d[0]);
+        break;
+    }
+    case REC_BUTTON: {
+        if (l < 1) break;
+        const uint8_t *q = d + 1;
+        emit_button(pg, row, (ha_btn_state_t)d[0], unpack_str(&q, de));
+        break;
+    }
+    case REC_WEATHER: {
+        const char *c = unpack_str(&d, de), *tp = unpack_str(&d, de), *u = unpack_str(&d, de);
+        const char *h = unpack_str(&d, de), *nm = unpack_str(&d, de);
+        emit_weather(pg, row, c, tp, u, h, nm);
+        break;
+    }
+    case REC_ICON: {
+        const char *ic = unpack_str(&d, de);
+        snprintf(s_icon_last[pg][row], sizeof(s_icon_last[pg][row]), "%s", ic);
+        emit_icon(pg, row, ic);
+        break;
+    }
+    }
+}
+
 static void cache_replay(void)
 {
     size_t n;
@@ -467,54 +528,14 @@ static void cache_replay(void)
         p += l;
         if (t >= REC_TYPES || pg >= s_layout.count || row >= s_layout.pages[pg].count) continue;
         count++;
-        switch (t) {
-        case REC_VALUE: {
-            const char *a = unpack_str(&d, de), *u = unpack_str(&d, de), *nm = unpack_str(&d, de);
-            emit_sensor(pg, row, a, u, nm);
-            break;
-        }
-        case REC_GLATEST: {
-            const char *a = unpack_str(&d, de), *u = unpack_str(&d, de), *nm = unpack_str(&d, de);
-            emit_graph(pg, row, a, u, nm, NULL, 0, 0, s_layout.pages[pg].items[row].hours, false);
-            break;
-        }
-        case REC_GPOINTS: {
-            if (l < 13) break;
-            uint16_t hh, nn;
-            int64_t e;
-            memcpy(&hh, d + 1, 2); memcpy(&nn, d + 3, 2); memcpy(&e, d + 5, 8);
-            if (nn > HA_GRAPH_POINTS || l != 13 + nn * sizeof(float)) break;
-            static float pts[HA_GRAPH_POINTS];
-            memcpy(pts, d + 13, nn * sizeof(float));
-            emit_graph(pg, row, NULL, NULL, NULL, pts, nn, e, hh, d[0]);
-            break;
-        }
-        case REC_BUTTON: {
-            if (l < 1) break;
-            const uint8_t *q = d + 1;
-            emit_button(pg, row, (ha_btn_state_t)d[0], unpack_str(&q, de));
-            break;
-        }
-        case REC_WEATHER: {
-            const char *c = unpack_str(&d, de), *tp = unpack_str(&d, de), *u = unpack_str(&d, de);
-            const char *h = unpack_str(&d, de), *nm = unpack_str(&d, de);
-            emit_weather(pg, row, c, tp, u, h, nm);
-            break;
-        }
-        case REC_ICON: {
-            const char *ic = unpack_str(&d, de);
-            snprintf(s_icon_last[pg][row], sizeof(s_icon_last[pg][row]), "%s", ic);
-            emit_icon(pg, row, ic);
-            break;
-        }
-        }
+        rec_emit(t, pg, row, d, de, l);
     }
     free(b);
     s_rec_dirty = false;
     ESP_LOGI(TAG, "cache: %d cards shown from flash", count);
 }
 
-static float read_entity(int pg, int row, char text[24], char unit[8], char name[32]);
+static float read_entity(int pg, int row, char text[24], char unit[8], char name[32], bool *got);
 static void report_icon(int pg, int row, const char *json);
 static void utf8_trim(char *s);
 static void fetch_weather(int pg, int row);
@@ -571,8 +592,9 @@ static bool fetch_state(void)
             if (it->kind == LAYOUT_WEATHER) { fetch_weather(pg, i); continue; }
             if (it->kind != LAYOUT_VALUES && it->kind != LAYOUT_GAUGE && it->kind != LAYOUT_GLANCE) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
-            read_entity(pg, i, text, unit, name);
-            emit_sensor(pg, i, text, unit, name);
+            bool got;
+            read_entity(pg, i, text, unit, name, &got);
+            if (got) emit_sensor(pg, i, text, unit, name);   /* failed: keep the last value */
         }
     }
     return st == 200;
@@ -591,8 +613,9 @@ static bool json_str(const char *json, const char *key, char *out, size_t n)
 }
 
 /* Current value of a layout item as display text ("--" when not numeric), its unit and the
- * name to show (card name, else friendly_name, else the entity id). Returns the value, or NAN. */
-static float read_entity(int pg, int row, char text[24], char unit[8], char name[32])
+ * name to show (card name, else friendly_name, else the entity id). Returns the value, or NAN.
+ * *got = false when HA didn't answer: the caller keeps showing the last value. */
+static float read_entity(int pg, int row, char text[24], char unit[8], char name[32], bool *got)
 {
     const layout_item_t *it = &s_layout.pages[pg].items[row];
     static resp_t r;
@@ -602,7 +625,8 @@ static float read_entity(int pg, int row, char text[24], char unit[8], char name
     unit[0] = 0;
     snprintf(name, 32, "%.31s", it->name[0] ? it->name : it->entity);
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
-    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+    *got = ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200;
+    if (*got) {
         report_icon(pg, row, r.buf);
         if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, 32)) utf8_trim(name);
         json_str(r.buf, "\"unit_of_measurement\":\"", unit, 8);
@@ -626,9 +650,10 @@ static void fetch_graph(int pg, int row)
 {
     const layout_item_t *it = &s_layout.pages[pg].items[row];
     char latest[24], unit[8], name[32], path[256];
-    read_entity(pg, row, latest, unit, name);
+    bool got;
+    read_entity(pg, row, latest, unit, name, &got);
     bool zero_based = !strcmp(unit, "%");
-    emit_graph(pg, row, latest, unit, name, NULL, 0, 0, it->hours, zero_based);
+    if (got) emit_graph(pg, row, latest, unit, name, NULL, 0, 0, it->hours, zero_based);
 
     if (!s_now) return;                   /* need the server time to place points */
 
@@ -681,7 +706,8 @@ static void fetch_button(int pg, int row)
     snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
     ha_btn_state_t bs = HA_BTN_UNAVAILABLE;
-    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) != 200) return;   /* keep the last state */
+    {
         report_icon(pg, row, r.buf);
         if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
         json_str(r.buf, "\"state\":\"", state, sizeof(state));
@@ -774,7 +800,8 @@ static void fetch_weather(int pg, int row)
     char path[96], cond[24] = "", temp[12] = "", hum[8] = "", unit[8] = "", name[32];
     snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
-    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {
+    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) != 200) return;   /* keep the last data */
+    {
         if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
         json_str(r.buf, "\"state\":\"", cond, sizeof(cond));
         if (!strcmp(cond, "unavailable") || !strcmp(cond, "unknown")) cond[0] = 0;
@@ -899,9 +926,11 @@ static void report_icon(int pg, int row, const char *json)
 
 static void use_layout(const ha_layout_t *l)
 {
+    rec_lock();
     if (layout_hash(l) != s_layout_hash) rec_clear();   /* the rows mean something else now */
     s_layout = *l;
     s_layout_hash = layout_hash(l);
+    rec_unlock();
     if (s_layout_cb) s_layout_cb(&s_layout);
     load_icon_rules();
 }
@@ -1311,7 +1340,6 @@ static void ha_task(void *arg)
     /* entity "switch.foo" -> domain "switch" */
     char path[96];
     const char *dot = strchr(HA_THEME_ENTITY, '.');
-    snprintf(path, sizeof(path), "/api/services/%.*s/toggle", (int)(dot - HA_THEME_ENTITY), HA_THEME_ENTITY);
     const char *body = "{\"entity_id\":\"" HA_THEME_ENTITY "\"}";
 
     {   /* start with the cached layout, if any */
@@ -1352,13 +1380,16 @@ static void ha_task(void *arg)
             ok &= st >= 200 && st < 300;
         }
         if (b & ORIENT_BIT) {
-            ESP_LOGI(TAG, "toggle " HA_LANDSCAPE_ENTITY);
-            int st = ha_request(HTTP_METHOD_POST, "/api/services/input_boolean/toggle",
+            bool on = s_set_landscape;
+            ESP_LOGI(TAG, HA_LANDSCAPE_ENTITY " %s", on ? "on" : "off");
+            int st = ha_request(HTTP_METHOD_POST, on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
                                 "{\"entity_id\":\"" HA_LANDSCAPE_ENTITY "\"}", NULL);
             ok &= st >= 200 && st < 300;
         }
         if (b & TOGGLE_BIT) {
-            ESP_LOGI(TAG, "toggle %s", HA_THEME_ENTITY);
+            bool on = s_set_dark;
+            snprintf(path, sizeof(path), "/api/services/%.*s/turn_%s", (int)(dot - HA_THEME_ENTITY), HA_THEME_ENTITY, on ? "on" : "off");
+            ESP_LOGI(TAG, "%s %s", HA_THEME_ENTITY, on ? "on" : "off");
             int st = ha_request(HTTP_METHOD_POST, path, body, NULL);
             ok &= st >= 200 && st < 300;
         }
@@ -1396,15 +1427,30 @@ static void ha_task(void *arg)
         if (b & REFRESH_BIT) ok &= fetched;
         if (updated) {
             ESP_LOGI(TAG, "update %s", ok ? "succeeded" : "FAILED");
-            if (s_done_cb) s_done_cb(ok);
+            if (s_done_cb) s_done_cb(ok, refresh);
         }
         if (s_err_cb) s_err_cb(s_err);
         if (s_busy_cb) s_busy_cb(false);
     }
 }
 
+/* Re-send the last data of every card, the theme and the brightness through the callbacks */
+void ha_client_replay(void)
+{
+    rec_lock();
+    if (s_rec_bri_has && s_brightness_cb) s_brightness_cb(s_rec_bri[0], s_rec_bri[1], s_rec_bri[2]);
+    for (int pg = 0; pg < s_layout.count; pg++)
+        for (int row = 0; row < s_layout.pages[pg].count; row++)
+            for (int t = 0; t < REC_TYPES; t++) {
+                const uint8_t *d = s_rec[pg][row][t];
+                if (d) rec_emit(t, pg, row, d, d + s_rec_len[pg][row][t], s_rec_len[pg][row][t]);
+            }
+    rec_unlock();
+}
+
 void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb, ha_sensor_cb_t scb, ha_graph_cb_t gcb)
 {
+    if (!s_rec_mx) s_rec_mx = xSemaphoreCreateRecursiveMutex();
     s_graph_cb = gcb;
     s_sensor_cb = scb;
     s_done_cb = dcb;
@@ -1437,8 +1483,9 @@ void ha_client_press(int page, int row)
     if (s_events) xEventGroupSetBits(s_events, PRESS_BIT);
 }
 
-void ha_client_toggle(void)
+void ha_client_set_theme(bool dark)
 {
+    s_set_dark = dark;
     if (s_events) xEventGroupSetBits(s_events, TOGGLE_BIT);
 }
 
@@ -1461,7 +1508,8 @@ void ha_client_set_view(const char *path)
     if (s_events) xEventGroupSetBits(s_events, REFRESH_BIT);
 }
 
-void ha_client_toggle_landscape(void)
+void ha_client_set_landscape(bool landscape)
 {
+    s_set_landscape = landscape;
     if (s_events) xEventGroupSetBits(s_events, ORIENT_BIT);
 }

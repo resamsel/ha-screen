@@ -94,6 +94,7 @@ static void ha_icon_changed(int page, int row, const char *icon);
 static void dots_show(void);
 static void show_page(int page);
 static void test_tap(int x, int y);
+static void value_tap(lv_point_t p);
 
 static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
                              const float *pts, int n, int64_t end, int hours, bool zero_based);
@@ -102,9 +103,15 @@ static float nice_ceil(float x);
 static void ha_state_changed(ha_state_t state);
 static void ha_brightness_changed(float value, float min, float max);
 static void slider_cb(lv_event_t *e);
-static void ha_update_done(bool ok);
+static void ha_update_done(bool ok, bool refresh);
 static void ha_errors(const char *errors);
-static bool s_busy = false;
+static bool s_busy = false;   /* a refresh or view change is on its way */
+/* set locally, not yet confirmed by HA: HA's (older) value from a poll is ignored */
+static bool s_theme_pending, s_orient_pending, s_bri_pending;
+static bool s_theme_known;     /* the theme entity's state is known (label shows the action) */
+static bool s_offline_state = true;
+static void apply_theme(void);
+static void ui_refill(void);
 static bool s_swiped = false;   /* this touch became a swipe: buttons ignore its release */
 static bool s_light = false;   /* current theme */
 static int s_boot_page = -1;   /* page saved before the last reboot, until the pages exist */
@@ -2160,11 +2167,6 @@ static void value_select(int g)
 
 static void value_tap(lv_point_t p);
 /* screenshot tool: a tap without a finger */
-static void test_tap(int x, int y)
-{
-    ESP_LOGI(TAG, "test tap %d,%d", x, y);
-    value_tap((lv_point_t){ x, y });
-}
 
 /* A tap on the main screen: select the value under the finger, or none */
 static void value_tap(lv_point_t p)
@@ -2527,12 +2529,7 @@ static void create_ui(void)
     s_refresh_btn = make_button(cp[0], "Connecting...", lv_color_hex(0x5E5E6E));
     lv_obj_align(s_refresh_btn, LV_ALIGN_TOP_MID, s_landscape ? -SCR_W / 4 : 0, s_landscape ? 64 : 44);
     lv_obj_add_event_cb(s_refresh_btn, refresh_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_style_opa(s_refresh_btn, LV_OPA_50, LV_STATE_DISABLED);
 
-    lv_obj_set_style_opa(btn, LV_OPA_50, LV_STATE_DISABLED);
-    lv_obj_set_style_opa(sl, LV_OPA_50, LV_STATE_DISABLED);
-    lv_obj_set_style_opa(s_orient_btn, LV_OPA_50, LV_STATE_DISABLED);
-    lv_obj_set_style_opa(s_view_btn, LV_OPA_50, LV_STATE_DISABLED);
 }
 
 /* Panel colours for the current theme. Must be called with the LVGL lock held. */
@@ -2555,14 +2552,23 @@ static void apply_panel_theme(bool light)
     }
 }
 
-/* While a change is on its way to Home Assistant, the button and slider take no input.
- * Must be called with the LVGL lock held. */
+/* While a refresh or a view change is on its way, the refresh and view buttons take no
+ * input. Theme, orientation and brightness stay usable: they apply at once and are sent
+ * to Home Assistant in the background. Must be called with the LVGL lock held. */
 static void set_busy(bool busy)
 {
     s_busy = busy;
-    lv_obj_t *objs[] = {s_ha_btn, s_slider, s_refresh_btn, s_orient_btn, s_view_btn};
-    for (int i = 0; i < 5; i++) {
+    /* disabled: a muted button with text that stays readable (not just faded out) */
+    lv_color_t bg = lv_color_hex(s_light ? 0xD3D8DF : 0x33383F);
+    lv_color_t fg = lv_color_hex(s_light ? 0x4A5260 : 0xB4BAC4);
+    lv_obj_t *objs[] = {s_refresh_btn, s_view_btn};
+    for (int i = 0; i < 2; i++) {
         if (!objs[i]) continue;
+        lv_obj_set_style_bg_color(objs[i], bg, LV_STATE_DISABLED);
+        lv_obj_set_style_opa(objs[i], LV_OPA_COVER, LV_STATE_DISABLED);
+        lv_obj_set_style_shadow_opa(objs[i], LV_OPA_TRANSP, LV_STATE_DISABLED);
+        lv_obj_set_style_color_filter_opa(objs[i], LV_OPA_TRANSP, LV_STATE_DISABLED);   /* theme's grey-out */
+        lv_obj_set_style_text_color(lv_obj_get_child(objs[i], 0), busy ? fg : lv_color_white(), 0);
         if (busy) lv_obj_add_state(objs[i], LV_STATE_DISABLED);
         else lv_obj_clear_state(objs[i], LV_STATE_DISABLED);
     }
@@ -2659,9 +2665,12 @@ static void show_status(ha_state_t state)
 }
 
 /* Network task: the request finished and the state was re-read */
-static void ha_update_done(bool ok)
+static void ha_update_done(bool ok, bool refresh)
 {
     if (!lvgl_port_lock(0)) return;
+    /* the local changes reached HA (or failed: the next poll brings HA's values back) */
+    s_theme_pending = s_orient_pending = s_bri_pending = false;
+    if (!refresh) { lvgl_port_unlock(); return; }   /* a refresh still on its way stays busy */
     set_busy(false);
     if (s_refreshing) { /* errors show in the panel's error box, not on the buttons */
         s_refreshing = false;
@@ -2702,29 +2711,38 @@ static void refresh_cb(lv_event_t *e)
     ha_client_refresh();
 }
 
-/* The button toggles the Home Assistant entity; the theme follows its state */
+/* Theme button: switch at once, then tell Home Assistant (entity on = dark) */
 static void ha_toggle_cb(lv_event_t *e)
 {
-    if (s_busy || s_swiped) return;
-    set_busy(true);
-    lv_label_set_text(lv_obj_get_child(s_ha_btn, 0), "Updating...");
-    ha_client_toggle();
+    if (s_swiped) return;
+    s_light = !s_light;
+    s_theme_known = true;
+    s_theme_pending = true;           /* HA's old state from a poll under way is ignored */
+    apply_theme();
+    ha_client_set_theme(!s_light);
 }
 
-/* Entity on = dark theme, off = light theme. Offline/error keeps the current theme. */
+/* Entity on = dark theme, off = light theme. Offline/error keeps the current theme;
+ * so does a state read while the button's change is still on its way. */
 static void ha_state_changed(ha_state_t state)
 {
-    const char *text;
-
-    switch (state) {
-    case HA_STATE_ON:  s_light = false; text = "Light mode"; break;
-    case HA_STATE_OFF: s_light = true;  text = "Dark mode";  break;
-    case HA_STATE_ERROR: text = NULL; break; /* keep the label; errors go to the error box */
-    case HA_STATE_UNKNOWN: text = "Unknown state"; break;
-    default: text = NULL; break; /* not connected yet: the refresh button says so */
+    if (!lvgl_port_lock(0)) return;
+    if (!s_theme_pending && (state == HA_STATE_ON || state == HA_STATE_OFF)) {
+        s_light = state == HA_STATE_OFF;
+        s_theme_known = true;
     }
+    if (state == HA_STATE_UNKNOWN && !s_theme_pending) s_theme_known = false;
+    s_offline_state = state == HA_STATE_OFFLINE;
+    apply_theme();
+    show_status(state);
+    lvgl_port_unlock();
+}
 
-    if (!s_ha_btn || !lvgl_port_lock(0)) return;
+/* Colours of the screen and panel for s_light, and the theme button's label.
+ * Must be called with the LVGL lock held. */
+static void apply_theme(void)
+{
+    if (!s_ha_btn) return;
     lv_obj_t *label = lv_obj_get_child(s_ha_btn, 0);
     bool light = s_light;
     /* Light: white background, dark button, darker slider. Dark: black background. */
@@ -2736,11 +2754,10 @@ static void ha_state_changed(ha_state_t state)
     apply_temp_theme(light);
     if (s_orient_btn) lv_obj_set_style_bg_color(s_orient_btn, neutral_btn_color(), 0);
     if (s_view_btn) lv_obj_set_style_bg_color(s_view_btn, neutral_btn_color(), 0);
+    if (s_refresh_btn) lv_obj_set_style_bg_color(s_refresh_btn, neutral_btn_color(), 0);
     if (s_refresh_btn && !s_refreshing) { /* follow theme */
-        lv_obj_set_style_bg_color(s_refresh_btn, neutral_btn_color(), 0);
-        lv_obj_set_style_text_color(lv_obj_get_child(s_refresh_btn, 0), lv_color_white(), 0);
         lv_label_set_text(lv_obj_get_child(s_refresh_btn, 0),
-                          state == HA_STATE_OFFLINE ? "Connecting..." : LV_SYMBOL_REFRESH " Refresh");
+                          s_offline_state ? "Connecting..." : LV_SYMBOL_REFRESH " Refresh");
     }
     if (s_slider) {
         lv_color_t accent = lv_color_hex(light ? 0x0B7FAB : 0x18BCF2);
@@ -2749,9 +2766,8 @@ static void ha_state_changed(ha_state_t state)
         lv_obj_set_style_bg_color(s_slider, accent, LV_PART_INDICATOR);
         lv_obj_set_style_bg_color(s_slider, accent, LV_PART_KNOB);
     }
-    if (text) lv_label_set_text(label, text);
-    show_status(state);
-    lvgl_port_unlock();
+    lv_label_set_text(label, !s_theme_known ? "Theme" : light ? "Dark mode" : "Light mode");
+    set_busy(s_busy);                 /* disabled colours follow the theme */
 }
 
 /* Backlight follows input_number.dev_brightness, mapped from its min..max to
@@ -2772,10 +2788,11 @@ static void ha_brightness_changed(float value, float min, float max)
     ESP_LOGI(TAG, "brightness %.1f (range %.1f-%.1f)", (double)value, (double)min, (double)max);
     s_bri_min = min;
     s_bri_max = max;
-    apply_backlight(value);
+    if (!s_bri_pending) apply_backlight(value);
 
     if (!s_slider || !lvgl_port_lock(0)) return;
-    if (!lv_obj_has_state(s_slider, LV_STATE_PRESSED)) { /* don't fight a drag in progress */
+    /* don't fight a drag in progress, nor a value still on its way to HA */
+    if (!s_bri_pending && !lv_obj_has_state(s_slider, LV_STATE_PRESSED)) {
         lv_slider_set_range(s_slider, (int32_t)min, (int32_t)max);
         lv_slider_set_value(s_slider, (int32_t)(value + 0.5f), LV_ANIM_OFF);
     }
@@ -2787,10 +2804,9 @@ static void slider_cb(lv_event_t *e)
 {
     lv_obj_t *sl = lv_event_get_target(e);
     float v = (float)lv_slider_get_value(sl);
-    if (s_busy) return;
     apply_backlight(v);
     if (lv_event_get_code(e) == LV_EVENT_RELEASED) {
-        set_busy(true);
+        s_bri_pending = true;
         ha_client_set_brightness(v);
     }
 }
@@ -2912,19 +2928,15 @@ static void orient_apply(void *arg)
     apply_rotation();
     create_ui();
     if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
+    ui_refill();
     lv_obj_invalidate(lv_scr_act());
-    /* refill values, theme and graph from HA; the UI unlocks when that finishes */
-    s_refreshing = true;
-    set_busy(true);
-    lv_label_set_text(lv_obj_get_child(s_refresh_btn, 0), "Refreshing...");
-    ha_client_refresh();
 }
 
 /* Network task: orientation entity state */
 static void ha_landscape_changed(bool landscape)
 {
     if (!lvgl_port_lock(0)) return;
-    if (landscape != s_landscape) lv_async_call(orient_apply, (void *)(intptr_t)landscape);
+    if (!s_orient_pending && landscape != s_landscape) lv_async_call(orient_apply, (void *)(intptr_t)landscape);
     lvgl_port_unlock();
 }
 
@@ -3046,12 +3058,24 @@ static void view_cb(lv_event_t *e)
     if (s_cur_view >= 0) lv_obj_scroll_to_view(lv_obj_get_child(box, s_cur_view), LV_ANIM_OFF);
 }
 
+/* After a rebuild: the theme, the refresh/view busy state and the last known values of every
+ * card, instead of empty cards until HA answers again. Must be called with the LVGL lock held. */
+static void ui_refill(void)
+{
+    apply_theme();
+    set_busy(s_busy);
+    if (s_refreshing) lv_label_set_text(lv_obj_get_child(s_refresh_btn, 0), "Refreshing...");
+    ha_client_replay();
+}
+
 /* Orientation button: toggle the HA entity; the layout follows when HA reports it */
 static void orient_cb(lv_event_t *e)
 {
-    if (s_busy || s_swiped) return;
-    set_busy(true);
-    ha_client_toggle_landscape();
+    if (s_swiped) return;
+    bool want = !s_landscape;
+    s_orient_pending = true;          /* HA's old state from a poll under way is ignored */
+    ha_client_set_landscape(want);
+    lv_async_call(orient_apply, (void *)(intptr_t)want);   /* this button is deleted by it */
 }
 
 /* Network task: a new layout from the dashboard (or the NVS cache). Rebuilds the UI right
@@ -3079,6 +3103,20 @@ static void ha_layout_changed(const ha_layout_t *layout)
     memset(s_icon_name, 0, sizeof(s_icon_name));   /* rows changed: HA sends them again */
     create_ui();   /* keeps the current page when it still exists */
     if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
+    ui_refill();
     lv_obj_invalidate(lv_scr_act());
     lvgl_port_unlock();
+}
+
+static void test_tap(int x, int y)
+{
+    ESP_LOGI(TAG, "test tap %d,%d", x, y);
+    if (s_cfg_open) {                     /* config panel: click the object under the point */
+        lv_point_t p = { x, y };
+        lv_obj_t *o = lv_indev_search_obj(s_cfg, &p);
+        while (o && !lv_obj_has_flag(o, LV_OBJ_FLAG_CLICKABLE)) o = lv_obj_get_parent(o);
+        if (o) lv_event_send(o, LV_EVENT_CLICKED, NULL);
+        return;
+    }
+    value_tap((lv_point_t){ x, y });
 }

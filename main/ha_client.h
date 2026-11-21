@@ -17,8 +17,9 @@ typedef void (*ha_state_cb_t)(ha_state_t state);
 /* Called when the brightness entity changes: value and the entity's min/max. */
 typedef void (*ha_brightness_cb_t)(float value, float min, float max);
 
-/* Called after a toggle/set request finished and the state was re-read; ok = HA accepted it. */
-typedef void (*ha_done_cb_t)(bool ok);
+/* Called after a set request or a refresh finished and the state was re-read; ok = HA
+ * accepted it; refresh = this round re-read the dashboard (refresh button, view change). */
+typedef void (*ha_done_cb_t)(bool ok, bool refresh);
 
 /* New main-screen layout (from the dashboard or the NVS cache). The pointer is only valid
  * during the call. Called from the network task before any sensor/graph callback for it. */
@@ -55,7 +56,7 @@ void ha_client_set_error_cb(ha_error_cb_t cb);  /* call before ha_client_start *
 /* Called after every poll with the orientation entity's state (on = landscape). */
 typedef void (*ha_landscape_cb_t)(bool landscape);
 void ha_client_set_landscape_cb(ha_landscape_cb_t cb);  /* call before ha_client_start */
-void ha_client_toggle_landscape(void);
+void ha_client_set_landscape(bool landscape);
 
 /* Picture card (picture-entity): pixels = w*h RGB565 in LVGL's byte order (LV_COLOR_16_SWAP),
  * the whole image scaled to fit w x h of the requested size; name = card name or friendly_name.
@@ -82,7 +83,10 @@ void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint
 
 void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb, ha_sensor_cb_t scb,
                      ha_graph_cb_t gcb);
-void ha_client_toggle(void);
+void ha_client_set_theme(bool dark);   /* theme entity on = dark */
+/* The last data of every card, theme and brightness again through their callbacks (after a
+ * UI rebuild). Any task; the callbacks take the LVGL lock themselves. */
+void ha_client_replay(void);
 void ha_client_set_brightness(float value);
 void ha_client_refresh(void);  /* re-read all entities now; ends with the done callback */
 
