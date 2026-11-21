@@ -138,6 +138,7 @@ static void ha_dashes_changed(const layout_view_t *dashes, int n, int current);
 static layout_view_t s_dashes[LAYOUT_MAX_VIEWS];
 static int s_ndash, s_cur_dash = -1;
 static char s_dash_path[32];          /* chosen dashboard, kept in NVS; "" = HA_DASHBOARD */
+static int s_ha_page = -1;            /* page as HA_PAGE_ENTITY last had it (0-based), -1 unknown */
 static lv_obj_t *s_dash_btn = NULL, *s_dash_caption = NULL;
 static void dash_cb(lv_event_t *e);
 static void dash_btn_update(void);
@@ -180,6 +181,7 @@ static void set_screen_bg(lv_obj_t *scr, bool light)
 }
 static void ha_landscape_changed(bool landscape);
 static void ha_pres_changed(bool on, int secs);
+static void ha_nav_changed(const char *dash, const char *view, int page);
 static lv_obj_t *s_ha_btn = NULL;
 
 
@@ -249,6 +251,7 @@ void app_main(void)
     ha_client_set_icon_cb(ha_icon_changed);
     ha_client_set_views_cb(ha_views_changed);
     ha_client_set_dashboards_cb(ha_dashes_changed);
+    ha_client_set_nav_cb(ha_nav_changed);
     ha_client_set_dashboard(s_dash_path, s_view_path);
     screenshot_start();
     screenshot_set_touch_cb(dots_show);
@@ -1700,6 +1703,11 @@ static void page_save_cb(lv_timer_t *t)
         nvs_commit(nv);
     }
     nvs_close(nv);
+    /* to HA too, but not every slide of presentation mode */
+    if (!s_pres_on && s_page != s_ha_page) {
+        s_ha_page = s_page;
+        ha_client_set_nav(s_dash_path, s_view_path, s_page);
+    }
 }
 
 static void show_page(int page)
@@ -3273,6 +3281,8 @@ static void view_select(int i)
     set_busy(true);
     view_btn_update();
     ha_client_set_view(s_view_path);
+    s_ha_page = 0;
+    ha_client_set_nav(s_dash_path, s_view_path, 0);
 }
 
 static void view_pick_cb(lv_event_t *e) { view_select((int)(intptr_t)lv_event_get_user_data(e)); }
@@ -3392,6 +3402,77 @@ static void dash_select(int i)
     view_btn_update();
     dash_btn_update();
     ha_client_set_dashboard(s_dash_path, s_view_path);
+    s_ha_page = 0;
+    ha_client_set_nav(s_dash_path, s_view_path, 0);
+}
+
+/* Dashboard paths: "" and HA_DASHBOARD are the same one */
+static bool dash_same(const char *a, const char *b)
+{
+    if (!a[0]) a = HA_DASHBOARD;
+    if (!b[0]) b = HA_DASHBOARD;
+    return !strcmp(a, b);
+}
+
+/* HA's dashboard / view / page entities (LVGL task): follow them when they differ */
+static struct { char dash[32], view[32]; bool dash_ok, view_ok; int page; bool queued; } s_nav_in;
+
+static void nav_apply(void *arg);
+static void nav_retry_cb(lv_timer_t *t) { nav_apply(NULL); }
+
+static void nav_apply(void *arg)
+{
+    s_nav_in.queued = false;
+    if (s_view_pending || s_busy) {                /* a change or refresh is under way: later */
+        s_nav_in.queued = true;
+        lv_timer_t *t = lv_timer_create(nav_retry_cb, 1000, NULL);
+        lv_timer_set_repeat_count(t, 1);
+        return;
+    }
+    const char *dash = s_nav_in.dash_ok ? s_nav_in.dash : s_dash_path;
+    const char *view = s_nav_in.view_ok ? s_nav_in.view : s_view_path;
+    int page = s_nav_in.page;
+    if (page >= 0) s_ha_page = page;
+    bool dash_new = !dash_same(dash, s_dash_path);
+    if (dash_new || strcmp(view, s_view_path)) {
+        ESP_LOGI(TAG, "HA: dashboard '%s', view '%s', page %d", dash, view, page + 1);
+        if (dash_new) snprintf(s_dash_path, sizeof(s_dash_path), "%s", dash);
+        snprintf(s_view_path, sizeof(s_view_path), "%s", view);
+        nvs_handle_t nv;
+        if (nvs_open("ui", NVS_READWRITE, &nv) == ESP_OK) {
+            nvs_set_str(nv, "dash", s_dash_path);
+            nvs_set_str(nv, "view", s_view_path);
+            nvs_commit(nv);
+            nvs_close(nv);
+        }
+        if (dash_new) s_cur_dash = -1;
+        s_cur_view = -1;
+        s_view_pending = true;
+        s_boot_page = page >= 0 ? page : -1;      /* applied once the new pages exist */
+        set_busy(true);
+        view_btn_update();
+        dash_btn_update();
+        ha_client_set_dashboard(s_dash_path, s_view_path);
+    } else if (page >= 0 && !PAGE_COUNT) {
+        s_boot_page = page;                        /* no pages yet */
+    } else if (page >= 0 && page != s_page) {
+        ESP_LOGI(TAG, "HA: page %d", page + 1);
+        if (s_pres_on) pres_touch();              /* stay there for a full interval */
+        show_page(page);
+    }
+}
+
+/* Network task */
+static void ha_nav_changed(const char *dash, const char *view, int page)
+{
+    if (!lvgl_port_lock(0)) return;
+    s_nav_in.dash_ok = dash != NULL;
+    s_nav_in.view_ok = view != NULL;
+    snprintf(s_nav_in.dash, sizeof(s_nav_in.dash), "%s", dash ? dash : "");
+    snprintf(s_nav_in.view, sizeof(s_nav_in.view), "%s", view ? view : "");
+    s_nav_in.page = page;
+    if (!s_nav_in.queued) { s_nav_in.queued = true; lv_async_call(nav_apply, NULL); }
+    lvgl_port_unlock();
 }
 
 static void dash_pick_cb(lv_event_t *e) { dash_select((int)(intptr_t)lv_event_get_user_data(e)); }

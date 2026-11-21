@@ -116,3 +116,11 @@ void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb);  /* call before ha_clie
 /* Show this dashboard's views (url_path; "" = HA_DASHBOARD), starting with its view `view`
  * ("" = the first): re-reads the dashboard like ha_client_refresh. */
 void ha_client_set_dashboard(const char *url_path, const char *view);
+
+/* HA_DASH_ENTITY / HA_VIEW_ENTITY / HA_PAGE_ENTITY as read from HA (poll or live): dash and
+ * view NULL when their entity is missing or unavailable, page (0-based) -1 then. Not called
+ * while a write from ha_client_set_nav is under way. */
+typedef void (*ha_nav_cb_t)(const char *dash, const char *view, int page);
+void ha_client_set_nav_cb(ha_nav_cb_t cb);  /* call before ha_client_start */
+/* Writes the shown dashboard, view and page (0-based; -1 = leave the page entity alone) */
+void ha_client_set_nav(const char *dash, const char *view, int page);

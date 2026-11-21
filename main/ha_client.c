@@ -25,6 +25,8 @@ static void add_error(const char *fmt, ...);
 #include "cache_store.h"
 #include "layout_store.h"
 #include "names.h"
+#include "live.h"
+#include "freertos/queue.h"
 #include "rom/tjpgd.h"
 #include "miniz.h"
 
@@ -43,6 +45,9 @@ static const char *TAG = "ha";
 #define PRESS_BIT   BIT5  /* a dashboard button was tapped */
 #define PIC_BIT     BIT6  /* another page is shown: fetch its pictures now */
 #define PRES_BIT    BIT8  /* presentation on/off or interval changed */
+#define LIVE_BIT    BIT9  /* live state events are queued */
+#define NAV_BIT     BIT10 /* dashboard / view / page to write to HA */
+#define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NAV_BIT)
 
 static volatile float s_set_value;
 static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
@@ -91,6 +96,43 @@ static char s_view[32];                   /* view path chosen in the config pane
 static char s_dash[32];                   /* dashboard url_path chosen there, "" = HA_DASHBOARD */
 static ha_dashboards_cb_t s_dashes_cb;
 void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb) { s_dashes_cb = cb; }
+
+/* Dashboard / view / page entities: the last values read (valid flags), and the values to write */
+static ha_nav_cb_t s_nav_cb;
+void ha_client_set_nav_cb(ha_nav_cb_t cb) { s_nav_cb = cb; }
+static char s_nav_dash[32], s_nav_view[32];
+static bool s_nav_dash_ok, s_nav_view_ok;
+static int s_nav_page = -1;
+static char s_wnav_dash[32], s_wnav_view[32];   /* under s_view_lock */
+static int s_wnav_page = -1;
+static volatile bool s_nav_writing;           /* a write is queued: HA's old values are ignored */
+
+static bool json_str(const char *json, const char *key, char *out, size_t n);
+static bool json_num(const char *json, const char *key, float *out);
+
+/* input_text state; false when unknown / unavailable */
+static bool nav_text(const char *json, char *out, size_t n)
+{
+    char st[32];
+    if (!json_str(json, "\"state\":\"", st, sizeof(st)) || !strcmp(st, "unknown") || !strcmp(st, "unavailable"))
+        return false;
+    snprintf(out, n, "%s", st);
+    return true;
+}
+
+/* input_number state, counted from 1 -> 0-based page; -1 when not a number */
+static int nav_page(const char *json)
+{
+    float v;
+    if (!json_num(json, "\"state\":\"", &v) || v < 1 || v > 99) return -1;
+    return (int)(v + 0.5f) - 1;
+}
+
+static void nav_report(void)
+{
+    if (s_nav_cb && !s_nav_writing)
+        s_nav_cb(s_nav_dash_ok ? s_nav_dash : NULL, s_nav_view_ok ? s_nav_view : NULL, s_nav_page);
+}
 
 /* lovelace/dashboards/list result -> dashboards, reported to the UI */
 static void report_dashboards(const char *msg, const char *cur)
@@ -599,6 +641,9 @@ static void cache_replay(void)
 }
 
 static float read_entity(int pg, int row, char text[24], char unit[8], char name[32], bool *got);
+static float parse_entity(int pg, int row, const char *json, char text[24], char unit[8], char name[32]);
+static void parse_button(int pg, int row, const char *json);
+static void parse_weather(int pg, int row, const char *json);
 static void report_icon(int pg, int row, const char *json);
 static void utf8_trim(char *s);
 static void fetch_weather(int pg, int row);
@@ -610,6 +655,22 @@ static void fetch_button(int pg, int row);
 static bool user_waiting(void)
 {
     return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT);
+}
+
+static void parse_brightness(const char *json)
+{
+    float v, mn = 0, mx = 100;
+    if (!json_num(json, "\"state\":\"", &v)) return;
+    json_num(json, "\"min\":", &mn);
+    json_num(json, "\"max\":", &mx);
+    static float lv = -1e9f, lmn, lmx;
+    if ((s_force_report || v != lv || mn != lmn || mx != lmx) && s_brightness_cb) s_brightness_cb(v, mn, mx);
+    if (!s_rec_bri_has || s_rec_bri[0] != v || s_rec_bri[1] != mn || s_rec_bri[2] != mx) {
+        s_rec_bri[0] = v; s_rec_bri[1] = mn; s_rec_bri[2] = mx;
+        s_rec_bri_has = s_rec_dirty = true;
+    }
+    lv = v; lmn = mn; lmx = mx;
+    s_force_report = false;
 }
 
 static bool fetch_state(void)
@@ -646,21 +707,15 @@ static bool fetch_state(void)
     }
 
     /* Brightness: input_number state like "42.0" plus its min/max attributes */
-    if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_BRIGHTNESS_ENTITY, NULL, &r) == 200) {
-        float v, mn = 0, mx = 100;
-        if (json_num(r.buf, "\"state\":\"", &v)) {
-            json_num(r.buf, "\"min\":", &mn);
-            json_num(r.buf, "\"max\":", &mx);
-            static float lv = -1e9f, lmn, lmx;
-            if ((s_force_report || v != lv || mn != lmn || mx != lmx) && s_brightness_cb) s_brightness_cb(v, mn, mx);
-            if (!s_rec_bri_has || s_rec_bri[0] != v || s_rec_bri[1] != mn || s_rec_bri[2] != mx) {
-                s_rec_bri[0] = v; s_rec_bri[1] = mn; s_rec_bri[2] = mx;
-                s_rec_bri_has = s_rec_dirty = true;
-            }
-            lv = v; lmn = mn; lmx = mx;
-            s_force_report = false;
-        }
-    }
+    if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_BRIGHTNESS_ENTITY, NULL, &r) == 200) parse_brightness(r.buf);
+
+    /* Dashboard / view / page */
+    s_nav_dash_ok = ha_request(HTTP_METHOD_GET, "/api/states/" HA_DASH_ENTITY, NULL, &r) == 200 &&
+                    nav_text(r.buf, s_nav_dash, sizeof(s_nav_dash));
+    s_nav_view_ok = ha_request(HTTP_METHOD_GET, "/api/states/" HA_VIEW_ENTITY, NULL, &r) == 200 &&
+                    nav_text(r.buf, s_nav_view, sizeof(s_nav_view));
+    s_nav_page = ha_request(HTTP_METHOD_GET, "/api/states/" HA_PAGE_ENTITY, NULL, &r) == 200 ? nav_page(r.buf) : -1;
+    nav_report();
 
     for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++) {
         for (int i = 0; i < s_layout.pages[pg].count && !user_waiting(); i++) {
@@ -703,20 +758,30 @@ static float read_entity(int pg, int row, char text[24], char unit[8], char name
     snprintf(name, 32, "%.31s", it->name[0] ? it->name : it->entity);
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
     *got = ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200;
-    if (*got) {
-        report_icon(pg, row, r.buf);
-        if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, 32)) utf8_trim(name);
-        json_str(r.buf, "\"unit_of_measurement\":\"", unit, 8);
-        char st[48];
-        if (json_num(r.buf, "\"state\":\"", &v)) {
-            snprintf(text, 24, "%.*f", fabsf(v) < 100 ? 1 : 0, (double)v);   /* 1 decimal below 100 */
-        } else {
-            v = NAN;
-            /* text states ("not_charging" -> "Not charging"); no unit for them */
-            if (json_str(r.buf, "\"state\":\"", st, sizeof(st)) && strcmp(st, "unavailable") && strcmp(st, "unknown")) {
-                state_text(st, text, 24);
-                unit[0] = 0;
-            }
+    if (*got) v = parse_entity(pg, row, r.buf, text, unit, name);
+    return v;
+}
+
+/* The value of row `row` from its /api/states JSON (or the same built from a live event) */
+static float parse_entity(int pg, int row, const char *json, char text[24], char unit[8], char name[32])
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    float v = NAN;
+    strcpy(text, "--");
+    unit[0] = 0;
+    snprintf(name, 32, "%.31s", it->name[0] ? it->name : it->entity);
+    report_icon(pg, row, json);
+    if (!it->name[0] && json_str(json, "\"friendly_name\":\"", name, 32)) utf8_trim(name);
+    json_str(json, "\"unit_of_measurement\":\"", unit, 8);
+    char st[48];
+    if (json_num(json, "\"state\":\"", &v)) {
+        snprintf(text, 24, "%.*f", fabsf(v) < 100 ? 1 : 0, (double)v);   /* 1 decimal below 100 */
+    } else {
+        v = NAN;
+        /* text states ("not_charging" -> "Not charging"); no unit for them */
+        if (json_str(json, "\"state\":\"", st, sizeof(st)) && strcmp(st, "unavailable") && strcmp(st, "unknown")) {
+            state_text(st, text, 24);
+            unit[0] = 0;
         }
     }
     return v;
@@ -778,16 +843,22 @@ static bool is_domain(const char *entity, const char *domain)
 static void fetch_button(int pg, int row)
 {
     static resp_t r;
-    const layout_item_t *it = &s_layout.pages[pg].items[row];
-    char path[96], state[24] = "", name[32];
-    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
-    snprintf(path, sizeof(path), "/api/states/%s", it->entity);
-    ha_btn_state_t bs = HA_BTN_UNAVAILABLE;
+    char path[96];
+    snprintf(path, sizeof(path), "/api/states/%s", s_layout.pages[pg].items[row].entity);
     if (ha_request(HTTP_METHOD_GET, path, NULL, &r) != 200) return;   /* keep the last state */
+    parse_button(pg, row, r.buf);
+}
+
+static void parse_button(int pg, int row, const char *json)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    char state[24] = "", name[32];
+    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    ha_btn_state_t bs = HA_BTN_UNAVAILABLE;
     {
-        report_icon(pg, row, r.buf);
-        if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
-        json_str(r.buf, "\"state\":\"", state, sizeof(state));
+        report_icon(pg, row, json);
+        if (!it->name[0] && json_str(json, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+        json_str(json, "\"state\":\"", state, sizeof(state));
         if (!strcmp(state, "unavailable")) bs = HA_BTN_UNAVAILABLE;
         else if (is_domain(it->entity, "script")) bs = HA_BTN_SCRIPT;
         else if (is_domain(it->entity, "scene")) bs = HA_BTN_SCENE;
@@ -799,6 +870,7 @@ static void fetch_button(int pg, int row)
 }
 
 /* Toggle / run / activate the tapped button's entity */
+static int ha_service(const char *path, const char *body);
 static bool press_button(int pg, int row)
 {
     if (pg < 0 || pg >= s_layout.count || row < 0 || row >= s_layout.pages[pg].count ||
@@ -813,7 +885,7 @@ static bool press_button(int pg, int row)
     char body[96];
     snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", it->entity);
     ESP_LOGI(TAG, "press %s -> %s", it->entity, svc);
-    int st = ha_request(HTTP_METHOD_POST, svc, body, NULL);
+    int st = ha_service(svc, body);
     return st >= 200 && st < 300;
 }
 
@@ -874,20 +946,25 @@ static void fetch_weather(int pg, int row)
 {
     static resp_t r;
     const layout_item_t *it = &s_layout.pages[pg].items[row];
-    char path[96], cond[24] = "", temp[12] = "", hum[8] = "", unit[8] = "", name[32];
-    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    char path[96];
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
     if (ha_request(HTTP_METHOD_GET, path, NULL, &r) != 200) return;   /* keep the last data */
-    {
-        if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
-        json_str(r.buf, "\"state\":\"", cond, sizeof(cond));
-        if (!strcmp(cond, "unavailable") || !strcmp(cond, "unknown")) cond[0] = 0;
-        json_numtext(r.buf, "\"temperature\":", temp, sizeof(temp));
-        json_numtext(r.buf, "\"humidity\":", hum, sizeof(hum));
-        json_str(r.buf, "\"temperature_unit\":\"", unit, sizeof(unit));
-    }
-    emit_weather(pg, row, cond, temp, unit, hum, name);
+    parse_weather(pg, row, r.buf);
     if (it->flags & LAYOUT_WX_FORECAST) fetch_forecast(pg, row);
+}
+
+static void parse_weather(int pg, int row, const char *json)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    char cond[24] = "", temp[12] = "", hum[8] = "", unit[8] = "", name[32];
+    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    if (!it->name[0] && json_str(json, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+    json_str(json, "\"state\":\"", cond, sizeof(cond));
+    if (!strcmp(cond, "unavailable") || !strcmp(cond, "unknown")) cond[0] = 0;
+    json_numtext(json, "\"temperature\":", temp, sizeof(temp));
+    json_numtext(json, "\"humidity\":", hum, sizeof(hum));
+    json_str(json, "\"temperature_unit\":\"", unit, sizeof(unit));
+    emit_weather(pg, row, cond, temp, unit, hum, name);
 }
 
 /* Forecast of a weather card through weather.get_forecasts, on every poll like the rest */
@@ -1445,15 +1522,258 @@ void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint
     memcpy(s_pic_w, w, sizeof(s_pic_w));
     memcpy(s_pic_h, h, sizeof(s_pic_h));
     taskEXIT_CRITICAL(&s_pic_lock);
-    if (s_events) xEventGroupSetBits(s_events, PIC_BIT);
+    bool pics = false;                    /* no pictures here: nothing to fetch (and the */
+    for (int i = 0; i < LAYOUT_MAX_ROWS; i++) pics |= w[i] && h[i];   /* live websocket stays) */
+    if (pics && s_events) xEventGroupSetBits(s_events, PIC_BIT);
+}
+
+
+/* ---- Live updates ------------------------------------------------------------------
+ * Between the HTTP rounds (graph history, pictures, layout; every HA_LIVE_RESYNC_MS) one
+ * websocket stays open with subscribe_entities for the dashboard and settings entities, so
+ * changes show at once. Only one TLS session fits in RAM: the websocket is closed for the
+ * HTTP rounds and opened again after them (the new subscription starts with a full
+ * snapshot, so nothing is missed). Service calls go over the websocket while it's open. */
+static dash_ws_t *s_lws;
+static live_t *s_live;
+static QueueHandle_t s_live_q;
+static volatile bool s_live_lost;      /* an event was dropped: resync over HTTP */
+static int s_lp_on = -1, s_lp_secs;    /* presentation entities, as last received */
+
+/* websocket task: queue the message for the HA task */
+static void live_event(char *msg, void *arg)
+{
+    (void)arg;
+    if (!s_live_q || xQueueSend(s_live_q, &msg, 0) != pdTRUE) { free(msg); s_live_lost = true; }
+    xEventGroupSetBits(s_events, LIVE_BIT);
+}
+
+static void live_stop(void)
+{
+    if (s_lws) {
+        dash_ws_close(s_lws);             /* no more events after this */
+        s_lws = NULL;
+        ESP_LOGI(TAG, "live: closed");
+    }
+    char *m;
+    while (s_live_q && xQueueReceive(s_live_q, &m, 0) == pdTRUE) free(m);
+    live_free(s_live);
+    s_live = NULL;
+    xEventGroupClearBits(s_events, LIVE_BIT);
+}
+
+static bool live_kind(layout_kind_t k)
+{
+    return k == LAYOUT_VALUES || k == LAYOUT_GAUGE || k == LAYOUT_GLANCE || k == LAYOUT_GRAPH ||
+           k == LAYOUT_BUTTONS || k == LAYOUT_WEATHER;
+}
+
+static bool live_start(void)
+{
+    if (s_lws) return true;
+    if (!s_live_q && !(s_live_q = xQueueCreate(16, sizeof(char *)))) return false;
+    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 8];
+    int n = 0;
+    ids[n++] = HA_THEME_ENTITY;
+    ids[n++] = HA_LANDSCAPE_ENTITY;
+    ids[n++] = HA_BRIGHTNESS_ENTITY;
+    ids[n++] = HA_PRES_ENTITY;
+    ids[n++] = HA_PRES_INTERVAL_ENTITY;
+    ids[n++] = HA_DASH_ENTITY;
+    ids[n++] = HA_VIEW_ENTITY;
+    ids[n++] = HA_PAGE_ENTITY;
+    for (int pg = 0; pg < s_layout.count; pg++)
+        for (int i = 0; i < s_layout.pages[pg].count; i++) {
+            const layout_item_t *it = &s_layout.pages[pg].items[i];
+            if (!live_kind(it->kind) || !it->entity[0]) continue;
+            bool dup = false;
+            for (int k = 0; k < n && !dup; k++) dup = !strcmp(ids[k], it->entity);
+            if (!dup) ids[n++] = it->entity;
+        }
+    s_live = live_new(ids, n);
+    char *req = malloc(64 + n * 68);
+    if (!s_live || !req) { free(req); live_stop(); return false; }
+    int w = sprintf(req, "\"type\":\"subscribe_entities\",\"entity_ids\":[");
+    for (int k = 0; k < n; k++) w += sprintf(req + w, "%s\"%s\"", k ? "," : "", ids[k]);
+    strcpy(req + w, "]");
+    if (s_http) {                         /* two TLS sessions at once don't fit in RAM */
+        esp_http_client_cleanup(s_http);
+        s_http = NULL;
+    }
+    s_lws = dash_ws_open();
+    char *res = NULL;
+    if (s_lws) {
+        dash_ws_set_event_cb(s_lws, live_event, NULL);
+        res = dash_ws_call(s_lws, req);
+    }
+    bool ok = res && strstr(res, "\"success\":true");
+    free(res);
+    free(req);
+    if (!ok) { ESP_LOGW(TAG, "live: subscribe failed"); live_stop(); return false; }
+    ESP_LOGI(TAG, "live: %d entities (free %u, largest %u)", n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    return true;
+}
+
+static void live_dispatch(const char *id, const char *json)
+{
+    char st[16] = "";
+    json_str(json, "\"state\":\"", st, sizeof(st));
+    if (!strcmp(id, HA_THEME_ENTITY)) {
+        ha_state_t s = !strcmp(st, "on") ? HA_STATE_ON : !strcmp(st, "off") ? HA_STATE_OFF : HA_STATE_UNKNOWN;
+        if ((s == HA_STATE_ON || s == HA_STATE_OFF) && s != s_rec_theme) { s_rec_theme = s; s_rec_dirty = true; }
+        if (s_state_cb) s_state_cb(s);
+    } else if (!strcmp(id, HA_LANDSCAPE_ENTITY)) {
+        if ((!strcmp(st, "on") || !strcmp(st, "off")) && s_land_cb) s_land_cb(!strcmp(st, "on"));
+    } else if (!strcmp(id, HA_BRIGHTNESS_ENTITY)) {
+        parse_brightness(json);
+    } else if (!strcmp(id, HA_PRES_ENTITY) || !strcmp(id, HA_PRES_INTERVAL_ENTITY)) {
+        float secs;
+        if (!strcmp(id, HA_PRES_ENTITY)) s_lp_on = !strcmp(st, "on") ? 1 : !strcmp(st, "off") ? 0 : s_lp_on;
+        else if (json_num(json, "\"state\":\"", &secs)) s_lp_secs = (int)secs;
+        if (s_lp_on >= 0 && s_pres_cb) s_pres_cb(s_lp_on, s_lp_secs);
+    } else if (!strcmp(id, HA_DASH_ENTITY)) {
+        s_nav_dash_ok = nav_text(json, s_nav_dash, sizeof(s_nav_dash));
+        nav_report();
+    } else if (!strcmp(id, HA_VIEW_ENTITY)) {
+        s_nav_view_ok = nav_text(json, s_nav_view, sizeof(s_nav_view));
+        nav_report();
+    } else if (!strcmp(id, HA_PAGE_ENTITY)) {
+        s_nav_page = nav_page(json);
+        nav_report();
+    }
+    for (int pg = 0; pg < s_layout.count; pg++)
+        for (int i = 0; i < s_layout.pages[pg].count; i++) {
+            const layout_item_t *it = &s_layout.pages[pg].items[i];
+            if (strcmp(it->entity, id) || !live_kind(it->kind)) continue;
+            char text[24], unit[8], name[32];
+            switch (it->kind) {
+            case LAYOUT_BUTTONS: parse_button(pg, i, json); break;
+            case LAYOUT_WEATHER: parse_weather(pg, i, json); break;
+            case LAYOUT_GRAPH:
+                parse_entity(pg, i, json, text, unit, name);
+                emit_graph(pg, i, text, unit, name, NULL, 0, 0, it->hours, !strcmp(unit, "%"));
+                break;
+            default:
+                parse_entity(pg, i, json, text, unit, name);
+                emit_sensor(pg, i, text, unit, name);
+            }
+        }
+}
+
+/* HA task: apply the queued events */
+static void live_drain(void)
+{
+    static char json[512];
+    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 8];
+    char *m;
+    while (s_live_q && xQueueReceive(s_live_q, &m, 0) == pdTRUE) {
+        int n = s_live ? live_apply(s_live, m, ch, sizeof(ch) / sizeof(ch[0])) : 0;
+        free(m);
+        for (int k = 0; k < n; k++)
+            if (live_json(s_live, ch[k], json, sizeof(json))) live_dispatch(live_id(s_live, ch[k]), json);
+    }
+}
+
+/* POST /api/services/<domain>/<service> with body: over the live websocket when it's open */
+static int ha_service(const char *path, const char *body)
+{
+    char dom[32], svc[32];
+    if (dash_ws_alive(s_lws) && sscanf(path, "/api/services/%31[^/]/%31[^?/]", dom, svc) == 2) {
+        char *req = malloc(strlen(body) + 128);
+        if (req) {
+            sprintf(req, "\"type\":\"call_service\",\"domain\":\"%s\",\"service\":\"%s\",\"service_data\":%s", dom, svc, body);
+            char *res = dash_ws_call(s_lws, req);
+            free(req);
+            int st = res && strstr(res, "\"success\":true") ? 200 : res ? 400 : -1;
+            free(res);
+            if (st > 0) return st;
+            ESP_LOGW(TAG, "live: %s failed, using HTTP", path);
+        }
+        live_stop();
+    }
+    return ha_request(HTTP_METHOD_POST, path, body, NULL);
+}
+
+/* Settings and button taps: service calls only. True when all succeeded. */
+static bool do_user(EventBits_t b)
+{
+    char path[96];
+    const char *dot = strchr(HA_THEME_ENTITY, '.');
+    const char *body = "{\"entity_id\":\"" HA_THEME_ENTITY "\"}";
+    bool ok = true;
+    if (b & SETBRI_BIT) {
+        char sb[128];
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_BRIGHTNESS_ENTITY "\",\"value\":%.1f}", (double)s_set_value);
+        ESP_LOGI(TAG, "set brightness %.1f", (double)s_set_value);
+        int st = ha_service("/api/services/input_number/set_value", sb);
+        ok &= st >= 200 && st < 300;
+    }
+    if (b & PRES_BIT) {
+        bool on = s_set_pres_on;
+        char sb[128];
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_PRES_INTERVAL_ENTITY "\",\"value\":%d}", s_set_pres_secs);
+        int st = ha_service("/api/services/input_number/set_value", sb);
+        ok &= st >= 200 && st < 300;
+        st = ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
+                        "{\"entity_id\":\"" HA_PRES_ENTITY "\"}");
+        ok &= st >= 200 && st < 300;
+    }
+    if (b & NAV_BIT) {
+        char d[32], v[32], sb[128];
+        taskENTER_CRITICAL(&s_view_lock);
+        memcpy(d, s_wnav_dash, sizeof(d));
+        memcpy(v, s_wnav_view, sizeof(v));
+        int pg = s_wnav_page;
+        taskEXIT_CRITICAL(&s_view_lock);
+        ESP_LOGI(TAG, "nav: dashboard '%s', view '%s', page %d", d, v, pg + 1);
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_DASH_ENTITY "\",\"value\":\"%s\"}", d);
+        int st = ha_service("/api/services/input_text/set_value", sb);
+        if (st >= 200 && st < 300) { snprintf(s_nav_dash, sizeof(s_nav_dash), "%s", d); s_nav_dash_ok = true; }
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_VIEW_ENTITY "\",\"value\":\"%s\"}", v);
+        st = ha_service("/api/services/input_text/set_value", sb);
+        if (st >= 200 && st < 300) { snprintf(s_nav_view, sizeof(s_nav_view), "%s", v); s_nav_view_ok = true; }
+        if (pg >= 0) {
+            snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_PAGE_ENTITY "\",\"value\":%d}", pg + 1);
+            st = ha_service("/api/services/input_number/set_value", sb);
+            if (st >= 200 && st < 300) s_nav_page = pg;
+        }
+        /* missing helpers (optional) give errors: not a failure of the user's action */
+        if (!(xEventGroupGetBits(s_events) & NAV_BIT)) s_nav_writing = false;
+    }
+    if (b & ORIENT_BIT) {
+        bool on = s_set_landscape;
+        ESP_LOGI(TAG, HA_LANDSCAPE_ENTITY " %s", on ? "on" : "off");
+        int st = ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
+                            "{\"entity_id\":\"" HA_LANDSCAPE_ENTITY "\"}");
+        ok &= st >= 200 && st < 300;
+    }
+    if (b & TOGGLE_BIT) {
+        bool on = s_set_dark;
+        snprintf(path, sizeof(path), "/api/services/%.*s/turn_%s", (int)(dot - HA_THEME_ENTITY), HA_THEME_ENTITY, on ? "on" : "off");
+        ESP_LOGI(TAG, "%s %s", HA_THEME_ENTITY, on ? "on" : "off");
+        int st = ha_service(path, body);
+        ok &= st >= 200 && st < 300;
+    }
+    if (b & PRESS_BIT) {
+        int pg = s_press_page, row = s_press_row;
+        bool pok = press_button(pg, row);
+        if (s_press_cb) s_press_cb(pg, row, pok);
+        vTaskDelay(pdMS_TO_TICKS(300)); /* let HA switch before the state is re-read */
+    }
+    return ok;
+}
+
+static bool has_pictures(void)
+{
+    for (int pg = 0; pg < s_layout.count; pg++)
+        for (int i = 0; i < s_layout.pages[pg].count; i++)
+            if (s_layout.pages[pg].items[i].kind == LAYOUT_PICTURE) return true;
+    return false;
 }
 
 static void ha_task(void *arg)
 {
-    /* entity "switch.foo" -> domain "switch" */
-    char path[96];
-    const char *dot = strchr(HA_THEME_ENTITY, '.');
-    const char *body = "{\"entity_id\":\"" HA_THEME_ENTITY "\"}";
 
     {   /* start with the cached layout, if any */
         if (layout_store_load(&s_scratch)) {
@@ -1461,19 +1781,60 @@ static void ha_task(void *arg)
             cache_replay();               /* the last data, until HA answers */
         }
     }
-    TickType_t layout_at = 0, pic_at = 0;
+    TickType_t layout_at = 0, pic_at = 0, round_at = 0;
     bool layout_read = false;
 
     for (;;) {
         xEventGroupWaitBits(s_events, WIFI_UP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
-        /* wait for a tap, or poll the state every HA_POLL_INTERVAL_MS */
-        EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT | PRESS_BIT | PIC_BIT | PRES_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
+        /* wait for a tap or a live event; poll every HA_POLL_INTERVAL_MS without the live
+         * websocket, else an HTTP round every HA_LIVE_RESYNC_MS (pictures: their interval) */
+        TickType_t wait = pdMS_TO_TICKS(HA_POLL_INTERVAL_MS), now = xTaskGetTickCount();
+        if (s_lws) {                      /* deadlines: live events must not push them back */
+            TickType_t due = round_at + pdMS_TO_TICKS(HA_LIVE_RESYNC_MS);
+            if (has_pictures() && pic_at + pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS) < due) due = pic_at + pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS);
+            wait = (int32_t)(due - now) > 0 ? due - now : 0;
+        }
+        const EventBits_t waited = USER_BITS | WAKE_BIT | REFRESH_BIT | PIC_BIT | LIVE_BIT;
+        EventBits_t b = xEventGroupWaitBits(s_events, waited, pdTRUE, pdFALSE, wait) & waited;   /* not WIFI_UP_BIT */
+        bool timeout = !b;
+        if (s_lws && !timeout) {          /* events came in, but a round may be due anyway */
+            TickType_t t = xTaskGetTickCount();
+            timeout = t - round_at >= pdMS_TO_TICKS(HA_LIVE_RESYNC_MS) ||
+                      (has_pictures() && t - pic_at >= pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS));
+        }
         s_err[0] = 0;
+        if (s_lws && (!dash_ws_alive(s_lws) || s_live_lost)) {
+            ESP_LOGW(TAG, "live: %s, resync over HTTP", s_live_lost ? "events dropped" : "connection lost");
+            s_live_lost = false;
+            live_stop();
+            timeout = true;               /* an HTTP round now */
+        }
+        if (s_lws) {
+            if (b & LIVE_BIT) live_drain();
+            b &= ~LIVE_BIT;
+            if (b & USER_BITS && !(b & ~USER_BITS)) {   /* taps only: over the websocket */
+                bool quiet = b == NAV_BIT;           /* page/view sync: no busy indicator */
+                if (s_busy_cb && !quiet) s_busy_cb(true);
+                bool ok = do_user(b);
+                bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRES_BIT);
+                if (updated && s_done_cb) s_done_cb(ok, false);
+                if (s_err_cb) s_err_cb(s_err);
+                if (s_busy_cb && !quiet) s_busy_cb(false);
+                continue;
+            }
+            if (!b && !timeout) continue;                /* only events */
+            /* due: just the pictures, unless a full round is due */
+            if (!b && xTaskGetTickCount() - round_at < pdMS_TO_TICKS(HA_LIVE_RESYNC_MS)) b = PIC_BIT;
+        }
+        if (s_lws) ESP_LOGI(TAG, "live: HTTP round (bits 0x%x%s)", (unsigned)b, timeout ? ", timeout" : "");
+        live_stop();                      /* HTTP from here: one TLS session at a time */
         if (b == PIC_BIT) {               /* only a page switch: just its pictures */
             fetch_pictures(true);
             pic_at = xTaskGetTickCount();
+            live_start();
             continue;
         }
+        round_at = xTaskGetTickCount();
         if (s_busy_cb) s_busy_cb(true);
         bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
@@ -1485,43 +1846,7 @@ static void ha_task(void *arg)
         }
         bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT);
         bool ok = true;
-        if (b & SETBRI_BIT) {
-            char sb[128];
-            snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_BRIGHTNESS_ENTITY "\",\"value\":%.1f}", (double)s_set_value);
-            ESP_LOGI(TAG, "set brightness %.1f", (double)s_set_value);
-            int st = ha_request(HTTP_METHOD_POST, "/api/services/input_number/set_value", sb, NULL);
-            ok &= st >= 200 && st < 300;
-        }
-        if (b & PRES_BIT) {
-            bool on = s_set_pres_on;
-            char sb[128];
-            snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_PRES_INTERVAL_ENTITY "\",\"value\":%d}", s_set_pres_secs);
-            int st = ha_request(HTTP_METHOD_POST, "/api/services/input_number/set_value", sb, NULL);
-            ok &= st >= 200 && st < 300;
-            st = ha_request(HTTP_METHOD_POST, on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
-                            "{\"entity_id\":\"" HA_PRES_ENTITY "\"}", NULL);
-            ok &= st >= 200 && st < 300;
-        }
-        if (b & ORIENT_BIT) {
-            bool on = s_set_landscape;
-            ESP_LOGI(TAG, HA_LANDSCAPE_ENTITY " %s", on ? "on" : "off");
-            int st = ha_request(HTTP_METHOD_POST, on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
-                                "{\"entity_id\":\"" HA_LANDSCAPE_ENTITY "\"}", NULL);
-            ok &= st >= 200 && st < 300;
-        }
-        if (b & TOGGLE_BIT) {
-            bool on = s_set_dark;
-            snprintf(path, sizeof(path), "/api/services/%.*s/turn_%s", (int)(dot - HA_THEME_ENTITY), HA_THEME_ENTITY, on ? "on" : "off");
-            ESP_LOGI(TAG, "%s %s", HA_THEME_ENTITY, on ? "on" : "off");
-            int st = ha_request(HTTP_METHOD_POST, path, body, NULL);
-            ok &= st >= 200 && st < 300;
-        }
-        if (b & PRESS_BIT) {
-            int pg = s_press_page, row = s_press_row;
-            bool pok = press_button(pg, row);
-            if (s_press_cb) s_press_cb(pg, row, pok);
-            vTaskDelay(pdMS_TO_TICKS(300)); /* let HA switch before the state is re-read */
-        }
+        ok &= do_user(b);
         if (updated) {
             vTaskDelay(pdMS_TO_TICKS(300)); /* give HA a moment to update the state */
             s_force_report = true;         /* resync the UI even if nothing changed */
@@ -1553,6 +1878,7 @@ static void ha_task(void *arg)
             if (s_done_cb) s_done_cb(ok, refresh);
         }
         if (s_err_cb) s_err_cb(s_err);
+        live_start();                     /* back to live updates until the next round */
         if (s_busy_cb) s_busy_cb(false);
     }
 }
@@ -1645,6 +1971,17 @@ void ha_client_set_dashboard(const char *url_path, const char *view)
     snprintf(s_view, sizeof(s_view), "%s", view ? view : "");
     taskEXIT_CRITICAL(&s_view_lock);
     if (s_events) xEventGroupSetBits(s_events, REFRESH_BIT);
+}
+
+void ha_client_set_nav(const char *dash, const char *view, int page)
+{
+    taskENTER_CRITICAL(&s_view_lock);
+    snprintf(s_wnav_dash, sizeof(s_wnav_dash), "%s", dash ? dash : "");
+    snprintf(s_wnav_view, sizeof(s_wnav_view), "%s", view ? view : "");
+    s_wnav_page = page;
+    taskEXIT_CRITICAL(&s_view_lock);
+    s_nav_writing = true;
+    if (s_events) xEventGroupSetBits(s_events, NAV_BIT);
 }
 
 void ha_client_set_landscape(bool landscape)
