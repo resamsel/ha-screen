@@ -72,3 +72,20 @@ docker run --rm -v "$PWD":/project -v ha-screen-build:/build -w /project \
   espressif/idf:v5.3.2 sh -c 'idf.py -B /build build && cp /build/lvgl_example.bin /build/partition_table/partition-table.bin out/'
 esptool --chip esp32c6 -p /dev/cu.usbmodem1101 -b 460800 write-flash 0x8000 out/partition-table.bin 0x10000 out/lvgl_example.bin
 ```
+
+## Tests
+
+Unit tests (host, run in CI):
+
+```bash
+docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.3.2 sh test/run.sh
+```
+
+End-to-end tests against the flashed board over USB (local only; they only read, no setting
+is changed): page switching, the config panel and its pages, the dashboard list, no crash in
+the log.
+
+```bash
+pip install -r test/e2e/requirements.txt
+pytest test/e2e -p no:cacheprovider --port /dev/cu.usbmodem14401
+```

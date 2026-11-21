@@ -76,3 +76,5 @@ dkms.conf
 
 # board screenshots (tools/screenshot.py)
 shots/
+__pycache__/
+.pytest_cache/
