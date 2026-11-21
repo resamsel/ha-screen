@@ -918,6 +918,7 @@ static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, in
 #define FC_SIDE 12                        /* margin left and right of the forecast row */
 #define FC_TOP  8                         /* the current weather sits this much lower with a forecast */
 #define FC_BOTTOM 8                       /* gap below the forecast row */
+#define WX_PAD 6                          /* side padding inside the current-weather block */
 #define WX_SIDE_WIDE 14                   /* extra side margin of a full-width card in landscape */
 #define FC_COLW 44                        /* narrowest forecast column: fewer columns in portrait */
 typedef struct { int n; bool hourly; ha_forecast_t f[HA_FORECAST_MAX]; } wx_fc_t;
@@ -1041,7 +1042,8 @@ static void create_weather(lv_obj_t *page, int pg, int i)
     graph_block(GI(pg, i), &blk);
     int w = lv_area_get_width(&blk) - 2 * CARD_INSET, h = lv_area_get_height(&blk) - 2 * CARD_INSET;
     int side = s_landscape && w >= SCR_W - 2 * CARD_INSET ? WX_SIDE_WIDE : 0;   /* full-width card: more room at the sides */
-    blk.x1 += side;
+    /* the current weather on top sits closer to the sides than the forecast row: 60 % */
+    int side_t = side * 6 / 10, w_t = w - 2 * side_t;
     w -= 2 * side;
     s_fc_box[pg][i] = NULL;
     if ((s_layout.pages[pg].items[i].flags & LAYOUT_WX_FORECAST) && h - FC_H - FC_BOTTOM - FC_TOP >= (w < 240 ? 100 : 64)) {
@@ -1050,18 +1052,19 @@ static void create_weather(lv_obj_t *page, int pg, int i)
         lv_obj_remove_style_all(fb);
         lv_obj_clear_flag(fb, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_size(fb, w, FC_H);
-        lv_obj_set_pos(fb, blk.x1 + CARD_INSET, blk.y1 + CARD_INSET + FC_TOP + h);
+        lv_obj_set_pos(fb, blk.x1 + side + CARD_INSET, blk.y1 + CARD_INSET + FC_TOP + h);
         s_fc_box[pg][i] = fb;
         blk.y1 += FC_TOP;
     }
     lv_obj_t *bg = lv_obj_create(page);   /* invisible container, no card background */
     lv_obj_remove_style_all(bg);
     lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    w = w_t;
     lv_obj_set_size(bg, w, h);
-    lv_obj_set_pos(bg, blk.x1 + CARD_INSET, blk.y1 + CARD_INSET);
+    lv_obj_set_pos(bg, blk.x1 + side_t + CARD_INSET, blk.y1 + CARD_INSET);
     lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light);
     bool stacked = w < 240 && h >= 96;    /* portrait: icon + temperature on top, text below */
-    int S = stacked ? LV_MIN(52, h / 2) : LV_MIN(52, h - 16), pad = 10;
+    int S = stacked ? LV_MIN(52, h / 2) : LV_MIN(52, h - 16), pad = WX_PAD;
 
     lv_obj_t *ic = lv_obj_create(bg);
     lv_obj_remove_style_all(ic);
@@ -1117,7 +1120,7 @@ static void wx_place(int pg, int i)
 {
     lv_obj_t *t = s_wx_temp[pg][i], *u = s_wx_unit[pg][i], *hm = s_wx_hum[pg][i], *bg = lv_obj_get_parent(t);
     lv_obj_update_layout(bg);
-    int w = lv_obj_get_width(bg), h = lv_obj_get_height(bg), pad = 10;
+    int w = lv_obj_get_width(bg), h = lv_obj_get_height(bg), pad = WX_PAD;
     int top = (int)(intptr_t)lv_obj_get_user_data(bg);
     if (top >= 0) {                       /* stacked: centre icon, condition and name (1-2 lines) */
         lv_obj_t *ic = s_wx_icon[pg][i], *c = s_wx_cond[pg][i], *n = s_wx_name[pg][i];
