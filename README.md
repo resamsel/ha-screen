@@ -32,6 +32,20 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD` (the view i
 
 The last good layout is kept in flash, so the board starts with it when HA isn't reachable.
 
+### Dashboard, view and page in HA
+
+The shown dashboard, view and page are synced both ways with three optional helpers (names in
+`main/config.h`); the last change wins, and flash keeps them while HA is unreachable:
+
+| Entity                      | Value                                              |
+|-----------------------------|----------------------------------------------------|
+| `input_text.dev_dashboard`  | dashboard url_path (empty = `HA_DASHBOARD`)        |
+| `input_text.dev_view`       | view path (empty = the first view)                 |
+| `input_number.dev_page`     | page, from 1 (min 1, max 8, step 1)                |
+
+Setting them in HA switches the board; swiping or picking a view on the board writes them.
+The page isn't written while presentation mode is on.
+
 ## Secrets
 
 Wi-Fi credentials and the HA token are read from environment variables **at build time**
