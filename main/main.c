@@ -106,9 +106,11 @@ static void ha_brightness_changed(float value, float min, float max);
 static void slider_cb(lv_event_t *e);
 static void ha_update_done(bool ok, bool refresh);
 static void ha_errors(const char *errors);
-static bool s_busy = false;   /* a refresh or view change is on its way */
+static bool s_busy = false;
+static bool s_pres_on = false;        /* presentation mode (see "Presentation mode") */
+static uint16_t s_pres_secs = 10;   /* a refresh or view change is on its way */
 /* set locally, not yet confirmed by HA: HA's (older) value from a poll is ignored */
-static bool s_theme_pending, s_orient_pending, s_bri_pending;
+static bool s_theme_pending, s_orient_pending, s_bri_pending, s_pres_pending;
 static bool s_theme_known;     /* the theme entity's state is known (label shows the action) */
 static bool s_offline_state = true;
 static void apply_theme(void);
@@ -170,6 +172,7 @@ static void set_screen_bg(lv_obj_t *scr, bool light)
     lv_obj_set_style_bg_img_src(scr, light ? &bg_light : &bg_dark, 0);
 }
 static void ha_landscape_changed(bool landscape);
+static void ha_pres_changed(bool on, int secs);
 static lv_obj_t *s_ha_btn = NULL;
 
 
@@ -209,6 +212,10 @@ void app_main(void)
             if (nvs_get_u8(nv, "page", &page) == ESP_OK) s_boot_page = page;
             size_t vlen = sizeof(s_view_path);
             if (nvs_get_str(nv, "view", s_view_path, &vlen) != ESP_OK) s_view_path[0] = 0;
+            uint8_t pon = 0;
+            if (nvs_get_u8(nv, "pres_on", &pon) == ESP_OK) s_pres_on = pon;
+            nvs_get_u16(nv, "pres_s", &s_pres_secs);
+            if (s_pres_secs < 1) s_pres_secs = 10;
             nvs_close(nv);
         }
         s_landscape = land;
@@ -222,6 +229,7 @@ void app_main(void)
     tzset();
     ha_client_set_error_cb(ha_errors);
     ha_client_set_landscape_cb(ha_landscape_changed);
+    ha_client_set_pres_cb(ha_pres_changed);
     ha_client_set_layout_cb(ha_layout_changed);
     ha_client_set_busy_cb(ha_busy);
     ha_client_set_button_cb(ha_button_changed);
@@ -2306,9 +2314,107 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colo
 static lv_obj_t *s_cfg = NULL;
 static lv_obj_t *s_cfg_title = NULL;
 static lv_obj_t *s_bri_caption = NULL;
-#define CFG_PAGES    3    /* settings (refresh, view), display, errors */
-#define CFG_ERR_PAGE 2
-static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Errors"};
+#define CFG_PAGES    4    /* settings (refresh, view), display, presentation, errors */
+#define CFG_PRES_PAGE 2
+#define CFG_ERR_PAGE 3
+static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Presentation", "Errors"};
+
+/* ---- Presentation mode: cycle through the pages every s_pres_secs, wrapping at the end.
+ * A touch pauses it (PRES_PAUSE_MS after the last touch, or one interval if longer), and it
+ * never advances while the config panel is open. On/off and the interval are kept in NVS. */
+#define PRES_PAUSE_MS 30000
+static const uint16_t PRES_SECS[] = {5, 10, 15, 30, 60, 120, 300};
+static uint32_t s_pres_last;          /* tick of the last advance or touch */
+static lv_timer_t *s_pres_timer;
+static lv_obj_t *s_pres_btn, *s_pres_int_btn, *s_pres_caption;
+static bool s_cfg_open, s_paging, s_dragging;   /* defined below */
+
+static void pres_touch(void) { s_pres_last = lv_tick_get(); }
+
+static void pres_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_pres_on || s_cfg_open || PAGE_COUNT < 2 || s_paging || s_dragging) return;
+    uint32_t wait = (uint32_t)s_pres_secs * 1000;
+    if (lv_tick_elaps(s_pres_last) < wait) return;
+    s_pres_last = lv_tick_get();
+    show_page((s_page + 1) % PAGE_COUNT);
+}
+
+static void pres_save(void)
+{
+    nvs_handle_t nv;
+    if (nvs_open("ui", NVS_READWRITE, &nv) != ESP_OK) return;
+    nvs_set_u8(nv, "pres_on", s_pres_on);
+    nvs_set_u16(nv, "pres_s", s_pres_secs);
+    nvs_commit(nv);
+    nvs_close(nv);
+}
+
+/* A local change: kept in NVS and sent to HA; polls under way don't undo it */
+static void pres_changed(void)
+{
+    pres_save();
+    s_pres_pending = true;
+    ha_client_set_presentation(s_pres_on, s_pres_secs);
+}
+
+static void pres_labels(void)
+{
+    if (s_pres_btn) lv_label_set_text(lv_obj_get_child(s_pres_btn, 0), s_pres_on ? "Stop" : "Start");
+    if (s_pres_int_btn) {
+        char b[24];
+        if (s_pres_secs >= 60) snprintf(b, sizeof(b), "Every %u min", s_pres_secs / 60);
+        else snprintf(b, sizeof(b), "Every %u s", s_pres_secs);
+        lv_label_set_text(lv_obj_get_child(s_pres_int_btn, 0), b);
+    }
+}
+
+static void pres_toggle_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_swiped) return;
+    s_pres_on = !s_pres_on;
+    pres_touch();
+    pres_labels();
+    pres_changed();
+}
+
+static void pres_interval_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_swiped) return;
+    int n = sizeof(PRES_SECS) / sizeof(PRES_SECS[0]), i = 0;
+    while (i < n && PRES_SECS[i] <= s_pres_secs) i++;   /* next step up (HA may hold any value) */
+    s_pres_secs = PRES_SECS[i % n];
+    pres_touch();
+    pres_labels();
+    pres_changed();
+}
+
+/* HA's values (LVGL task, via lv_async_call): packed as secs << 1 | on */
+static void pres_apply(void *arg)
+{
+    int v = (int)(intptr_t)arg;
+    bool on = v & 1;
+    int secs = v >> 1;
+    if (s_pres_pending) return;
+    if (secs < 1) secs = s_pres_secs;
+    if (on == s_pres_on && secs == s_pres_secs) return;
+    if (on && !s_pres_on) pres_touch();
+    s_pres_on = on;
+    s_pres_secs = secs > 3600 ? 3600 : secs;
+    pres_labels();
+    pres_save();
+}
+
+/* Network task: presentation entities' state */
+static void ha_pres_changed(bool on, int secs)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (!s_pres_pending) lv_async_call(pres_apply, (void *)(intptr_t)((secs << 1) | on));
+    lvgl_port_unlock();
+}
 #define NO_ERRORS    "No errors"
 static lv_obj_t *s_err_box = NULL, *s_err_label = NULL;
 static lv_obj_t *s_cfg_strip = NULL, *s_cfg_dot[CFG_PAGES];
@@ -2390,6 +2496,7 @@ static void edge_swipe_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         dots_show();
+        pres_touch();
         s_dragging = s_cfg_open || p.y <= CFG_EDGE;
         s_paging = !s_dragging && s_strip;
         s_drag_start_x = p.x;
@@ -2503,6 +2610,7 @@ static void create_ui(void)
     memset(s_full, 0, sizeof(s_full));
     s_err_box = s_err_label = NULL;
     s_view_btn = s_view_caption = s_view_menu = NULL;
+    s_pres_btn = s_pres_int_btn = s_pres_caption = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -2593,6 +2701,20 @@ static void create_ui(void)
     lv_obj_add_event_cb(sl, slider_cb, LV_EVENT_RELEASED, NULL);
     s_slider = sl;
 
+    /* Presentation page: start/stop, then the interval; one centred column */
+    s_pres_btn = make_button(cp[CFG_PRES_PAGE], "", lv_color_hex(0x5E5E6E));
+    lv_obj_align(s_pres_btn, LV_ALIGN_TOP_MID, s_landscape ? -SCR_W / 4 : 0, s_landscape ? 64 : 44);
+    lv_obj_add_event_cb(s_pres_btn, pres_toggle_cb, LV_EVENT_CLICKED, NULL);
+    s_pres_caption = lv_label_create(cp[CFG_PRES_PAGE]);
+    lv_label_set_text(s_pres_caption, "Next page");
+    lv_obj_set_style_text_font(s_pres_caption, &lv_font_latin_14, 0);
+    s_pres_int_btn = make_button(cp[CFG_PRES_PAGE], "", lv_color_hex(0x5E5E6E));
+    lv_obj_align(s_pres_int_btn, LV_ALIGN_TOP_MID, s_landscape ? SCR_W / 4 : 0, s_landscape ? 64 : 128);
+    lv_obj_align_to(s_pres_caption, s_pres_int_btn, LV_ALIGN_OUT_TOP_LEFT, 0, -4);
+    lv_obj_add_event_cb(s_pres_int_btn, pres_interval_cb, LV_EVENT_CLICKED, NULL);
+    pres_labels();
+    if (!s_pres_timer) { s_pres_timer = lv_timer_create(pres_timer_cb, 1000, NULL); pres_touch(); }
+
     /* Errors page: HA errors from the last poll, scrolls when the text is long */
     lv_coord_t ey = STATUS_H + 6;
     /* A plain, non-clickable clip area: touches pass through to the panel, which scrolls
@@ -2640,6 +2762,7 @@ static void apply_panel_theme(bool light)
     lv_obj_set_style_text_color(s_cfg_title, text, 0);
     lv_obj_set_style_text_color(s_bri_caption, text, 0);
     if (s_view_caption) lv_obj_set_style_text_color(s_view_caption, text, 0);
+    if (s_pres_caption) lv_obj_set_style_text_color(s_pres_caption, text, 0);
     if (s_err_box) {
         bool none = strcmp(lv_label_get_text(s_err_label), NO_ERRORS) == 0;
         lv_obj_set_style_text_color(s_err_label, none ? lv_color_hex(light ? 0x5F6368 : 0x8A8F98)
@@ -2768,7 +2891,7 @@ static void ha_update_done(bool ok, bool refresh)
 {
     if (!lvgl_port_lock(0)) return;
     /* the local changes reached HA (or failed: the next poll brings HA's values back) */
-    s_theme_pending = s_orient_pending = s_bri_pending = false;
+    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = false;
     if (!refresh) { lvgl_port_unlock(); return; }   /* a refresh still on its way stays busy */
     set_busy(false);
     if (s_refreshing) { /* errors show in the panel's error box, not on the buttons */

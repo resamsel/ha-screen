@@ -57,6 +57,11 @@ void ha_client_set_error_cb(ha_error_cb_t cb);  /* call before ha_client_start *
 typedef void (*ha_landscape_cb_t)(bool landscape);
 void ha_client_set_landscape_cb(ha_landscape_cb_t cb);  /* call before ha_client_start */
 void ha_client_set_landscape(bool landscape);
+/* Presentation mode: called after every poll with HA's on/off and interval (seconds; 0 = unknown).
+ * ha_client_set_presentation writes both to HA. */
+typedef void (*ha_pres_cb_t)(bool on, int secs);
+void ha_client_set_pres_cb(ha_pres_cb_t cb);  /* call before ha_client_start */
+void ha_client_set_presentation(bool on, int secs);
 
 /* Picture card (picture-entity): pixels = w*h RGB565 in LVGL's byte order (LV_COLOR_16_SWAP),
  * the whole image scaled to fit w x h of the requested size; name = card name or friendly_name.

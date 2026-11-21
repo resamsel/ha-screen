@@ -42,6 +42,7 @@ static const char *TAG = "ha";
 #define REFRESH_BIT BIT4  /* user asked for a refresh */
 #define PRESS_BIT   BIT5  /* a dashboard button was tapped */
 #define PIC_BIT     BIT6  /* another page is shown: fetch its pictures now */
+#define PRES_BIT    BIT8  /* presentation on/off or interval changed */
 
 static volatile float s_set_value;
 static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
@@ -50,6 +51,10 @@ static EventGroupHandle_t s_events;
 static ha_state_cb_t s_state_cb;
 static ha_landscape_cb_t s_land_cb;
 void ha_client_set_landscape_cb(ha_landscape_cb_t cb) { s_land_cb = cb; }
+static ha_pres_cb_t s_pres_cb;
+void ha_client_set_pres_cb(ha_pres_cb_t cb) { s_pres_cb = cb; }
+static volatile bool s_set_pres_on;
+static volatile int s_set_pres_secs;
 static ha_brightness_cb_t s_brightness_cb;
 static ha_done_cb_t s_done_cb;
 static ha_sensor_cb_t s_sensor_cb;
@@ -592,7 +597,7 @@ static void fetch_button(int pg, int row);
  * stop so it reaches HA at once; they are picked up again on the next poll */
 static bool user_waiting(void)
 {
-    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT);
+    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT);
 }
 
 static bool fetch_state(void)
@@ -613,6 +618,19 @@ static bool fetch_state(void)
         bool on = strstr(r.buf, "\"state\":\"on\"") != NULL;
         bool off = strstr(r.buf, "\"state\":\"off\"") != NULL;
         if ((on || off) && s_land_cb) s_land_cb(on);
+    }
+
+    /* Presentation mode: on/off and seconds per page */
+    {
+        int pon = -1;
+        float secs = 0;
+        if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_PRES_ENTITY, NULL, &r) == 200) {
+            if (strstr(r.buf, "\"state\":\"on\"")) pon = 1;
+            else if (strstr(r.buf, "\"state\":\"off\"")) pon = 0;
+        }
+        if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_PRES_INTERVAL_ENTITY, NULL, &r) == 200)
+            json_num(r.buf, "\"state\":\"", &secs);
+        if (pon >= 0 && s_pres_cb) s_pres_cb(pon, (int)secs);
     }
 
     /* Brightness: input_number state like "42.0" plus its min/max attributes */
@@ -1433,7 +1451,7 @@ static void ha_task(void *arg)
     for (;;) {
         xEventGroupWaitBits(s_events, WIFI_UP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
         /* wait for a tap, or poll the state every HA_POLL_INTERVAL_MS */
-        EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT | PRESS_BIT | PIC_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
+        EventBits_t b = xEventGroupWaitBits(s_events, TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | WAKE_BIT | REFRESH_BIT | PRESS_BIT | PIC_BIT | PRES_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(HA_POLL_INTERVAL_MS));
         s_err[0] = 0;
         if (b == PIC_BIT) {               /* only a page switch: just its pictures */
             fetch_pictures(true);
@@ -1441,7 +1459,7 @@ static void ha_task(void *arg)
             continue;
         }
         if (s_busy_cb) s_busy_cb(true);
-        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT);
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
         if (refresh || (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)))) {
@@ -1449,13 +1467,23 @@ static void ha_task(void *arg)
             layout_at = xTaskGetTickCount();
             layout_read = true;
         }
-        bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT);
+        bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT);
         bool ok = true;
         if (b & SETBRI_BIT) {
             char sb[128];
             snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_BRIGHTNESS_ENTITY "\",\"value\":%.1f}", (double)s_set_value);
             ESP_LOGI(TAG, "set brightness %.1f", (double)s_set_value);
             int st = ha_request(HTTP_METHOD_POST, "/api/services/input_number/set_value", sb, NULL);
+            ok &= st >= 200 && st < 300;
+        }
+        if (b & PRES_BIT) {
+            bool on = s_set_pres_on;
+            char sb[128];
+            snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_PRES_INTERVAL_ENTITY "\",\"value\":%d}", s_set_pres_secs);
+            int st = ha_request(HTTP_METHOD_POST, "/api/services/input_number/set_value", sb, NULL);
+            ok &= st >= 200 && st < 300;
+            st = ha_request(HTTP_METHOD_POST, on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
+                            "{\"entity_id\":\"" HA_PRES_ENTITY "\"}", NULL);
             ok &= st >= 200 && st < 300;
         }
         if (b & ORIENT_BIT) {
@@ -1566,6 +1594,13 @@ void ha_client_set_theme(bool dark)
 {
     s_set_dark = dark;
     if (s_events) xEventGroupSetBits(s_events, TOGGLE_BIT);
+}
+
+void ha_client_set_presentation(bool on, int secs)
+{
+    s_set_pres_on = on;
+    s_set_pres_secs = secs;
+    if (s_events) xEventGroupSetBits(s_events, PRES_BIT);
 }
 
 void ha_client_set_brightness(float value)
