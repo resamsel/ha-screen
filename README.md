@@ -32,19 +32,28 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD` (the view i
 
 The last good layout is kept in flash, so the board starts with it when HA isn't reachable.
 
-### Dashboard, view and page in HA
+### Board name and helpers in HA
 
-The shown dashboard, view and page are synced both ways with three optional helpers (names in
-`main/config.h`); the last change wins, and flash keeps them while HA is unreachable:
+Each board gets an ID from its MAC, e.g. `screen_a1b2c3`. Create the text helper
+`input_text.screen_a1b2c3` and set it to the board's name (e.g. `kitchen`; slugified like HA
+object IDs). Until it is set, the board shows a setup screen with the helper to create. The
+name prefixes the board's own helpers, all optional:
 
-| Entity                      | Value                                              |
-|-----------------------------|----------------------------------------------------|
-| `input_text.dev_dashboard`  | dashboard url_path (empty = `HA_DASHBOARD`)        |
-| `input_text.dev_view`       | view path (empty = the first view)                 |
-| `input_number.dev_page`     | page, from 1 (min 1, max 8, step 1)                |
+| Entity (name `kitchen`)                     | Value                                         |
+|---------------------------------------------|-----------------------------------------------|
+| `input_boolean.kitchen_theme`               | on = dark theme, off = light                  |
+| `input_boolean.kitchen_landscape`           | on = landscape, off = portrait                |
+| `input_boolean.kitchen_presentation`        | presentation mode on/off                      |
+| `input_number.kitchen_presentation_interval`| seconds per page                              |
+| `input_number.kitchen_brightness`           | backlight (uses the entity's min/max)         |
+| `input_text.kitchen_dashboard`              | dashboard url_path (empty = `HA_DASHBOARD`)   |
+| `input_text.kitchen_view`                   | view path (empty = the first view)            |
+| `input_number.kitchen_page`                 | page, from 1 (min 1, max 8, step 1)           |
 
-Setting them in HA switches the board; swiping or picking a view on the board writes them.
-The page isn't written while presentation mode is on.
+Renaming the board in HA switches it to the new helpers right away; the last name is kept in
+flash. Dashboard, view and page are synced both ways (the last change wins): setting them in
+HA switches the board, swiping or picking a view on the board writes them. The page isn't
+written while presentation mode is on. Diagnostics go to `sensor.<name>_*`.
 
 ## Secrets
 

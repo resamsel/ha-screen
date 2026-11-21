@@ -36,6 +36,11 @@ typedef void (*ha_press_cb_t)(int page, int row, bool ok);
 void ha_client_set_press_cb(ha_press_cb_t cb);    /* call before ha_client_start */
 void ha_client_press(int page, int row);
 
+/* Board name (issue #24): name_entity is the helper to create and set while the board has
+ * no name (show the setup screen), NULL once named; name = the board's name or "" */
+typedef void (*ha_setup_cb_t)(const char *name_entity, const char *name);
+void ha_client_set_setup_cb(ha_setup_cb_t cb);  /* call before ha_client_start */
+
 /* true while the network task talks to HA (a poll, a tap, the dashboard check), then false */
 typedef void (*ha_busy_cb_t)(bool busy);
 void ha_client_set_busy_cb(ha_busy_cb_t cb);      /* call before ha_client_start */
@@ -117,7 +122,7 @@ void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb);  /* call before ha_clie
  * ("" = the first): re-reads the dashboard like ha_client_refresh. */
 void ha_client_set_dashboard(const char *url_path, const char *view);
 
-/* HA_DASH_ENTITY / HA_VIEW_ENTITY / HA_PAGE_ENTITY as read from HA (poll or live): dash and
+/* The dashboard / view / page helpers as read from HA (poll or live): dash and
  * view NULL when their entity is missing or unavailable, page (0-based) -1 then. Not called
  * while a write from ha_client_set_nav is under way. */
 typedef void (*ha_nav_cb_t)(const char *dash, const char *view, int page);
