@@ -19,6 +19,10 @@ static void add_error(const char *fmt, ...);
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_app_desc.h"
+#include "esp_system.h"
+#include "esp_mac.h"
+#include "nvs.h"
 #include "ha_client.h"
 #include "dash_fetch.h"
 #include "icon_rule.h"
@@ -381,6 +385,202 @@ static void add_error(const char *fmt, ...)
     va_end(ap);
 }
 
+/* ---- Board name (issue #24) --------------------------------------------------------
+ * Each board has an ID from its MAC (screen_a1b2c3). The HA helper input_text.<id> holds
+ * the board's name; the name prefixes the board's helpers (kitchen -> input_text.
+ * kitchen_dashboard, ...). Until it's set the setup screen shows the helper to create.
+ * The last name is kept in NVS so a slow HA at boot doesn't bring the setup screen back. */
+static char s_board_id[20];             /* screen_a1b2c3 */
+static char s_name_ent[48];             /* input_text.screen_a1b2c3 */
+static char s_board[32];                /* the name ("" = not set) */
+static volatile bool s_name_changed;    /* live event: the name entity changed */
+static struct {
+    char theme[80], land[80], pres[80], pres_int[80], bri[80], dash[80], view[80], page[80];
+} s_ent;
+static ha_setup_cb_t s_setup_cb;
+void ha_client_set_setup_cb(ha_setup_cb_t cb) { s_setup_cb = cb; }
+
+static void ent_build(void)
+{
+    const char *b = s_board;
+    snprintf(s_ent.theme, 80, "input_boolean.%s_theme", b);
+    snprintf(s_ent.land, 80, "input_boolean.%s_landscape", b);
+    snprintf(s_ent.pres, 80, "input_boolean.%s_presentation", b);
+    snprintf(s_ent.pres_int, 80, "input_number.%s_presentation_interval", b);
+    snprintf(s_ent.bri, 80, "input_number.%s_brightness", b);
+    snprintf(s_ent.dash, 80, "input_text.%s_dashboard", b);
+    snprintf(s_ent.view, 80, "input_text.%s_view", b);
+    snprintf(s_ent.page, 80, "input_number.%s_page", b);
+}
+
+/* Like HA's object IDs: lowercase, runs of anything else become one '_', no '_' at the ends */
+static void board_slug(const char *in, char *out, size_t n)
+{
+    size_t o = 0;
+    for (; *in && o + 1 < n; in++) {
+        char c = *in;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out[o++] = c;
+        else if (o && out[o - 1] != '_') out[o++] = '_';
+    }
+    while (o && out[o - 1] == '_') o--;
+    out[o] = 0;
+}
+
+static void board_report(void)
+{
+    if (s_setup_cb) s_setup_cb(s_board[0] ? NULL : s_name_ent, s_board);
+}
+
+/* New name (already a slug, "" = not set): saved to NVS, helper IDs rebuilt. True if changed. */
+static bool board_set(const char *name)
+{
+    if (!strcmp(name, s_board)) return false;
+    ESP_LOGI(TAG, "board name: '%s' -> '%s'", s_board, name);
+    snprintf(s_board, sizeof(s_board), "%s", name);
+    ent_build();
+    nvs_handle_t h;
+    if (nvs_open("board", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "name", s_board);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    board_report();
+    return true;
+}
+
+static void board_init(void)
+{
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_BASE);
+    snprintf(s_board_id, sizeof(s_board_id), "screen_%02x%02x%02x", mac[3], mac[4], mac[5]);
+    snprintf(s_name_ent, sizeof(s_name_ent), "input_text.%s", s_board_id);
+    nvs_handle_t h;
+    size_t n = sizeof(s_board);
+    if (nvs_open("board", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_str(h, "name", s_board, &n) != ESP_OK) s_board[0] = 0;
+        nvs_close(h);
+    }
+    ent_build();
+    ESP_LOGI(TAG, "board %s, name '%s'", s_board_id, s_board);
+}
+
+/* The name helper's state: a name, "" when set to nothing / unknown / unavailable */
+static void board_parse(const char *json, char *out, size_t n);
+
+/* Read the name from HA. 200 or 404 is an answer (404 = helper not created: no name);
+ * anything else keeps the cached name. True if the name changed. */
+static bool fetch_name(void);
+
+/* ---- Device diagnostics (issue #16): posted to HA as sensor.<board name>_* ---- */
+static const char *diag_name(void) { return s_board[0] ? s_board : s_board_id; }
+static const char *reset_reason_str(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "power_on";
+    case ESP_RST_EXT:       return "external";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "interrupt_watchdog";
+    case ESP_RST_TASK_WDT:  return "task_watchdog";
+    case ESP_RST_WDT:       return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep_sleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    case ESP_RST_EFUSE:     return "efuse";
+    case ESP_RST_PWR_GLITCH: return "power_glitch";
+    case ESP_RST_CPU_LOCKUP: return "cpu_lockup";
+    default:                return "unknown";
+    }
+}
+
+/* Copy src into dst as the inside of a JSON string (quotes, backslashes, control chars) */
+static void json_escape(char *dst, size_t n, const char *src)
+{
+    size_t o = 0;
+    for (; *src && o + 7 < n; src++) {
+        unsigned char c = (unsigned char)*src;
+        if (c == '"' || c == '\\') { dst[o++] = '\\'; dst[o++] = c; }
+        else if (c == '\n') { dst[o++] = '\\'; dst[o++] = 'n'; }
+        else if (c < 0x20) o += snprintf(dst + o, n - o, "\\u%04x", c);
+        else dst[o++] = c;
+    }
+    dst[o] = 0;
+}
+
+static void diag_post(const char *id, const char *body)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "/api/states/sensor.%s_%s", diag_name(), id);
+    static resp_t r;   /* 2 KB: keep it off the task stack */
+    r.len = 0;
+    ha_request(HTTP_METHOD_POST, path, body, &r);
+}
+
+/* A round's errors go to HA's logbook (logbook.log), one entry each, attached to
+ * sensor.<board name>_firmware so a Logbook card on that entity shows them; prefixed with
+ * device name, id (MAC) and firmware. A round with the same errors as the last logged one
+ * is skipped so a lasting problem isn't logged every poll. */
+static void report_errors(void)
+{
+    static char last[sizeof(s_err)], cur[sizeof(s_err)];
+    static char msg[2 * sizeof(s_err)], body[sizeof(msg) + 96];
+    static resp_t r;
+    static char meta[128];
+    if (!s_err[0] || !strcmp(s_err, last)) return;
+    {                              /* device=<name> id=<base MAC> fw=<version> */
+        uint8_t mac[6] = {0};
+        esp_read_mac(mac, ESP_MAC_BASE);
+        snprintf(meta, sizeof(meta), "[device=%s id=%02x%02x%02x%02x%02x%02x fw=%.31s] ", diag_name(),
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], esp_app_get_description()->version);
+    }
+    strcpy(cur, s_err);            /* posting may append to s_err */
+    strcpy(last, cur);
+    for (char *line = strtok(cur, "\n"); line; line = strtok(NULL, "\n")) {
+        char full[sizeof(meta) + sizeof(s_err)];
+        snprintf(full, sizeof(full), "%s%s", meta, line);
+        json_escape(msg, sizeof(msg), full);
+        snprintf(body, sizeof(body), "{\"name\":\"%s error\",\"message\":\"%s\","
+                 "\"entity_id\":\"sensor.%s_firmware\",\"domain\":\"sensor\"}", diag_name(), msg, diag_name());
+        r.len = 0;
+        ha_request(HTTP_METHOD_POST, "/api/services/logbook/log", body, &r);
+    }
+}
+
+static void report_diag(void)
+{
+    char body[512];
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        snprintf(body, sizeof(body), "{\"state\":%d,\"attributes\":{\"friendly_name\":\"%s Wi-Fi signal\","
+                 "\"unit_of_measurement\":\"dBm\",\"device_class\":\"signal_strength\",\"state_class\":\"measurement\","
+                 "\"ssid\":\"%.32s\",\"channel\":%d}}", ap.rssi, diag_name(), (const char *)ap.ssid, ap.primary);
+        diag_post("wifi_rssi", body);
+    }
+    snprintf(body, sizeof(body), "{\"state\":%u,\"attributes\":{\"friendly_name\":\"%s free heap\","
+             "\"unit_of_measurement\":\"B\",\"device_class\":\"data_size\",\"state_class\":\"measurement\","
+             "\"minimum_free\":%u,\"largest_free_block\":%u}}",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT), diag_name(),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    diag_post("free_heap", body);
+    snprintf(body, sizeof(body), "{\"state\":%u,\"attributes\":{\"friendly_name\":\"%s largest free block\","
+             "\"unit_of_measurement\":\"B\",\"device_class\":\"data_size\",\"state_class\":\"measurement\"}}",
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), diag_name());
+    diag_post("largest_free_block", body);
+    snprintf(body, sizeof(body), "{\"state\":%lld,\"attributes\":{\"friendly_name\":\"%s uptime\","
+             "\"unit_of_measurement\":\"s\",\"device_class\":\"duration\",\"state_class\":\"total_increasing\"}}",
+             (long long)(esp_timer_get_time() / 1000000), diag_name());
+    diag_post("uptime", body);
+    const esp_app_desc_t *app = esp_app_get_description();
+    snprintf(body, sizeof(body), "{\"state\":\"%.31s\",\"attributes\":{\"friendly_name\":\"%s firmware\","
+             "\"built\":\"%.15s %.15s\",\"idf\":\"%.31s\",\"reset_reason\":\"%s\"}}",
+             app->version, diag_name(), app->date, app->time, app->idf_ver, reset_reason_str(esp_reset_reason()));
+    diag_post("firmware", body);
+}
+
 /* Find key in JSON text and parse the number right after it */
 static bool json_num(const char *json, const char *key, float *out)
 {
@@ -673,21 +873,50 @@ static void parse_brightness(const char *json)
     s_force_report = false;
 }
 
+static void board_parse(const char *json, char *out, size_t n)
+{
+    char st[64] = "";
+    json_str(json, "\"state\":\"", st, sizeof(st));
+    if (!strcmp(st, "unknown") || !strcmp(st, "unavailable")) st[0] = 0;
+    board_slug(st, out, n);
+}
+
+static bool fetch_name(void)
+{
+    static resp_t r;
+    char path[80], name[32] = "";
+    snprintf(path, sizeof(path), "/api/states/%s", s_name_ent);
+    int st = ha_request(HTTP_METHOD_GET, path, NULL, &r);
+    if (st == 404) s_err[0] = 0;          /* not created yet: the setup screen says so */
+    if (st != 200 && st != 404) return false;
+    if (st == 200) board_parse(r.buf, name, sizeof(name));
+    return board_set(name);
+}
+
+/* GET a board helper; 0 while the board has no name (helpers aren't read then) */
+static int helper_get(const char *id, resp_t *r)
+{
+    if (!s_board[0]) return 0;
+    char path[112];
+    snprintf(path, sizeof(path), "/api/states/%s", id);
+    return ha_request(HTTP_METHOD_GET, path, NULL, r);
+}
+
 static bool fetch_state(void)
 {
     static resp_t r;
-    int st = ha_request(HTTP_METHOD_GET, "/api/states/" HA_THEME_ENTITY, NULL, &r);
+    int st = helper_get(s_ent.theme, &r);
     ha_state_t s = HA_STATE_UNKNOWN;
     if (st == 200) {
         if (strstr(r.buf, "\"state\":\"on\"")) s = HA_STATE_ON;
         else if (strstr(r.buf, "\"state\":\"off\"")) s = HA_STATE_OFF;
-    } else {
+    } else if (st != 0 && st != 404) {   /* no name / helper not created: HA still answered */
         s = HA_STATE_ERROR;
     }
     if ((s == HA_STATE_ON || s == HA_STATE_OFF) && s != s_rec_theme) { s_rec_theme = s; s_rec_dirty = true; }
     if (s_state_cb) s_state_cb(s);
 
-    if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_LANDSCAPE_ENTITY, NULL, &r) == 200) {
+    if (helper_get(s_ent.land, &r) == 200) {
         bool on = strstr(r.buf, "\"state\":\"on\"") != NULL;
         bool off = strstr(r.buf, "\"state\":\"off\"") != NULL;
         if ((on || off) && s_land_cb) s_land_cb(on);
@@ -697,24 +926,24 @@ static bool fetch_state(void)
     {
         int pon = -1;
         float secs = 0;
-        if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_PRES_ENTITY, NULL, &r) == 200) {
+        if (helper_get(s_ent.pres, &r) == 200) {
             if (strstr(r.buf, "\"state\":\"on\"")) pon = 1;
             else if (strstr(r.buf, "\"state\":\"off\"")) pon = 0;
         }
-        if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_PRES_INTERVAL_ENTITY, NULL, &r) == 200)
+        if (helper_get(s_ent.pres_int, &r) == 200)
             json_num(r.buf, "\"state\":\"", &secs);
         if (pon >= 0 && s_pres_cb) s_pres_cb(pon, (int)secs);
     }
 
     /* Brightness: input_number state like "42.0" plus its min/max attributes */
-    if (ha_request(HTTP_METHOD_GET, "/api/states/" HA_BRIGHTNESS_ENTITY, NULL, &r) == 200) parse_brightness(r.buf);
+    if (helper_get(s_ent.bri, &r) == 200) parse_brightness(r.buf);
 
     /* Dashboard / view / page */
-    s_nav_dash_ok = ha_request(HTTP_METHOD_GET, "/api/states/" HA_DASH_ENTITY, NULL, &r) == 200 &&
+    s_nav_dash_ok = helper_get(s_ent.dash, &r) == 200 &&
                     nav_text(r.buf, s_nav_dash, sizeof(s_nav_dash));
-    s_nav_view_ok = ha_request(HTTP_METHOD_GET, "/api/states/" HA_VIEW_ENTITY, NULL, &r) == 200 &&
+    s_nav_view_ok = helper_get(s_ent.view, &r) == 200 &&
                     nav_text(r.buf, s_nav_view, sizeof(s_nav_view));
-    s_nav_page = ha_request(HTTP_METHOD_GET, "/api/states/" HA_PAGE_ENTITY, NULL, &r) == 200 ? nav_page(r.buf) : -1;
+    s_nav_page = helper_get(s_ent.page, &r) == 200 ? nav_page(r.buf) : -1;
     nav_report();
 
     for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++) {
@@ -729,7 +958,7 @@ static bool fetch_state(void)
             if (got) emit_sensor(pg, i, text, unit, name);   /* failed: keep the last value */
         }
     }
-    return st == 200;
+    return st == 200 || st == 404 || st == 0;
 }
 
 /* Copies the JSON string value after `key` ("\"key\":\"") into out; false if missing */
@@ -1572,16 +1801,19 @@ static bool live_start(void)
 {
     if (s_lws) return true;
     if (!s_live_q && !(s_live_q = xQueueCreate(16, sizeof(char *)))) return false;
-    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 8];
+    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 9];
     int n = 0;
-    ids[n++] = HA_THEME_ENTITY;
-    ids[n++] = HA_LANDSCAPE_ENTITY;
-    ids[n++] = HA_BRIGHTNESS_ENTITY;
-    ids[n++] = HA_PRES_ENTITY;
-    ids[n++] = HA_PRES_INTERVAL_ENTITY;
-    ids[n++] = HA_DASH_ENTITY;
-    ids[n++] = HA_VIEW_ENTITY;
-    ids[n++] = HA_PAGE_ENTITY;
+    ids[n++] = s_name_ent;
+    if (s_board[0]) {
+        ids[n++] = s_ent.theme;
+        ids[n++] = s_ent.land;
+        ids[n++] = s_ent.bri;
+        ids[n++] = s_ent.pres;
+        ids[n++] = s_ent.pres_int;
+        ids[n++] = s_ent.dash;
+        ids[n++] = s_ent.view;
+        ids[n++] = s_ent.page;
+    }
     for (int pg = 0; pg < s_layout.count; pg++)
         for (int i = 0; i < s_layout.pages[pg].count; i++) {
             const layout_item_t *it = &s_layout.pages[pg].items[i];
@@ -1591,7 +1823,7 @@ static bool live_start(void)
             if (!dup) ids[n++] = it->entity;
         }
     s_live = live_new(ids, n);
-    char *req = malloc(64 + n * 68);
+    char *req = malloc(64 + n * 84);
     if (!s_live || !req) { free(req); live_stop(); return false; }
     int w = sprintf(req, "\"type\":\"subscribe_entities\",\"entity_ids\":[");
     for (int k = 0; k < n; k++) w += sprintf(req + w, "%s\"%s\"", k ? "," : "", ids[k]);
@@ -1619,26 +1851,37 @@ static void live_dispatch(const char *id, const char *json)
 {
     char st[16] = "";
     json_str(json, "\"state\":\"", st, sizeof(st));
-    if (!strcmp(id, HA_THEME_ENTITY)) {
+    if (!strcmp(id, s_name_ent)) {
+        char name[32];
+        board_parse(json, name, sizeof(name));
+        if (strcmp(name, s_board)) {      /* new prefix: an HTTP round resubscribes */
+            s_name_changed = true;
+            xEventGroupSetBits(s_events, REFRESH_BIT);
+        }
+        return;
+    }
+    if (!s_board[0]) {
+        /* no helpers subscribed */
+    } else if (!strcmp(id, s_ent.theme)) {
         ha_state_t s = !strcmp(st, "on") ? HA_STATE_ON : !strcmp(st, "off") ? HA_STATE_OFF : HA_STATE_UNKNOWN;
         if ((s == HA_STATE_ON || s == HA_STATE_OFF) && s != s_rec_theme) { s_rec_theme = s; s_rec_dirty = true; }
         if (s_state_cb) s_state_cb(s);
-    } else if (!strcmp(id, HA_LANDSCAPE_ENTITY)) {
+    } else if (!strcmp(id, s_ent.land)) {
         if ((!strcmp(st, "on") || !strcmp(st, "off")) && s_land_cb) s_land_cb(!strcmp(st, "on"));
-    } else if (!strcmp(id, HA_BRIGHTNESS_ENTITY)) {
+    } else if (!strcmp(id, s_ent.bri)) {
         parse_brightness(json);
-    } else if (!strcmp(id, HA_PRES_ENTITY) || !strcmp(id, HA_PRES_INTERVAL_ENTITY)) {
+    } else if (!strcmp(id, s_ent.pres) || !strcmp(id, s_ent.pres_int)) {
         float secs;
-        if (!strcmp(id, HA_PRES_ENTITY)) s_lp_on = !strcmp(st, "on") ? 1 : !strcmp(st, "off") ? 0 : s_lp_on;
+        if (!strcmp(id, s_ent.pres)) s_lp_on = !strcmp(st, "on") ? 1 : !strcmp(st, "off") ? 0 : s_lp_on;
         else if (json_num(json, "\"state\":\"", &secs)) s_lp_secs = (int)secs;
         if (s_lp_on >= 0 && s_pres_cb) s_pres_cb(s_lp_on, s_lp_secs);
-    } else if (!strcmp(id, HA_DASH_ENTITY)) {
+    } else if (!strcmp(id, s_ent.dash)) {
         s_nav_dash_ok = nav_text(json, s_nav_dash, sizeof(s_nav_dash));
         nav_report();
-    } else if (!strcmp(id, HA_VIEW_ENTITY)) {
+    } else if (!strcmp(id, s_ent.view)) {
         s_nav_view_ok = nav_text(json, s_nav_view, sizeof(s_nav_view));
         nav_report();
-    } else if (!strcmp(id, HA_PAGE_ENTITY)) {
+    } else if (!strcmp(id, s_ent.page)) {
         s_nav_page = nav_page(json);
         nav_report();
     }
@@ -1665,7 +1908,7 @@ static void live_dispatch(const char *id, const char *json)
 static void live_drain(void)
 {
     static char json[512];
-    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 8];
+    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 9];
     char *m;
     while (s_live_q && xQueueReceive(s_live_q, &m, 0) == pdTRUE) {
         int n = s_live ? live_apply(s_live, m, ch, sizeof(ch) / sizeof(ch[0])) : 0;
@@ -1699,42 +1942,47 @@ static int ha_service(const char *path, const char *body)
 static bool do_user(EventBits_t b)
 {
     char path[96];
-    const char *dot = strchr(HA_THEME_ENTITY, '.');
-    const char *body = "{\"entity_id\":\"" HA_THEME_ENTITY "\"}";
+    char body[128];
+    snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", s_ent.theme);
     bool ok = true;
+    if (!s_board[0]) {                    /* no name: no helpers to write */
+        b &= ~(SETBRI_BIT | PRES_BIT | NAV_BIT | ORIENT_BIT | TOGGLE_BIT);
+        s_nav_writing = false;
+    }
     if (b & SETBRI_BIT) {
-        char sb[128];
-        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_BRIGHTNESS_ENTITY "\",\"value\":%.1f}", (double)s_set_value);
+        char sb[160];
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%.1f}", s_ent.bri, (double)s_set_value);
         ESP_LOGI(TAG, "set brightness %.1f", (double)s_set_value);
         int st = ha_service("/api/services/input_number/set_value", sb);
         ok &= st >= 200 && st < 300;
     }
     if (b & PRES_BIT) {
         bool on = s_set_pres_on;
-        char sb[128];
-        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_PRES_INTERVAL_ENTITY "\",\"value\":%d}", s_set_pres_secs);
+        char sb[160], pb[128];
+        snprintf(pb, sizeof(pb), "{\"entity_id\":\"%s\"}", s_ent.pres);
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%d}", s_ent.pres_int, s_set_pres_secs);
         int st = ha_service("/api/services/input_number/set_value", sb);
         ok &= st >= 200 && st < 300;
         st = ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
-                        "{\"entity_id\":\"" HA_PRES_ENTITY "\"}");
+                        pb);
         ok &= st >= 200 && st < 300;
     }
     if (b & NAV_BIT) {
-        char d[32], v[32], sb[128];
+        char d[32], v[32], sb[160];
         taskENTER_CRITICAL(&s_view_lock);
         memcpy(d, s_wnav_dash, sizeof(d));
         memcpy(v, s_wnav_view, sizeof(v));
         int pg = s_wnav_page;
         taskEXIT_CRITICAL(&s_view_lock);
         ESP_LOGI(TAG, "nav: dashboard '%s', view '%s', page %d", d, v, pg + 1);
-        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_DASH_ENTITY "\",\"value\":\"%s\"}", d);
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":\"%s\"}", s_ent.dash, d);
         int st = ha_service("/api/services/input_text/set_value", sb);
         if (st >= 200 && st < 300) { snprintf(s_nav_dash, sizeof(s_nav_dash), "%s", d); s_nav_dash_ok = true; }
-        snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_VIEW_ENTITY "\",\"value\":\"%s\"}", v);
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":\"%s\"}", s_ent.view, v);
         st = ha_service("/api/services/input_text/set_value", sb);
         if (st >= 200 && st < 300) { snprintf(s_nav_view, sizeof(s_nav_view), "%s", v); s_nav_view_ok = true; }
         if (pg >= 0) {
-            snprintf(sb, sizeof(sb), "{\"entity_id\":\"" HA_PAGE_ENTITY "\",\"value\":%d}", pg + 1);
+            snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%d}", s_ent.page, pg + 1);
             st = ha_service("/api/services/input_number/set_value", sb);
             if (st >= 200 && st < 300) s_nav_page = pg;
         }
@@ -1743,15 +1991,17 @@ static bool do_user(EventBits_t b)
     }
     if (b & ORIENT_BIT) {
         bool on = s_set_landscape;
-        ESP_LOGI(TAG, HA_LANDSCAPE_ENTITY " %s", on ? "on" : "off");
-        int st = ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
-                            "{\"entity_id\":\"" HA_LANDSCAPE_ENTITY "\"}");
+        char lb[128];
+        snprintf(lb, sizeof(lb), "{\"entity_id\":\"%s\"}", s_ent.land);
+        ESP_LOGI(TAG, "%s %s", s_ent.land, on ? "on" : "off");
+        int st = ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off", lb);
         ok &= st >= 200 && st < 300;
     }
     if (b & TOGGLE_BIT) {
         bool on = s_set_dark;
-        snprintf(path, sizeof(path), "/api/services/%.*s/turn_%s", (int)(dot - HA_THEME_ENTITY), HA_THEME_ENTITY, on ? "on" : "off");
-        ESP_LOGI(TAG, "%s %s", HA_THEME_ENTITY, on ? "on" : "off");
+        const char *dot = strchr(s_ent.theme, '.');
+        snprintf(path, sizeof(path), "/api/services/%.*s/turn_%s", (int)(dot - s_ent.theme), s_ent.theme, on ? "on" : "off");
+        ESP_LOGI(TAG, "%s %s", s_ent.theme, on ? "on" : "off");
         int st = ha_service(path, body);
         ok &= st >= 200 && st < 300;
     }
@@ -1774,6 +2024,7 @@ static bool has_pictures(void)
 
 static void ha_task(void *arg)
 {
+    board_report();                       /* the cached name, or the setup screen */
 
     {   /* start with the cached layout, if any */
         if (layout_store_load(&s_scratch)) {
@@ -1853,6 +2104,8 @@ static void ha_task(void *arg)
             s_force_report = true;         /* resync the UI even if nothing changed */
         }
         if (s_icon_rules_pending) load_icon_rules();
+        s_name_changed = false;
+        if (fetch_name()) s_force_report = true;   /* new helpers: show their values */
         bool fetched = fetch_state();
         {   /* card data to flash: a minute after start, then at most every HA_CACHE_INTERVAL_MS */
             static TickType_t saved_at;
@@ -1863,6 +2116,16 @@ static void ha_task(void *arg)
                 cache_save();
                 saved = true;
                 saved_at = now;
+            }
+        }
+        {   /* device diagnostics: once Wi-Fi is up, then every HA_DIAG_INTERVAL_MS */
+            static TickType_t diag_at;
+            static bool diag_sent;
+            TickType_t now = xTaskGetTickCount();
+            if (fetched && !user_waiting() && (!diag_sent || now - diag_at >= pdMS_TO_TICKS(HA_DIAG_INTERVAL_MS))) {
+                report_diag();
+                diag_sent = true;
+                diag_at = now;
             }
         }
         for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++)
@@ -1878,6 +2141,7 @@ static void ha_task(void *arg)
             ESP_LOGI(TAG, "update %s", ok ? "succeeded" : "FAILED");
             if (s_done_cb) s_done_cb(ok, refresh);
         }
+        if (fetched) report_errors();     /* HA reachable: log this round's errors there */
         if (s_err_cb) s_err_cb(s_err);
         live_start();                     /* back to live updates until the next round */
         if (s_busy_cb && !quiet) s_busy_cb(false);
@@ -1907,6 +2171,7 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
     s_state_cb = cb;
     s_brightness_cb = bcb;
     s_events = xEventGroupCreate();
+    board_init();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());

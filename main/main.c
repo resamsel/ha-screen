@@ -106,6 +106,7 @@ static void ha_brightness_changed(float value, float min, float max);
 static void slider_cb(lv_event_t *e);
 static void ha_update_done(bool ok, bool refresh);
 static void ha_errors(const char *errors);
+static void ha_setup(const char *name_entity, const char *name);
 static bool s_busy = false;
 static bool s_pres_on = false;        /* presentation mode (see "Presentation mode") */
 static uint16_t s_pres_secs = 10;   /* a refresh or view change is on its way */
@@ -138,7 +139,7 @@ static void ha_dashes_changed(const layout_view_t *dashes, int n, int current);
 static layout_view_t s_dashes[LAYOUT_MAX_VIEWS];
 static int s_ndash, s_cur_dash = -1;
 static char s_dash_path[32];          /* chosen dashboard, kept in NVS; "" = HA_DASHBOARD */
-static int s_ha_page = -1;            /* page as HA_PAGE_ENTITY last had it (0-based), -1 unknown */
+static int s_ha_page = -1;            /* page as the page helper last had it (0-based), -1 unknown */
 static lv_obj_t *s_dash_btn = NULL, *s_dash_caption = NULL;
 static void dash_cb(lv_event_t *e);
 static void dash_btn_update(void);
@@ -239,6 +240,7 @@ void app_main(void)
     setenv("TZ", HA_TIMEZONE, 1);   /* for local times on the graph axis */
     tzset();
     ha_client_set_error_cb(ha_errors);
+    ha_client_set_setup_cb(ha_setup);
     ha_client_set_landscape_cb(ha_landscape_changed);
     ha_client_set_pres_cb(ha_pres_changed);
     ha_client_set_layout_cb(ha_layout_changed);
@@ -2974,6 +2976,39 @@ static void ha_update_done(bool ok, bool refresh)
 }
 
 /* Network task: errors from the last poll */
+/* Setup screen (issue #24): while the board has no name, a full-screen note naming the HA
+ * helper to create. Not clickable: taps still reach the screen below. */
+static lv_obj_t *s_setup;
+static void ha_setup(const char *name_entity, const char *name)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (!name_entity) {
+        if (s_setup) { lv_obj_del(s_setup); s_setup = NULL; }
+    } else {
+        if (!s_setup) {
+            s_setup = lv_obj_create(lv_layer_top());
+            lv_obj_remove_style_all(s_setup);
+            lv_obj_set_size(s_setup, LV_PCT(100), LV_PCT(100));
+            lv_obj_set_style_bg_color(s_setup, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(s_setup, LV_OPA_COVER, 0);
+            lv_obj_set_style_pad_all(s_setup, 16, 0);
+            lv_obj_clear_flag(s_setup, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_t *l = lv_label_create(s_setup);
+            lv_obj_set_width(l, LV_PCT(100));
+            lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_color(l, lv_color_white(), 0);
+            lv_obj_set_style_text_font(l, &lv_font_montserrat_22, 0);
+            lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_center(l);
+        }
+        const char *id = strchr(name_entity, '.');
+        lv_label_set_text_fmt(lv_obj_get_child(s_setup, 0),
+                              "Board %s\n\nIn Home Assistant, create the text helper\n%s\nand set it to this board's name.",
+                              id ? id + 1 : name_entity, name_entity);
+    }
+    lvgl_port_unlock();
+}
+
 static void ha_errors(const char *errors)
 {
     if (!s_err_label || !lvgl_port_lock(0)) return;

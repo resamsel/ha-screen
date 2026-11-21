@@ -19,18 +19,15 @@
 #define HA_HTTP_RETRIES      2
 #define HA_HTTP_RETRY_MS     500
 
-/* Toggled by the button; on = dark theme, off = light theme */
-#define HA_THEME_ENTITY      "input_boolean.dev_theme"
-
-/* Screen orientation, toggled in Settings; on = landscape, off = portrait */
-#define HA_LANDSCAPE_ENTITY  "input_boolean.dev_landscape"
-
-/* Presentation mode (config panel page "Presentation"): on/off and the seconds per page */
-#define HA_PRES_ENTITY          "input_boolean.dev_presentation"
-#define HA_PRES_INTERVAL_ENTITY "input_number.dev_presentation_interval"
-
-/* Backlight brightness, shown and set by the slider (uses the entity's min/max) */
-#define HA_BRIGHTNESS_ENTITY "input_number.dev_brightness"
+/* Board helpers (issue #24): each board's ID comes from its MAC (screen_a1b2c3); the HA
+ * helper input_text.<id> holds its name, which prefixes the board's helpers. Name kitchen:
+ *   input_boolean.kitchen_theme         on = dark theme, off = light (the button)
+ *   input_boolean.kitchen_landscape     on = landscape, off = portrait (Settings)
+ *   input_boolean.kitchen_presentation  presentation mode on/off
+ *   input_number.kitchen_presentation_interval  seconds per page
+ *   input_number.kitchen_brightness     backlight (the slider; uses the entity's min/max)
+ *   input_text.kitchen_dashboard / _view, input_number.kitchen_page  (see below)
+ * Until the name is set the board shows a setup screen naming the helper to create. */
 
 /* Dashboard that defines the main-screen pages: each section of the view chosen in the
  * config panel (first page, "View") is one page (tiles = value rows, a line-graph sensor
@@ -42,9 +39,6 @@
  * them when HA is unreachable). Optional: missing or unavailable entities are ignored.
  * input_text: dashboard url_path ("" = HA_DASHBOARD) and view path ("" = the first view);
  * input_number: page, counted from 1 (not written while presentation mode is on). */
-#define HA_DASH_ENTITY        "input_text.dev_dashboard"
-#define HA_VIEW_ENTITY        "input_text.dev_view"
-#define HA_PAGE_ENTITY        "input_number.dev_page"
 
 /* Picture cards (picture-entity, camera.* / image.*): refresh interval while the page is shown */
 #define HA_PICTURE_INTERVAL_MS 60000
@@ -65,3 +59,8 @@
 
 /* Local time zone for the graph's time labels (POSIX TZ string; Vienna = CET/CEST) */
 #define HA_TIMEZONE          "CET-1CEST,M3.5.0,M10.5.0/3"
+
+/* Device diagnostics posted to HA as sensor.<board name>_wifi_rssi, _free_heap,
+ * _largest_free_block, _uptime and _firmware (version, reset reason); errors go to HA's
+ * logbook on sensor.<board name>_firmware (show them with a Logbook card on that entity) */
+#define HA_DIAG_INTERVAL_MS  (5 * 60 * 1000)
