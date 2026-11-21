@@ -1813,13 +1813,11 @@ static void ha_task(void *arg)
             if (b & LIVE_BIT) live_drain();
             b &= ~LIVE_BIT;
             if (b & USER_BITS && !(b & ~USER_BITS)) {   /* taps only: over the websocket */
-                bool quiet = b == NAV_BIT;           /* page/view sync: no busy indicator */
-                if (s_busy_cb && !quiet) s_busy_cb(true);
+                /* no busy indicator: the HA dot stays steady green while live */
                 bool ok = do_user(b);
                 bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRES_BIT);
                 if (updated && s_done_cb) s_done_cb(ok, false);
                 if (s_err_cb) s_err_cb(s_err);
-                if (s_busy_cb && !quiet) s_busy_cb(false);
                 continue;
             }
             if (!b && !timeout) continue;                /* only events */
@@ -1827,6 +1825,9 @@ static void ha_task(void *arg)
             if (!b && xTaskGetTickCount() - round_at < pdMS_TO_TICKS(HA_LIVE_RESYNC_MS)) b = PIC_BIT;
         }
         if (s_lws) ESP_LOGI(TAG, "live: HTTP round (bits 0x%x%s)", (unsigned)b, timeout ? ", timeout" : "");
+        /* a background round between live periods doesn't pulse the HA dot (the data is
+         * current); polling without the websocket, or the refresh button, does */
+        bool quiet = s_lws && !(b & REFRESH_BIT);
         live_stop();                      /* HTTP from here: one TLS session at a time */
         if (b == PIC_BIT) {               /* only a page switch: just its pictures */
             fetch_pictures(true);
@@ -1835,7 +1836,7 @@ static void ha_task(void *arg)
             continue;
         }
         round_at = xTaskGetTickCount();
-        if (s_busy_cb) s_busy_cb(true);
+        if (s_busy_cb && !quiet) s_busy_cb(true);
         bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
@@ -1879,7 +1880,7 @@ static void ha_task(void *arg)
         }
         if (s_err_cb) s_err_cb(s_err);
         live_start();                     /* back to live updates until the next round */
-        if (s_busy_cb) s_busy_cb(false);
+        if (s_busy_cb && !quiet) s_busy_cb(false);
     }
 }
 
