@@ -90,6 +90,10 @@ typedef struct {
 int layout_parse_views(const char *json, const char *view_path, ha_layout_t *out,
                        layout_view_t *views, int max, int *nviews, char chosen[32]);
 
+/* lovelace/dashboards/list result message -> dashboards (path = url_path, title, else the
+ * path), up to max. *current = index of url_path `cur` (-1 if not listed). Returns the count. */
+int layout_parse_dashboards(const char *msg, const char *cur, layout_view_t *out, int max, int *current);
+
 /* FNV-1a over the whole struct; layouts from layout_parse compare equal when identical. */
 uint32_t layout_hash(const ha_layout_t *l);
 

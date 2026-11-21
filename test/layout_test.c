@@ -399,6 +399,28 @@ static void test_weather(void)
     assert(l.pages[0].items[0].flags == (LAYOUT_WX_FORECAST | LAYOUT_WX_HOURLY));
 }
 
+static void test_dashboards(void)
+{
+    static const char *msg = "{\"id\":2,\"type\":\"result\",\"success\":true,\"result\":["
+        "{\"id\":\"a\",\"url_path\":\"esp32-c6-dev\",\"title\":\"ESP32-C6 Dev\",\"icon\":\"mdi:chip\"},"
+        "{\"id\":\"b\",\"title\":\"No path\"},"
+        "{\"id\":\"c\",\"url_path\":\"health\",\"title\":\"\"},"
+        "{\"id\":\"d\",\"url_path\":\"x\",\"title\":\"A title that is far too long for the field\"}]}";
+    layout_view_t d[LAYOUT_MAX_VIEWS];
+    int cur;
+    int n = layout_parse_dashboards(msg, "health", d, LAYOUT_MAX_VIEWS, &cur);
+    assert(n == 3);                                    /* the one without url_path is skipped */
+    assert(!strcmp(d[0].path, "esp32-c6-dev") && !strcmp(d[0].title, "ESP32-C6 Dev"));
+    assert(!strcmp(d[1].title, "health"));            /* empty title: the path */
+    assert(cur == 1);
+    assert(strlen(d[2].title) == sizeof(d[2].title) - 1);   /* cut, terminated */
+    assert(layout_parse_dashboards(msg, "nope", d, LAYOUT_MAX_VIEWS, &cur) == 3 && cur == -1);
+    assert(layout_parse_dashboards(msg, NULL, d, 2, &cur) == 2);   /* max */
+    assert(layout_parse_dashboards("not json", "", d, 8, &cur) == 0 && cur == -1);
+    assert(layout_parse_dashboards(NULL, "", d, 8, &cur) == 0);
+    assert(layout_parse_dashboards("{\"result\":{}}", "", d, 8, &cur) == 0);
+}
+
 int main(void)
 {
     test_picture();
@@ -423,6 +445,7 @@ int main(void)
     test_bad_input();
     test_hash();
     test_filter();
+    test_dashboards();
     puts("all layout tests passed");
     return 0;
 }

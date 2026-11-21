@@ -16,8 +16,22 @@ static const char *PING =
     "{\"id\":5,\"type\":\"result\",\"result\":{\"resources\":{\"ping\":{\"binary_sensor\":{\"loss\":{\"default\":\"wrong\"}},"
     "\"sensor\":{\"loss\":{\"default\":\"mdi:alert-circle-outline\"}}}}}}";
 
+static void test_json_helpers(void)
+{
+    char s[16];
+    const char *o = "{\"a\":{\"b\":\"inner\"},\"b\":\"outer\",\"n\":5,\"e\":\"x\\\"y\"}";
+    assert(json_get_str(json_obj_get(o, "b"), s, sizeof(s)) && !strcmp(s, "outer"));   /* not the nested one */
+    assert(json_obj_get(o, "n") && *json_obj_get(o, "n") == '5');
+    assert(!json_get_str(json_obj_get(o, "n"), s, sizeof(s)));                         /* not a string */
+    assert(!json_obj_get(o, "missing"));
+    assert(!json_obj_get(NULL, "b"));
+    assert(!json_get_str(NULL, s, sizeof(s)));
+    assert(json_get_str("\"abcdefghijklmnopqrstuvwxyz\"", s, 8) && strlen(s) == 7);   /* cut to fit */
+}
+
 int main(void)
 {
+    test_json_helpers();
     char rule[256], icon[48];
     assert(icon_rule_from_icons(SENSOR, "sensor", NULL, "battery", rule, sizeof(rule)));
     icon_rule_apply(rule, "80", icon, sizeof(icon));   assert(!strcmp(icon, "mdi:battery-80"));
