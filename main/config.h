@@ -9,6 +9,10 @@
  * history), in milliseconds */
 #define HA_POLL_INTERVAL_MS  60000
 
+/* Live updates: between HTTP rounds a websocket subscription delivers state changes at
+ * once; the HTTP round (graph history, layout, a full resync) then runs this often */
+#define HA_LIVE_RESYNC_MS    (5 * 60 * 1000)
+
 /* HTTP requests to HA: timeout per attempt, extra attempts after a failure, and the pause
  * before retry n (n * HA_HTTP_RETRY_MS) */
 #define HA_HTTP_TIMEOUT_MS   5000
@@ -33,6 +37,14 @@
  * card = graph page). Re-read every interval. */
 #define HA_DASHBOARD          "esp32-c6-dev"
 #define HA_LAYOUT_INTERVAL_MS 60000
+
+/* Shown dashboard, view and page, kept in sync both ways (the last change wins; flash keeps
+ * them when HA is unreachable). Optional: missing or unavailable entities are ignored.
+ * input_text: dashboard url_path ("" = HA_DASHBOARD) and view path ("" = the first view);
+ * input_number: page, counted from 1 (not written while presentation mode is on). */
+#define HA_DASH_ENTITY        "input_text.dev_dashboard"
+#define HA_VIEW_ENTITY        "input_text.dev_view"
+#define HA_PAGE_ENTITY        "input_number.dev_page"
 
 /* Picture cards (picture-entity, camera.* / image.*): refresh interval while the page is shown */
 #define HA_PICTURE_INTERVAL_MS 60000

@@ -9,3 +9,5 @@ gcc -std=c11 -Wall -Werror -I main main/names.c main/tz.c test/names_test.c -o /
 /tmp/names_test
 gcc -std=c11 -Wall -Werror -I main main/icon_rule.c test/icon_rule_test.c -o /tmp/icon_rule_test
 /tmp/icon_rule_test
+gcc -std=c11 -Wall -Werror -I main -I $J main/live.c $J/cJSON.c test/live_test.c -lm -o /tmp/live_test
+/tmp/live_test

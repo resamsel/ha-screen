@@ -24,6 +24,8 @@ typedef struct {
     int len;
     int want;       /* id of the request being waited for */
     char *result;   /* its complete result message */
+    dash_event_cb_t ev_cb;
+    void *ev_arg;
 } ctx_t;
 
 struct dash_ws {
@@ -43,6 +45,7 @@ static void on_message(ctx_t *c, char *msg)
     if (strstr(msg, "\"type\":\"auth_required\"")) xEventGroupSetBits(c->ev, AUTH_REQ_BIT);
     else if (strstr(msg, "\"type\":\"auth_ok\"")) xEventGroupSetBits(c->ev, AUTH_OK_BIT);
     else if (strstr(msg, "\"type\":\"auth_invalid\"")) { ESP_LOGW(TAG, "auth rejected"); xEventGroupSetBits(c->ev, FAIL_BIT); }
+    else if (c->ev_cb && strstr(msg, "\"type\":\"event\"")) { c->ev_cb(msg, c->ev_arg); return; }
     else if (!c->result && c->want && msg_id(msg) == c->want) {
         c->result = msg;
         xEventGroupSetBits(c->ev, DONE_BIT);
@@ -130,6 +133,18 @@ char *dash_ws_call(dash_ws_t *d, const char *body)
         wait(&d->c, DONE_BIT, deadline)) { out = d->c.result; d->c.result = NULL; }
     free(req);
     return out;
+}
+
+void dash_ws_set_event_cb(dash_ws_t *d, dash_event_cb_t cb, void *arg)
+{
+    if (!d) return;
+    d->c.ev_arg = arg;
+    d->c.ev_cb = cb;
+}
+
+bool dash_ws_alive(dash_ws_t *d)
+{
+    return d && !(xEventGroupGetBits(d->c.ev) & FAIL_BIT) && esp_websocket_client_is_connected(d->ws);
 }
 
 void dash_ws_close(dash_ws_t *d)
