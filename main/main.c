@@ -967,6 +967,39 @@ static void wx_sun(lv_obj_t *p, int x, int y, int d)
     lv_obj_set_style_shadow_opa(s, LV_OPA_50, 0);
 }
 
+/* Crescent moon as an S x S 8-bit alpha image (4x4 supersampled): the disc minus a
+ * second disc shifted up and to the right. Kept per size (the icon box and the forecast). */
+static const lv_img_dsc_t *wx_moon(int S)
+{
+    static lv_img_dsc_t dsc[4];
+    static int n;
+    for (int i = 0; i < n; i++) if (dsc[i].header.w == S) return &dsc[i];
+    lv_img_dsc_t *d = &dsc[n < 4 ? n++ : 3];
+    uint8_t *px = (uint8_t *)d->data;
+    px = realloc(px, S * S);
+    if (!px) return d;
+    float c = S / 2.0f, r = S * 0.32f, cx = c + r * 0.42f, cy = c - r * 0.30f, r2 = r * 0.86f;
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            int hit = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    float fx = x + (sx + 0.5f) / 4, fy = y + (sy + 0.5f) / 4;
+                    float d1 = (fx - c) * (fx - c) + (fy - c) * (fy - c);
+                    float d2 = (fx - cx) * (fx - cx) + (fy - cy) * (fy - cy);
+                    hit += d1 <= r * r && d2 > r2 * r2;
+                }
+            px[y * S + x] = (uint8_t)(hit * 255 / 16);
+        }
+    memset(&d->header, 0, sizeof(d->header));
+    d->header.cf = LV_IMG_CF_ALPHA_8BIT;
+    d->header.w = S;
+    d->header.h = S;
+    d->data_size = S * S;
+    d->data = px;
+    return d;
+}
+
 /* Draws the condition's icon into the S x S box p (made of plain shapes, no image data) */
 static void wx_draw_icon(lv_obj_t *p, int S, const char *c)
 {
@@ -977,17 +1010,13 @@ static void wx_draw_icon(lv_obj_t *p, int S, const char *c)
     bool snowy = !strcmp(c, "snowy") || !strcmp(c, "snowy-rainy"), hail = !strcmp(c, "hail");
     bool bolt = !strncmp(c, "lightning", 9), fog = !strcmp(c, "fog");
     if (!strcmp(c, "sunny")) { wx_sun(p, S / 5, S / 5, S * 3 / 5); return; }
-    if (!strcmp(c, "clear-night")) {      /* crescent: thick arc */
-        lv_obj_t *a = lv_arc_create(p);
-        lv_obj_remove_style_all(a);
-        lv_obj_set_size(a, S * 3 / 5, S * 3 / 5);
-        lv_obj_set_pos(a, S / 5, S / 5);
-        lv_arc_set_bg_angles(a, 60, 300);
-        lv_obj_set_style_arc_width(a, S / 6, LV_PART_MAIN);
-        lv_obj_set_style_arc_color(a, lv_color_hex(s_light ? 0xC9A400 : 0xF0E6A8), LV_PART_MAIN);
-        lv_obj_set_style_arc_rounded(a, true, LV_PART_MAIN);
-        lv_obj_set_style_arc_opa(a, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
+    if (!strcmp(c, "clear-night")) {      /* crescent moon (alpha bitmap, tinted) */
+        lv_obj_t *m = lv_img_create(p);
+        lv_img_set_src(m, wx_moon(S));
+        lv_obj_set_pos(m, 0, 0);
+        lv_obj_set_style_img_recolor(m, lv_color_hex(s_light ? 0xC9A400 : 0xF0E6A8), 0);
+        lv_obj_set_style_img_recolor_opa(m, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(m, LV_OBJ_FLAG_CLICKABLE);
         return;
     }
     if (!strncmp(c, "windy", 5)) {
