@@ -53,7 +53,7 @@ static float num(const cJSON *obj, const char *key, float def)
 static bool is_picture(const cJSON *card)
 {
     const char *type = str(card, "type");
-    return type && !strcmp(type, "picture-entity");
+    return type && (!strcmp(type, "picture-entity") || !strcmp(type, "picture-glance"));   /* glance: the image only */
 }
 
 static bool known_part(const char *t)
@@ -85,7 +85,8 @@ static void add_part(layout_item_t *it, const cJSON *part)
 
 static void set_item(layout_item_t *it, const cJSON *card)
 {
-    copy(it->entity, sizeof(it->entity), str(card, "entity"));
+    const char *ent = str(card, "entity");
+    if (ent) copy(it->entity, sizeof(it->entity), ent);   /* picture-glance may have none */
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(card, "name");
     if (cJSON_IsString(name)) {
         copy(it->name, sizeof(it->name), name->valuestring);
@@ -155,7 +156,8 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
             continue;
         }
-        if (!clock && !str(card, "entity")) {   /* a clock shows the board's own time */
+        bool src_only = picture && (str(card, "camera_image") || cJSON_GetObjectItemCaseSensitive(card, "image"));
+        if (!clock && !src_only && !str(card, "entity")) {   /* a clock shows the board's own time; pictures may have only a source */
             LOGW("section %d: card without entity, skipped", idx);
             continue;
         }
@@ -182,10 +184,14 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             const char *ft = str(card, "forecast_type");
             if (ft && !strcmp(ft, "hourly")) it->flags |= LAYOUT_WX_HOURLY;
         }
+        const char *title = picture && !it->name[0] && !it->name_type[0] ? str(card, "title") : NULL;   /* picture-glance */
+        if (title) copy(it->name, sizeof(it->name), title);
+        if (picture && !it->entity[0] && !it->name[0]) it->flags |= LAYOUT_PIC_NO_NAME;   /* nothing to name it by */
         if (picture && cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_name"))) it->flags |= LAYOUT_PIC_NO_NAME;
         const char *fit = picture ? str(card, "fit_mode") : NULL;
         if (fit && !strcmp(fit, "cover")) it->flags |= LAYOUT_PIC_COVER;
         else if (fit && !strcmp(fit, "fill")) it->flags |= LAYOUT_PIC_FILL;
+        else if (!fit && picture && !strcmp(ct, "picture-glance")) it->flags |= LAYOUT_PIC_COVER;   /* HA fills the card with it */
         const char *src = picture ? str(card, "camera_image") : NULL;   /* HA prefers the camera */
         if (picture && !src) src = str(card, "image");
         const cJSON *img = picture && !src ? cJSON_GetObjectItemCaseSensitive(card, "image") : NULL;
@@ -410,7 +416,7 @@ int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t
         layout_page_t pg = l->pages[p];
         int n = 0;
         for (int i = 0; i < pg.count; i++)
-            if (pg.items[i].kind == LAYOUT_CLOCK ||
+            if (pg.items[i].kind == LAYOUT_CLOCK || (pg.items[i].image && !pg.items[i].entity[0]) ||   /* nothing to check */
                 keep(pg.items[i].entity, pg.items[i].image ? LAYOUT_VALUES : pg.items[i].kind, ctx)) pg.items[n++] = pg.items[i];
         for (int i = n; i < LAYOUT_MAX_ROWS; i++) memset(&pg.items[i], 0, sizeof(layout_item_t));
         pg.count = n;
