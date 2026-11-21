@@ -171,6 +171,7 @@ typedef struct { char buf[2048]; int len; } resp_t;
  * handshake (the slow part) happens only once instead of per request. */
 static esp_http_client_handle_t s_http;
 static resp_t *s_resp;
+static resp_t s_rbuf;   /* the one response buffer (2 KB) for the HA task's requests */
 /* Forecast responses are parsed while they stream in (they can be large): each entry
  * object after "forecast":[ is collected and handed to fc_entry */
 static bool s_fc_mode;
@@ -514,9 +515,9 @@ static void diag_post(const char *id, const char *body)
 {
     char path[96];
     snprintf(path, sizeof(path), "/api/states/sensor.%s_%s", diag_name(), id);
-    static resp_t r;   /* 2 KB: keep it off the task stack */
-    r.len = 0;
-    ha_request(HTTP_METHOD_POST, path, body, &r);
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
+    r->len = 0;
+    ha_request(HTTP_METHOD_POST, path, body, r);
 }
 
 /* A round's errors go to HA's logbook (logbook.log), one entry each, attached to
@@ -527,7 +528,7 @@ static void report_errors(void)
 {
     static char last[sizeof(s_err)], cur[sizeof(s_err)];
     static char msg[2 * sizeof(s_err)], body[sizeof(msg) + 96];
-    static resp_t r;
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     static char meta[128];
     if (!s_err[0] || !strcmp(s_err, last)) return;
     {                              /* device=<name> id=<base MAC> fw=<version> */
@@ -544,8 +545,8 @@ static void report_errors(void)
         json_escape(msg, sizeof(msg), full);
         snprintf(body, sizeof(body), "{\"name\":\"%s error\",\"message\":\"%s\","
                  "\"entity_id\":\"sensor.%s_firmware\",\"domain\":\"sensor\"}", diag_name(), msg, diag_name());
-        r.len = 0;
-        ha_request(HTTP_METHOD_POST, "/api/services/logbook/log", body, &r);
+        r->len = 0;
+        ha_request(HTTP_METHOD_POST, "/api/services/logbook/log", body, r);
     }
 }
 
@@ -883,13 +884,13 @@ static void board_parse(const char *json, char *out, size_t n)
 
 static bool fetch_name(void)
 {
-    static resp_t r;
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     char path[80], name[32] = "";
     snprintf(path, sizeof(path), "/api/states/%s", s_name_ent);
-    int st = ha_request(HTTP_METHOD_GET, path, NULL, &r);
+    int st = ha_request(HTTP_METHOD_GET, path, NULL, r);
     if (st == 404) s_err[0] = 0;          /* not created yet: the setup screen says so */
     if (st != 200 && st != 404) return false;
-    if (st == 200) board_parse(r.buf, name, sizeof(name));
+    if (st == 200) board_parse(r->buf, name, sizeof(name));
     return board_set(name);
 }
 
@@ -904,21 +905,21 @@ static int helper_get(const char *id, resp_t *r)
 
 static bool fetch_state(void)
 {
-    static resp_t r;
-    int st = helper_get(s_ent.theme, &r);
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
+    int st = helper_get(s_ent.theme, r);
     ha_state_t s = HA_STATE_UNKNOWN;
     if (st == 200) {
-        if (strstr(r.buf, "\"state\":\"on\"")) s = HA_STATE_ON;
-        else if (strstr(r.buf, "\"state\":\"off\"")) s = HA_STATE_OFF;
+        if (strstr(r->buf, "\"state\":\"on\"")) s = HA_STATE_ON;
+        else if (strstr(r->buf, "\"state\":\"off\"")) s = HA_STATE_OFF;
     } else if (st != 0 && st != 404) {   /* no name / helper not created: HA still answered */
         s = HA_STATE_ERROR;
     }
     if ((s == HA_STATE_ON || s == HA_STATE_OFF) && s != s_rec_theme) { s_rec_theme = s; s_rec_dirty = true; }
     if (s_state_cb) s_state_cb(s);
 
-    if (helper_get(s_ent.land, &r) == 200) {
-        bool on = strstr(r.buf, "\"state\":\"on\"") != NULL;
-        bool off = strstr(r.buf, "\"state\":\"off\"") != NULL;
+    if (helper_get(s_ent.land, r) == 200) {
+        bool on = strstr(r->buf, "\"state\":\"on\"") != NULL;
+        bool off = strstr(r->buf, "\"state\":\"off\"") != NULL;
         if ((on || off) && s_land_cb) s_land_cb(on);
     }
 
@@ -926,24 +927,24 @@ static bool fetch_state(void)
     {
         int pon = -1;
         float secs = 0;
-        if (helper_get(s_ent.pres, &r) == 200) {
-            if (strstr(r.buf, "\"state\":\"on\"")) pon = 1;
-            else if (strstr(r.buf, "\"state\":\"off\"")) pon = 0;
+        if (helper_get(s_ent.pres, r) == 200) {
+            if (strstr(r->buf, "\"state\":\"on\"")) pon = 1;
+            else if (strstr(r->buf, "\"state\":\"off\"")) pon = 0;
         }
-        if (helper_get(s_ent.pres_int, &r) == 200)
-            json_num(r.buf, "\"state\":\"", &secs);
+        if (helper_get(s_ent.pres_int, r) == 200)
+            json_num(r->buf, "\"state\":\"", &secs);
         if (pon >= 0 && s_pres_cb) s_pres_cb(pon, (int)secs);
     }
 
     /* Brightness: input_number state like "42.0" plus its min/max attributes */
-    if (helper_get(s_ent.bri, &r) == 200) parse_brightness(r.buf);
+    if (helper_get(s_ent.bri, r) == 200) parse_brightness(r->buf);
 
     /* Dashboard / view / page */
-    s_nav_dash_ok = helper_get(s_ent.dash, &r) == 200 &&
-                    nav_text(r.buf, s_nav_dash, sizeof(s_nav_dash));
-    s_nav_view_ok = helper_get(s_ent.view, &r) == 200 &&
-                    nav_text(r.buf, s_nav_view, sizeof(s_nav_view));
-    s_nav_page = helper_get(s_ent.page, &r) == 200 ? nav_page(r.buf) : -1;
+    s_nav_dash_ok = helper_get(s_ent.dash, r) == 200 &&
+                    nav_text(r->buf, s_nav_dash, sizeof(s_nav_dash));
+    s_nav_view_ok = helper_get(s_ent.view, r) == 200 &&
+                    nav_text(r->buf, s_nav_view, sizeof(s_nav_view));
+    s_nav_page = helper_get(s_ent.page, r) == 200 ? nav_page(r->buf) : -1;
     nav_report();
 
     for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++) {
@@ -979,15 +980,15 @@ static bool json_str(const char *json, const char *key, char *out, size_t n)
 static float read_entity(int pg, int row, char text[24], char unit[8], char name[32], bool *got)
 {
     const layout_item_t *it = &s_layout.pages[pg].items[row];
-    static resp_t r;
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     char path[96];
     float v = NAN;
     strcpy(text, "--");
     unit[0] = 0;
     snprintf(name, 32, "%.31s", it->name[0] ? it->name : it->entity);
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
-    *got = ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200;
-    if (*got) v = parse_entity(pg, row, r.buf, text, unit, name);
+    *got = ha_request(HTTP_METHOD_GET, path, NULL, r) == 200;
+    if (*got) v = parse_entity(pg, row, r->buf, text, unit, name);
     return v;
 }
 
@@ -1071,11 +1072,11 @@ static bool is_domain(const char *entity, const char *domain)
 /* Button state and display name */
 static void fetch_button(int pg, int row)
 {
-    static resp_t r;
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     char path[96];
     snprintf(path, sizeof(path), "/api/states/%s", s_layout.pages[pg].items[row].entity);
-    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) != 200) return;   /* keep the last state */
-    parse_button(pg, row, r.buf);
+    if (ha_request(HTTP_METHOD_GET, path, NULL, r) != 200) return;   /* keep the last state */
+    parse_button(pg, row, r->buf);
 }
 
 static void parse_button(int pg, int row, const char *json)
@@ -1126,12 +1127,12 @@ static bool press_button(int pg, int row)
 static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
 {
     (void)ctx;
-    static resp_t r;
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     char path[96], state[24];
     snprintf(path, sizeof(path), "/api/states/%s", entity);
-    int st = ha_request(HTTP_METHOD_GET, path, NULL, &r);
+    int st = ha_request(HTTP_METHOD_GET, path, NULL, r);
     if (st == 404) { ESP_LOGW(TAG, "layout: %s does not exist, skipped", entity); return false; }
-    if (st != 200 || !json_str(r.buf, "\"state\":\"", state, sizeof(state))) return true;
+    if (st != 200 || !json_str(r->buf, "\"state\":\"", state, sizeof(state))) return true;
     if (!strcmp(state, "unavailable") || !strcmp(state, "unknown")) return true;
     if (kind == LAYOUT_BUTTONS) {
         if (is_domain(entity, "script") || is_domain(entity, "scene") ||
@@ -1173,12 +1174,12 @@ static void json_numtext(const char *json, const char *key, char *out, size_t n)
 /* Weather card: condition, temperature and humidity from the entity's attributes */
 static void fetch_weather(int pg, int row)
 {
-    static resp_t r;
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     const layout_item_t *it = &s_layout.pages[pg].items[row];
     char path[96];
     snprintf(path, sizeof(path), "/api/states/%s", it->entity);
-    if (ha_request(HTTP_METHOD_GET, path, NULL, &r) != 200) return;   /* keep the last data */
-    parse_weather(pg, row, r.buf);
+    if (ha_request(HTTP_METHOD_GET, path, NULL, r) != 200) return;   /* keep the last data */
+    parse_weather(pg, row, r->buf);
     if (it->flags & LAYOUT_WX_FORECAST) fetch_forecast(pg, row);
 }
 
@@ -1242,7 +1243,7 @@ static void utf8_trim(char *s)
  * change with HA's template API. Empty or failed results fall back to friendly_name. */
 static void resolve_names(ha_layout_t *l)
 {
-    static resp_t r;
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     static char tpl[1024], body[1200];
     for (int p = 0; p < l->count; p++) {
         for (int i = 0; i < l->pages[p].count; i++) {
@@ -1254,8 +1255,8 @@ static void resolve_names(ha_layout_t *l)
                 body[n++] = *c;
             }
             snprintf(body + n, sizeof(body) - n, "\"}");
-            if (ha_request(HTTP_METHOD_POST, "/api/template", body, &r) != 200) continue;
-            snprintf(it->name, sizeof(it->name), "%.31s", r.buf);
+            if (ha_request(HTTP_METHOD_POST, "/api/template", body, r) != 200) continue;
+            snprintf(it->name, sizeof(it->name), "%.31s", r->buf);
             utf8_trim(it->name);
             ESP_LOGI(TAG, "name %s -> '%s'", it->entity, it->name);
         }
@@ -1493,8 +1494,6 @@ static UINT jpg_out(JDEC *jd, void *bitmap, JRECT *rc)
 /* Reserves the output for the whole block before the connection opens (TLS and the PNG
  * window split the heap up); when short on memory the old picture is dropped first. */
 /* Decoder buffers are static: 43 KB that a fragmented heap rarely has in one piece */
-static uint8_t s_pic_win[TINFL_LZ_DICT_SIZE];
-static tinfl_decompressor s_pic_inf;
 
 
 /* Output at the fitted size, allocated once the header is known; when short on memory the
@@ -1671,9 +1670,16 @@ static uint16_t *fetch_picture(const char *url, bool auth, uint8_t fit, int bw, 
         .crt_bundle_attach = esp_crt_bundle_attach,
         .buffer_size = 2048,
     };
-    pic_dec_t d = { .win = s_pic_win, .inf = &s_pic_inf, .fit = fit };
+    /* the 43 KB PNG decoder state lives only while a picture loads; held statically it
+     * left too little RAM for mbedTLS's 16 KB receive buffer on other requests */
+    pic_dec_t d = { .win = malloc(TINFL_LZ_DICT_SIZE), .inf = malloc(sizeof(tinfl_decompressor)), .fit = fit };
+    if (!d.win || !d.inf) {
+        ESP_LOGW(TAG, "picture: no memory for the decoder");
+        free(d.win); free(d.inf);
+        return NULL;
+    }
     d.http = esp_http_client_init(&cfg);
-    if (!d.http) return NULL;
+    if (!d.http) { free(d.win); free(d.inf); return NULL; }
     if (auth) esp_http_client_set_header(d.http, "Authorization", "Bearer " HA_TOKEN);
     const char *err = NULL, *path = auth ? url + strlen(HA_URL) : url;
     int st = -1;
@@ -1685,6 +1691,7 @@ static uint16_t *fetch_picture(const char *url, bool auth, uint8_t fit, int bw, 
     else err = "not a JPEG or PNG";
     esp_http_client_close(d.http);
     esp_http_client_cleanup(d.http);
+    free(d.win); free(d.inf);
     if (err) {
         if (st > 0 && st != 200) { ESP_LOGW(TAG, "%s: HTTP %d", path, st); add_error("%.60s: HTTP %d", path, st); }
         else { ESP_LOGW(TAG, "%s: %s", path, err); add_error("%.60s: %s", path, err); }
@@ -1714,16 +1721,16 @@ static void fetch_pictures(bool force)
     for (int i = 0; i < s_layout.pages[pg].count; i++) {
         const layout_item_t *it = &s_layout.pages[pg].items[i];
         if (it->kind != LAYOUT_PICTURE || !w[i] || !h[i]) continue;
-        static resp_t r;
+        resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
         static char url[LAYOUT_IMAGE_LEN + 128];
         char path[128], name[32], key[LAYOUT_IMAGE_LEN] = "";
         snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
         const char *src = it->image ? s_layout.images[it->image - 1] : it->entity;
         bool camera = is_domain(src, "camera"), entity = camera || is_domain(src, "image");
         snprintf(path, sizeof(path), "/api/states/%s", it->entity);
-        if (it->entity[0] && ha_request(HTTP_METHOD_GET, path, NULL, &r) == 200) {   /* picture-glance: no entity */
-            if (!it->name[0] && json_str(r.buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
-            if (!it->image) json_str(r.buf, "\"state\":\"", key, sizeof(key));
+        if (it->entity[0] && ha_request(HTTP_METHOD_GET, path, NULL, r) == 200) {   /* picture-glance: no entity */
+            if (!it->name[0] && json_str(r->buf, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+            if (!it->image) json_str(r->buf, "\"state\":\"", key, sizeof(key));
         }
         if (it->image && !entity) snprintf(key, sizeof(key), "%s", src);
         if (!camera && key[0] && !strcmp(key, s_pic_state[i])) continue;   /* same image */
