@@ -145,10 +145,14 @@ void dash_ws_close(dash_ws_t *d)
     free(d);
 }
 
-char *dash_fetch_config(void)
+char *dash_fetch_config(const char *url_path, char **list)
 {
     dash_ws_t *d = dash_ws_open();
-    char *out = dash_ws_call(d, "\"type\":\"lovelace/config\",\"url_path\":\"" HA_DASHBOARD "\"");
+    if (list) *list = d ? dash_ws_call(d, "\"type\":\"lovelace/dashboards/list\"") : NULL;
+    char body[128];
+    snprintf(body, sizeof(body), "\"type\":\"lovelace/config\",\"url_path\":\"%s\"",
+             url_path && url_path[0] ? url_path : HA_DASHBOARD);
+    char *out = d ? dash_ws_call(d, body) : NULL;
     if (!out) ESP_LOGW(TAG, "dashboard fetch failed");
     dash_ws_close(d);
     return out;

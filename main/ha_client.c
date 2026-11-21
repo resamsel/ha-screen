@@ -88,6 +88,48 @@ static ha_views_cb_t s_views_cb;
 void ha_client_set_views_cb(ha_views_cb_t cb) { s_views_cb = cb; }
 static portMUX_TYPE s_view_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_view[32];                   /* view path chosen in the config panel, "" = first */
+static char s_dash[32];                   /* dashboard url_path chosen there, "" = HA_DASHBOARD */
+static ha_dashboards_cb_t s_dashes_cb;
+void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb) { s_dashes_cb = cb; }
+
+/* Past the JSON value at p (object/array/string/scalar) */
+static const char *json_skip(const char *p)
+{
+    int depth = 0;
+    bool str = false;
+    for (; *p; p++) {
+        if (str) { if (*p == '\\' && p[1]) p++; else if (*p == '"') { str = false; if (!depth) return p + 1; } continue; }
+        if (*p == '"') str = true;
+        else if (*p == '{' || *p == '[') depth++;
+        else if (*p == '}' || *p == ']') { if (--depth <= 0) return p + 1; }
+        else if (!depth && (*p == ',' || *p == '}' || *p == ']')) return p;
+    }
+    return p;
+}
+
+/* lovelace/dashboards/list result -> dashboards (url_path, title), reported to the UI */
+static void report_dashboards(const char *msg, const char *cur)
+{
+    static layout_view_t d[LAYOUT_MAX_VIEWS];
+    int n = 0, current = -1;
+    const char *p = json_obj_get(msg, "result");
+    if (!p || *p != '[') return;
+    p++;
+    while (n < LAYOUT_MAX_VIEWS) {
+        while (*p == ' ' || *p == ',' || *p == '\n') p++;
+        if (*p != '{') break;
+        layout_view_t *v = &d[n];
+        memset(v, 0, sizeof(*v));
+        if (json_get_str(json_obj_get(p, "url_path"), v->path, sizeof(v->path)) && v->path[0]) {
+            if (!json_get_str(json_obj_get(p, "title"), v->title, sizeof(v->title)) || !v->title[0])
+                memcpy(v->title, v->path, sizeof(v->title));   /* same size */
+            if (!strcmp(v->path, cur)) current = n;
+            n++;
+        }
+        p = json_skip(p);
+    }
+    if (s_dashes_cb) s_dashes_cb(d, n, current);
+}
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -1047,14 +1089,18 @@ static void refresh_layout(bool force)
         esp_http_client_cleanup(s_http);
         s_http = NULL;
     }
-    char *json = dash_fetch_config();
-    if (!json) return;
     static layout_view_t views[LAYOUT_MAX_VIEWS];
-    char want[32], chosen[32];
+    char want[32], chosen[32], dash[32];
     int nv;
     taskENTER_CRITICAL(&s_view_lock);
     memcpy(want, s_view, sizeof(want));
+    memcpy(dash, s_dash, sizeof(dash));
     taskEXIT_CRITICAL(&s_view_lock);
+    char *list = NULL;
+    char *json = dash_fetch_config(dash, &list);
+    if (list) report_dashboards(list, dash[0] ? dash : HA_DASHBOARD);
+    free(list);
+    if (!json) return;
     int n = layout_parse_views(json, want, &l, views, LAYOUT_MAX_VIEWS, &nv, chosen);
     free(json);
     if (s_views_cb) {
@@ -1618,6 +1664,15 @@ void ha_client_set_view(const char *path)
 {
     taskENTER_CRITICAL(&s_view_lock);
     snprintf(s_view, sizeof(s_view), "%s", path ? path : "");
+    taskEXIT_CRITICAL(&s_view_lock);
+    if (s_events) xEventGroupSetBits(s_events, REFRESH_BIT);
+}
+
+void ha_client_set_dashboard(const char *url_path, const char *view)
+{
+    taskENTER_CRITICAL(&s_view_lock);
+    snprintf(s_dash, sizeof(s_dash), "%s", url_path ? url_path : "");
+    snprintf(s_view, sizeof(s_view), "%s", view ? view : "");
     taskEXIT_CRITICAL(&s_view_lock);
     if (s_events) xEventGroupSetBits(s_events, REFRESH_BIT);
 }

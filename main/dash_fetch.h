@@ -1,8 +1,10 @@
 /* Reads a Home Assistant dashboard config (and other websocket API results). */
 #pragma once
 
-/* Returns the malloc'd lovelace/config result message for HA_DASHBOARD, or NULL. Caller frees. */
-char *dash_fetch_config(void);
+/* Returns the malloc'd lovelace/config result message for dashboard url_path ("" =
+ * HA_DASHBOARD), or NULL. If list is given, it gets the lovelace/dashboards/list result
+ * from the same session (or NULL). Caller frees both. */
+char *dash_fetch_config(const char *url_path, char **list);
 
 /* A short authenticated websocket session for several requests in a row */
 typedef struct dash_ws dash_ws_t;

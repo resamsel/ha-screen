@@ -134,6 +134,13 @@ static lv_obj_t *s_view_btn = NULL, *s_view_caption = NULL;
 static lv_obj_t *s_view_menu = NULL;  /* open view list (its backdrop), NULL when closed */
 static bool s_view_pending = false;   /* a view change is on its way */
 static void ha_views_changed(const layout_view_t *views, int n, int current);
+static void ha_dashes_changed(const layout_view_t *dashes, int n, int current);
+static layout_view_t s_dashes[LAYOUT_MAX_VIEWS];
+static int s_ndash, s_cur_dash = -1;
+static char s_dash_path[32];          /* chosen dashboard, kept in NVS; "" = HA_DASHBOARD */
+static lv_obj_t *s_dash_btn = NULL, *s_dash_caption = NULL;
+static void dash_cb(lv_event_t *e);
+static void dash_btn_update(void);
 static lv_color_t neutral_btn_color(void);
 /* Status icons: [0] on the main screen, [1] on the config panel */
 static lv_obj_t *s_wifi_icon[2];
@@ -216,6 +223,8 @@ void app_main(void)
             if (nvs_get_u8(nv, "pres_on", &pon) == ESP_OK) s_pres_on = pon;
             nvs_get_u16(nv, "pres_s", &s_pres_secs);
             if (s_pres_secs < 1) s_pres_secs = 10;
+            size_t dlen = sizeof(s_dash_path);
+            if (nvs_get_str(nv, "dash", s_dash_path, &dlen) != ESP_OK) s_dash_path[0] = 0;
             nvs_close(nv);
         }
         s_landscape = land;
@@ -239,7 +248,8 @@ void app_main(void)
     ha_client_set_forecast_cb(ha_forecast_changed);
     ha_client_set_icon_cb(ha_icon_changed);
     ha_client_set_views_cb(ha_views_changed);
-    ha_client_set_view(s_view_path);
+    ha_client_set_dashboards_cb(ha_dashes_changed);
+    ha_client_set_dashboard(s_dash_path, s_view_path);
     screenshot_start();
     screenshot_set_touch_cb(dots_show);
     screenshot_set_page_cb(show_page);
@@ -2614,6 +2624,7 @@ static void create_ui(void)
     s_err_box = s_err_label = NULL;
     s_view_btn = s_view_caption = s_view_menu = NULL;
     s_pres_btn = s_pres_int_btn = s_pres_caption = NULL;
+    s_dash_btn = s_dash_caption = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -2657,7 +2668,21 @@ static void create_ui(void)
     lv_obj_set_style_text_font(s_cfg_title, &lv_font_montserrat_20, 0);
     lv_obj_align(s_cfg_title, LV_ALIGN_TOP_LEFT, 10, 19 - lv_font_montserrat_20.line_height / 2);
 
-    /* Settings page: refresh, then the dashboard view; one centred column */
+    /* Settings page: dashboard, view, refresh. Portrait: one centred column; landscape:
+     * dashboard left, view right, refresh centred below */
+    s_dash_caption = lv_label_create(cp[0]);
+    lv_label_set_text(s_dash_caption, "Dashboard");
+    lv_obj_set_style_text_font(s_dash_caption, &lv_font_latin_14, 0);
+    s_dash_btn = make_button(cp[0], "", lv_color_hex(0x5E5E6E));
+    lv_obj_t *dl = lv_obj_get_child(s_dash_btn, 0);
+    lv_label_set_long_mode(dl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(dl, 148 - 16);
+    lv_obj_set_style_text_align(dl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_dash_btn, LV_ALIGN_TOP_MID, s_landscape ? -SCR_W / 4 : 0, s_landscape ? 56 : 60);
+    lv_obj_align_to(s_dash_caption, s_dash_btn, LV_ALIGN_OUT_TOP_LEFT, 0, -4);
+    lv_obj_add_event_cb(s_dash_btn, dash_cb, LV_EVENT_CLICKED, NULL);
+    dash_btn_update();
+
     s_view_caption = lv_label_create(cp[0]);
     lv_label_set_text(s_view_caption, "View");
     lv_obj_set_style_text_font(s_view_caption, &lv_font_latin_14, 0);
@@ -2666,8 +2691,7 @@ static void create_ui(void)
     lv_label_set_long_mode(vl, LV_LABEL_LONG_DOT);
     lv_obj_set_width(vl, 148 - 16);
     lv_obj_set_style_text_align(vl, LV_TEXT_ALIGN_CENTER, 0);
-    /* landscape: refresh left, view right */
-    lv_obj_align(s_view_btn, LV_ALIGN_TOP_MID, s_landscape ? SCR_W / 4 : 0, s_landscape ? 64 : 128);
+    lv_obj_align(s_view_btn, LV_ALIGN_TOP_MID, s_landscape ? SCR_W / 4 : 0, s_landscape ? 56 : 132);
     lv_obj_align_to(s_view_caption, s_view_btn, LV_ALIGN_OUT_TOP_LEFT, 0, -4);
     lv_obj_add_event_cb(s_view_btn, view_cb, LV_EVENT_CLICKED, NULL);
     view_btn_update();
@@ -2751,7 +2775,7 @@ static void create_ui(void)
 
     /* Refresh: re-read everything from Home Assistant now */
     s_refresh_btn = make_button(cp[0], "Connecting...", lv_color_hex(0x5E5E6E));
-    lv_obj_align(s_refresh_btn, LV_ALIGN_TOP_MID, s_landscape ? -SCR_W / 4 : 0, s_landscape ? 64 : 44);
+    lv_obj_align(s_refresh_btn, LV_ALIGN_TOP_MID, 0, s_landscape ? 106 : 196);
     lv_obj_add_event_cb(s_refresh_btn, refresh_cb, LV_EVENT_CLICKED, NULL);
 
 }
@@ -2766,6 +2790,7 @@ static void apply_panel_theme(bool light)
     lv_obj_set_style_text_color(s_bri_caption, text, 0);
     if (s_view_caption) lv_obj_set_style_text_color(s_view_caption, text, 0);
     if (s_pres_caption) lv_obj_set_style_text_color(s_pres_caption, text, 0);
+    if (s_dash_caption) lv_obj_set_style_text_color(s_dash_caption, text, 0);
     if (s_err_box) {
         bool none = strcmp(lv_label_get_text(s_err_label), NO_ERRORS) == 0;
         lv_obj_set_style_text_color(s_err_label, none ? lv_color_hex(light ? 0x5F6368 : 0x8A8F98)
@@ -2786,8 +2811,8 @@ static void set_busy(bool busy)
     /* disabled: a muted button with text that stays readable (not just faded out) */
     lv_color_t bg = lv_color_hex(s_light ? 0xD3D8DF : 0x33383F);
     lv_color_t fg = lv_color_hex(s_light ? 0x4A5260 : 0xB4BAC4);
-    lv_obj_t *objs[] = {s_refresh_btn, s_view_btn};
-    for (int i = 0; i < 2; i++) {
+    lv_obj_t *objs[] = {s_refresh_btn, s_view_btn, s_dash_btn};
+    for (int i = 0; i < 3; i++) {
         if (!objs[i]) continue;
         lv_obj_set_style_bg_color(objs[i], bg, LV_STATE_DISABLED);
         lv_obj_set_style_opa(objs[i], LV_OPA_COVER, LV_STATE_DISABLED);
@@ -2903,6 +2928,7 @@ static void ha_update_done(bool ok, bool refresh)
     }
     s_view_pending = false;
     view_btn_update();
+    dash_btn_update();
     (void)ok;
     lvgl_port_unlock();
 }
@@ -3219,11 +3245,10 @@ static void view_select(int i)
 
 static void view_pick_cb(lv_event_t *e) { view_select((int)(intptr_t)lv_event_get_user_data(e)); }
 
-/* View button: open a list of the dashboard's views below it (above, if there's no room);
- * the current one is ticked. The list scrolls when it's taller than the screen allows. */
-static void view_cb(lv_event_t *e)
+/* A list of items below btn (above, if there's no room); the current one is ticked, pick
+ * gets the index as user data. The list scrolls when it's taller than the screen allows. */
+static void menu_open(lv_obj_t *btn, const layout_view_t *items, int n, int cur, lv_event_cb_t pick)
 {
-    if (s_busy || s_swiped || s_nviews < 1 || s_view_menu) return;
     /* backdrop over the whole panel: catches taps beside the list and keeps swipes off it */
     lv_obj_t *bg = lv_obj_create(s_cfg);
     lv_obj_remove_style_all(bg);
@@ -3235,9 +3260,9 @@ static void view_cb(lv_event_t *e)
 
     const lv_coord_t row_h = 40, w = 148;
     lv_area_t a;
-    lv_obj_get_coords(s_view_btn, &a);
+    lv_obj_get_coords(btn, &a);
     lv_coord_t below = SCR_H - a.y2 - 6, above = a.y1 - STATUS_H;
-    lv_coord_t want = s_nviews * row_h + 8;
+    lv_coord_t want = n * row_h + 8;
     bool down = below >= want || below >= above;
     lv_coord_t h = LV_MIN(want, down ? below : above);
 
@@ -3256,7 +3281,7 @@ static void view_cb(lv_event_t *e)
     lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_ACTIVE);
 
     lv_color_t text = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
-    for (int i = 0; i < s_nviews; i++) {
+    for (int i = 0; i < n; i++) {
         lv_obj_t *r = lv_obj_create(box);
         lv_obj_remove_style_all(r);
         lv_obj_set_size(r, lv_pct(100), row_h);
@@ -3264,15 +3289,15 @@ static void view_cb(lv_event_t *e)
         lv_obj_set_style_bg_color(r, lv_color_hex(0x18BCF2), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(r, LV_OPA_40, LV_STATE_PRESSED);
         lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-        lv_obj_add_event_cb(r, view_pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(r, pick, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *l = lv_label_create(r);
         lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
         lv_obj_set_width(l, w - 8 - 36);
-        lv_label_set_text(l, s_views[i].title);
+        lv_label_set_text(l, items[i].title);
         lv_obj_set_style_text_font(l, &lv_font_latin_16, 0);
         lv_obj_set_style_text_color(l, text, 0);
         lv_obj_align(l, LV_ALIGN_LEFT_MID, 8, 0);
-        if (i == s_cur_view) {
+        if (i == cur) {
             lv_obj_t *c = lv_label_create(r);
             lv_label_set_text(c, LV_SYMBOL_OK);
             lv_obj_set_style_text_font(c, &lv_font_latin_16, 0);
@@ -3280,7 +3305,69 @@ static void view_cb(lv_event_t *e)
             lv_obj_align(c, LV_ALIGN_RIGHT_MID, -8, 0);
         }
     }
-    if (s_cur_view >= 0) lv_obj_scroll_to_view(lv_obj_get_child(box, s_cur_view), LV_ANIM_OFF);
+    if (cur >= 0) lv_obj_scroll_to_view(lv_obj_get_child(box, cur), LV_ANIM_OFF);
+}
+
+/* View button: the dashboard's views */
+static void view_cb(lv_event_t *e)
+{
+    if (s_busy || s_swiped || s_nviews < 1 || s_view_menu) return;
+    menu_open(s_view_btn, s_views, s_nviews, s_cur_view, view_pick_cb);
+}
+
+/* Dashboard button: the current dashboard's title; "Loading..." while a change is on its way.
+ * Must be called with the LVGL lock held. */
+static void dash_btn_update(void)
+{
+    if (!s_dash_btn) return;
+    lv_obj_t *l = lv_obj_get_child(s_dash_btn, 0);
+    if (s_view_pending) lv_label_set_text(l, "Loading...");
+    else if (s_cur_dash >= 0) lv_label_set_text_fmt(l, "%s " LV_SYMBOL_DOWN, s_dashes[s_cur_dash].title);
+    else lv_label_set_text(l, s_ndash ? HA_DASHBOARD " " LV_SYMBOL_DOWN : "Connecting...");
+}
+
+/* Network task: HA's dashboards and the one shown */
+static void ha_dashes_changed(const layout_view_t *dashes, int n, int current)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (n != s_ndash || current != s_cur_dash || memcmp(s_dashes, dashes, n * sizeof(*dashes)))
+        view_menu_close();
+    memcpy(s_dashes, dashes, n * sizeof(*dashes));
+    s_ndash = n;
+    s_cur_dash = current;
+    dash_btn_update();
+    lvgl_port_unlock();
+}
+
+/* Show dashboard i from its first view; remembered across reboots */
+static void dash_select(int i)
+{
+    view_menu_close();
+    if (s_busy || i < 0 || i >= s_ndash || i == s_cur_dash) return;
+    ESP_LOGI(TAG, "dashboard %d '%s'", i, s_dashes[i].path);
+    snprintf(s_dash_path, sizeof(s_dash_path), "%s", s_dashes[i].path);
+    s_view_path[0] = 0;
+    nvs_handle_t nv;
+    if (nvs_open("ui", NVS_READWRITE, &nv) == ESP_OK) {
+        nvs_set_str(nv, "dash", s_dash_path);
+        nvs_set_str(nv, "view", s_view_path);
+        nvs_commit(nv);
+        nvs_close(nv);
+    }
+    s_cur_view = -1;
+    s_view_pending = true;
+    set_busy(true);
+    view_btn_update();
+    dash_btn_update();
+    ha_client_set_dashboard(s_dash_path, s_view_path);
+}
+
+static void dash_pick_cb(lv_event_t *e) { dash_select((int)(intptr_t)lv_event_get_user_data(e)); }
+
+static void dash_cb(lv_event_t *e)
+{
+    if (s_busy || s_swiped || s_ndash < 1 || s_view_menu) return;
+    menu_open(s_dash_btn, s_dashes, s_ndash, s_cur_dash, dash_pick_cb);
 }
 
 /* After a rebuild: the theme, the refresh/view busy state and the last known values of every
