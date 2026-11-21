@@ -373,8 +373,16 @@ static void test_weather(void)
     ha_layout_t l;
     assert(parse_sections("[" SEC("{\"type\":\"weather-forecast\",\"entity\":\"weather.home\",\"show_forecast\":false}") "]", &l) == 1);
     assert(l.pages[0].kind == LAYOUT_WEATHER && l.pages[0].count == 1 && !strcmp(l.pages[0].items[0].entity, "weather.home"));
+    assert(!l.pages[0].items[0].flags);
     l.pages[0].items[0].flags = 0xFF;
-    assert(layout_sanitize(&l) && l.pages[0].kind == LAYOUT_WEATHER && !l.pages[0].items[0].flags);
+    assert(layout_sanitize(&l) && l.pages[0].kind == LAYOUT_WEATHER && l.pages[0].items[0].flags == LAYOUT_WX_FLAGS);
+    /* forecast only with show_forecast: true; daily unless forecast_type: hourly */
+    assert(parse_sections("[" SEC("{\"type\":\"weather-forecast\",\"entity\":\"weather.home\"}") "]", &l) == 1);
+    assert(!l.pages[0].items[0].flags);
+    assert(parse_sections("[" SEC("{\"type\":\"weather-forecast\",\"entity\":\"weather.home\",\"show_forecast\":true}") "]", &l) == 1);
+    assert(l.pages[0].items[0].flags == LAYOUT_WX_FORECAST);
+    assert(parse_sections("[" SEC("{\"type\":\"weather-forecast\",\"entity\":\"weather.home\",\"show_forecast\":true,\"forecast_type\":\"hourly\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].flags == (LAYOUT_WX_FORECAST | LAYOUT_WX_HOURLY));
 }
 
 int main(void)
