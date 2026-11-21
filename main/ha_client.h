@@ -77,6 +77,13 @@ typedef void (*ha_weather_cb_t)(int page, int row, const char *condition, const 
                                 const char *humidity, const char *name);
 void ha_client_set_weather_cb(ha_weather_cb_t cb);  /* call before ha_client_start */
 
+/* Weather forecast (cards with show_forecast: true): up to HA_FORECAST_MAX entries from
+ * weather.get_forecasts. t = UTC seconds of the entry; hi/lo as HA sends them ("" if missing). */
+#define HA_FORECAST_MAX 8
+typedef struct { int64_t t; char cond[16]; char hi[8]; char lo[8]; } ha_forecast_t;
+typedef void (*ha_forecast_cb_t)(int page, int row, const ha_forecast_t *f, int n, bool hourly);
+void ha_client_set_forecast_cb(ha_forecast_cb_t cb);  /* call before ha_client_start */
+
 /* The page now on screen and the size of each of its picture blocks (0 = no picture).
  * Its pictures are fetched at once, then every HA_PICTURE_INTERVAL_MS while it stays shown. */
 void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint16_t h[LAYOUT_MAX_ROWS]);

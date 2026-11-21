@@ -73,6 +73,8 @@ static char *s_icon_rule[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];      /* from HA's i
 static char s_icon_last[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][48];   /* last icon reported */
 static ha_weather_cb_t s_weather_cb;
 void ha_client_set_weather_cb(ha_weather_cb_t cb) { s_weather_cb = cb; }
+static ha_forecast_cb_t s_forecast_cb;
+void ha_client_set_forecast_cb(ha_forecast_cb_t cb) { s_forecast_cb = cb; }
 static portMUX_TYPE s_pic_lock = portMUX_INITIALIZER_UNLOCKED;
 static int s_pic_page = -1;               /* page on screen, and its picture block sizes */
 static uint16_t s_pic_w[LAYOUT_MAX_ROWS], s_pic_h[LAYOUT_MAX_ROWS];
@@ -106,6 +108,14 @@ typedef struct { char buf[2048]; int len; } resp_t;
  * handshake (the slow part) happens only once instead of per request. */
 static esp_http_client_handle_t s_http;
 static resp_t *s_resp;
+/* Forecast responses are parsed while they stream in (they can be large): each entry
+ * object after "forecast":[ is collected and handed to fc_entry */
+static bool s_fc_mode;
+static char s_fc_obj[320];
+static int s_fc_len, s_fc_state;          /* 0 = before the list, 1 = in it, 2 = in an entry, 3 = done */
+static void fc_entry(char *obj);
+static ha_forecast_t s_fc[HA_FORECAST_MAX];
+static int s_fc_n;
 
 /* ---- 24 h history, parsed while it streams in (the response can be large) ---- */
 static bool s_hist_mode;                  /* route response body to the history parser */
@@ -211,6 +221,23 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
         r->len += n;
         r->buf[r->len] = 0;
     }
+    if (evt->event_id == HTTP_EVENT_ON_DATA && s_fc_mode) {
+        static const char key[] = "\"forecast\":[";
+        const char *d = evt->data;
+        for (int k = 0; k < evt->data_len; k++) {
+            char c = d[k];
+            if (s_fc_state == 0) {        /* match the key across chunk borders */
+                s_fc_len = c == key[s_fc_len] ? s_fc_len + 1 : (c == key[0]);
+                if (s_fc_len == (int)sizeof(key) - 1) { s_fc_state = 1; s_fc_len = 0; }
+            } else if (s_fc_state == 1) {
+                if (c == '{') { s_fc_state = 2; s_fc_len = 0; s_fc_obj[s_fc_len++] = c; }
+                else if (c == ']') s_fc_state = 3;
+            } else if (s_fc_state == 2) {
+                if (s_fc_len < (int)sizeof(s_fc_obj) - 1) s_fc_obj[s_fc_len++] = c;
+                if (c == '}') { s_fc_obj[s_fc_len] = 0; s_fc_state = 1; fc_entry(s_fc_obj); }
+            }
+        }
+    }
     return ESP_OK;
 }
 
@@ -231,6 +258,7 @@ static int ha_request_once(esp_http_client_method_t method, const char *url, con
         esp_http_client_set_header(s_http, "Content-Type", "application/json");
     }
     if (resp) { resp->len = 0; resp->buf[0] = 0; }
+    if (s_fc_mode) { s_fc_state = 0; s_fc_len = 0; s_fc_n = 0; }   /* fresh on retry */
     if (s_hist_mode) { memset(s_hist_has, 0, sizeof(s_hist_has)); s_hist_len = 0; s_hist_depth = 0; } /* fresh on retry */
     s_resp = resp;
     esp_http_client_set_url(s_http, url);
@@ -309,7 +337,7 @@ static bool json_num(const char *json, const char *key, float *out)
 
 /* ---- Card data cache: the last data sent for every card, saved to flash (cache_store) and
  * replayed through the same callbacks at boot, so the board shows it before HA answers ---- */
-enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_TYPES };
+enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_FORECAST, REC_TYPES };
 static uint8_t *s_rec[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
 static uint16_t s_rec_len[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
 static uint8_t s_rec_theme = 0xFF;        /* HA_STATE_ON/OFF of the theme entity */
@@ -417,6 +445,17 @@ static void emit_weather(int pg, int row, const char *cond, const char *temp, co
     if (s_weather_cb) s_weather_cb(pg, row, cond, temp, unit, hum, name);
 }
 
+/* record: u8 hourly, u8 n, n x ha_forecast_t */
+static void emit_forecast(int pg, int row, const ha_forecast_t *f, int n, bool hourly)
+{
+    uint8_t b[2 + HA_FORECAST_MAX * sizeof(ha_forecast_t)];
+    if (n < 0 || n > HA_FORECAST_MAX) return;
+    b[0] = hourly; b[1] = n;
+    memcpy(b + 2, f, n * sizeof(ha_forecast_t));
+    rec_put(REC_FORECAST, pg, row, b, 2 + n * sizeof(ha_forecast_t));
+    if (s_forecast_cb) s_forecast_cb(pg, row, f, n, hourly);
+}
+
 static void emit_icon(int pg, int row, const char *icon)
 {
     uint8_t b[52];
@@ -490,6 +529,13 @@ static void rec_emit(int t, int pg, int row, const uint8_t *d, const uint8_t *de
         emit_weather(pg, row, c, tp, u, h, nm);
         break;
     }
+    case REC_FORECAST: {
+        if (l < 2 || d[1] > HA_FORECAST_MAX || l != 2 + d[1] * sizeof(ha_forecast_t)) break;
+        ha_forecast_t f[HA_FORECAST_MAX];
+        memcpy(f, d + 2, d[1] * sizeof(ha_forecast_t));
+        emit_forecast(pg, row, f, d[1], d[0]);
+        break;
+    }
     case REC_ICON: {
         const char *ic = unpack_str(&d, de);
         snprintf(s_icon_last[pg][row], sizeof(s_icon_last[pg][row]), "%s", ic);
@@ -539,6 +585,7 @@ static float read_entity(int pg, int row, char text[24], char unit[8], char name
 static void report_icon(int pg, int row, const char *json);
 static void utf8_trim(char *s);
 static void fetch_weather(int pg, int row);
+static void fetch_forecast(int pg, int row);
 static void fetch_button(int pg, int row);
 
 /* A tap/toggle is waiting: background reads (graph history, pictures, the rest of a poll)
@@ -810,6 +857,38 @@ static void fetch_weather(int pg, int row)
         json_str(r.buf, "\"temperature_unit\":\"", unit, sizeof(unit));
     }
     emit_weather(pg, row, cond, temp, unit, hum, name);
+    if (it->flags & LAYOUT_WX_FORECAST) fetch_forecast(pg, row);
+}
+
+/* Forecast of a weather card through weather.get_forecasts, on every poll like the rest */
+static void fc_entry(char *a)
+{
+    if (s_fc_n >= HA_FORECAST_MAX) return;
+    ha_forecast_t *x = &s_fc[s_fc_n];
+    memset(x, 0, sizeof(*x));
+    char dt[32] = "";
+    json_str(a, "\"datetime\":\"", dt, sizeof(dt));
+    json_str(a, "\"condition\":\"", x->cond, sizeof(x->cond));
+    json_numtext(a, "\"temperature\":", x->hi, sizeof(x->hi));
+    json_numtext(a, "\"templow\":", x->lo, sizeof(x->lo));
+    x->t = parse_iso(dt);
+    const char *z = strlen(dt) > 19 ? strpbrk(dt + 19, "+-") : NULL;   /* "+01:00": local time */
+    int oh, om;
+    if (x->t && z && sscanf(z + 1, "%d:%d", &oh, &om) == 2) x->t -= (z[0] == '-' ? -1 : 1) * (oh * 3600 + om * 60);
+    if (x->t) s_fc_n++;
+}
+
+static void fetch_forecast(int pg, int row)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    bool hourly = it->flags & LAYOUT_WX_HOURLY;
+    char body[128];
+    snprintf(body, sizeof(body), "{\"entity_id\":\"%s\",\"type\":\"%s\"}", it->entity, hourly ? "hourly" : "daily");
+    s_fc_mode = true;
+    int st = ha_request(HTTP_METHOD_POST, "/api/services/weather/get_forecasts?return_response", body, NULL);
+    s_fc_mode = false;
+    if (st != 200) return;               /* keep the last data */
+    emit_forecast(pg, row, s_fc, s_fc_n, hourly);
 }
 
 /* Drop a UTF-8 sequence cut off at the end of s by truncation */

@@ -85,6 +85,7 @@ static void ha_busy(bool busy);
 static void ha_button_changed(int page, int row, ha_btn_state_t state, const char *name);
 static void ha_button_pressed(int page, int row, bool ok);
 static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, int zoom, const char *name);
+static void ha_forecast_changed(int page, int row, const ha_forecast_t *f, int n, bool hourly);
 static void ha_weather_changed(int page, int row, const char *cond, const char *temp, const char *unit,
                                const char *hum, const char *name);
 static void apply_panel_theme(bool light);
@@ -227,6 +228,7 @@ void app_main(void)
     ha_client_set_press_cb(ha_button_pressed);
     ha_client_set_picture_cb(ha_picture_changed);
     ha_client_set_weather_cb(ha_weather_changed);
+    ha_client_set_forecast_cb(ha_forecast_changed);
     ha_client_set_icon_cb(ha_icon_changed);
     ha_client_set_views_cb(ha_views_changed);
     ha_client_set_view(s_view_path);
@@ -891,7 +893,18 @@ static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, in
     lvgl_port_unlock();
 }
 
-/* ---- Weather cards (weather-forecast: current weather only, like HA without forecast) ---- */
+/* ---- Weather cards (weather-forecast: current weather, and the forecast below it when the
+ * card has show_forecast: true and the block is tall enough) ---- */
+#define FC_H    72                        /* forecast row: time, icon, high, low */
+#define FC_MAX  5                         /* at most this many forecast columns */
+#define FC_SIDE 12                        /* margin left and right of the forecast row */
+#define FC_TOP  8                         /* the current weather sits this much lower with a forecast */
+#define FC_BOTTOM 8                       /* gap below the forecast row */
+#define WX_SIDE_WIDE 14                   /* extra side margin of a full-width card in landscape */
+#define FC_COLW 44                        /* narrowest forecast column: fewer columns in portrait */
+typedef struct { int n; bool hourly; ha_forecast_t f[HA_FORECAST_MAX]; } wx_fc_t;
+static lv_obj_t *s_fc_box[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static wx_fc_t *s_fc_data[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];   /* last forecast (theme redraws) */
 static lv_obj_t *s_wx_icon[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_wx_cond[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_wx_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_wx_temp[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_wx_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_wx_hum[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
@@ -1009,6 +1022,20 @@ static void create_weather(lv_obj_t *page, int pg, int i)
     lv_area_t blk;
     graph_block(GI(pg, i), &blk);
     int w = lv_area_get_width(&blk) - 2 * CARD_INSET, h = lv_area_get_height(&blk) - 2 * CARD_INSET;
+    int side = s_landscape && w >= SCR_W - 2 * CARD_INSET ? WX_SIDE_WIDE : 0;   /* full-width card: more room at the sides */
+    blk.x1 += side;
+    w -= 2 * side;
+    s_fc_box[pg][i] = NULL;
+    if ((s_layout.pages[pg].items[i].flags & LAYOUT_WX_FORECAST) && h - FC_H - FC_BOTTOM - FC_TOP >= (w < 240 ? 100 : 64)) {
+        h -= FC_H + FC_BOTTOM + FC_TOP;   /* current weather on top (moved down a little), forecast row below */
+        lv_obj_t *fb = lv_obj_create(page);
+        lv_obj_remove_style_all(fb);
+        lv_obj_clear_flag(fb, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(fb, w, FC_H);
+        lv_obj_set_pos(fb, blk.x1 + CARD_INSET, blk.y1 + CARD_INSET + FC_TOP + h);
+        s_fc_box[pg][i] = fb;
+        blk.y1 += FC_TOP;
+    }
     lv_obj_t *bg = lv_obj_create(page);   /* invisible container, no card background */
     lv_obj_remove_style_all(bg);
     lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -1111,6 +1138,74 @@ static void ha_weather_changed(int page, int row, const char *cond, const char *
         wx_draw_icon(s_wx_icon[page][row], lv_obj_get_width(s_wx_icon[page][row]), cond);
     }
     wx_place(page, row);
+    lvgl_port_unlock();
+}
+
+/* Forecast columns: as many as fit (at least FC_COLW wide each), drawn from s_fc_data */
+static void wx_draw_forecast(int pg, int i)
+{
+    lv_obj_t *fb = s_fc_box[pg][i];
+    const wx_fc_t *d = s_fc_data[pg][i];
+    if (!fb) return;
+    lv_obj_clean(fb);
+    if (!d || d->n <= 0) return;
+    int w = lv_obj_get_width(fb) - 2 * FC_SIDE, cols = LV_MIN(LV_MIN(d->n, FC_MAX), LV_MAX(w / FC_COLW, 1)), cw = w / cols;
+    lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light);
+    for (int k = 0; k < cols; k++) {
+        const ha_forecast_t *f = &d->f[k];
+        int x = FC_SIDE + k * cw;
+        char tl[12];
+        time_t tt = (time_t)f->t;
+        struct tm tm;
+        localtime_r(&tt, &tm);
+        strftime(tl, sizeof(tl), d->hourly ? "%H:%M" : "%a", &tm);
+        lv_obj_t *l = lv_label_create(fb);
+        lv_label_set_text(l, tl);
+        lv_obj_set_style_text_font(l, &lv_font_latin_12, 0);
+        lv_obj_set_style_text_color(l, sec, 0);
+        lv_obj_set_width(l, cw);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(l, x, 0);
+        lv_obj_t *ic = lv_obj_create(fb);
+        lv_obj_remove_style_all(ic);
+        lv_obj_clear_flag(ic, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(ic, 26, 26);
+        lv_obj_set_pos(ic, x + (cw - 26) / 2, 15);
+        wx_draw_icon(ic, 26, f->cond);
+        lv_obj_t *hi = lv_label_create(fb), *lo = lv_label_create(fb);
+        lv_label_set_text_fmt(hi, "%s°", f->hi[0] ? f->hi : "--");
+        if (f->lo[0]) lv_label_set_text_fmt(lo, "%s°", f->lo);
+        else lv_label_set_text(lo, "");
+        lv_obj_set_style_text_font(hi, &lv_font_latin_16, 0);
+        lv_obj_set_style_text_font(lo, &lv_font_latin_12, 0);
+        lv_obj_set_style_text_color(hi, fg, 0);
+        lv_obj_set_style_text_color(lo, sec, 0);
+        lv_obj_t *t2[] = { hi, lo };
+        for (int m = 0; m < 2; m++) {
+            lv_obj_set_width(t2[m], cw);
+            lv_obj_set_style_text_align(t2[m], LV_TEXT_ALIGN_CENTER, 0);
+            lv_label_set_long_mode(t2[m], LV_LABEL_LONG_CLIP);
+        }
+        lv_obj_set_pos(hi, x, 42);
+        lv_obj_set_pos(lo, x, 58);
+    }
+}
+
+static void ha_forecast_changed(int page, int row, const ha_forecast_t *f, int n, bool hourly)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page < 0 || page >= PAGE_COUNT || row < 0 || row >= ROWS(page) || KIND(page, row) != LAYOUT_WEATHER || !s_fc_box[page][row]) {
+        lvgl_port_unlock();
+        return;
+    }
+    wx_fc_t *d = s_fc_data[page][row];
+    if (!d) d = s_fc_data[page][row] = malloc(sizeof(*d));
+    if (d) {
+        d->n = LV_MIN(n, HA_FORECAST_MAX);
+        d->hourly = hourly;
+        memcpy(d->f, f, d->n * sizeof(*f));
+        wx_draw_forecast(page, row);
+    }
     lvgl_port_unlock();
 }
 
@@ -1532,6 +1627,7 @@ static void apply_temp_theme(bool light)
             lv_obj_t *l[] = { s_wx_cond[pg][i], s_wx_temp[pg][i], s_wx_name[pg][i], s_wx_unit[pg][i], s_wx_hum[pg][i] };
             for (int k = 0; k < 5; k++) lv_obj_set_style_text_color(l[k], k < 2 ? val : sub, 0);   /* condition, temperature */
             if (s_wx_last[pg][i][0]) wx_draw_icon(s_wx_icon[pg][i], lv_obj_get_width(s_wx_icon[pg][i]), s_wx_last[pg][i]);
+            wx_draw_forecast(pg, i);
         }
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
         if (!s_dot[pg]) continue;
@@ -2401,6 +2497,9 @@ static void create_ui(void)
     memset(s_clk_small, 0, sizeof(s_clk_small));
     memset(s_clk_bg, 0, sizeof(s_clk_bg));
     memset(s_wx_temp, 0, sizeof(s_wx_temp));
+    memset(s_fc_box, 0, sizeof(s_fc_box));
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_fc_data[p][r]); s_fc_data[p][r] = NULL; }
     memset(s_full, 0, sizeof(s_full));
     s_err_box = s_err_label = NULL;
     s_view_btn = s_view_caption = s_view_menu = NULL;

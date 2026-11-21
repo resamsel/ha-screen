@@ -149,7 +149,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
         }
         bool clock = ct && !strcmp(ct, "clock");
         bool gauge = ct && !strcmp(ct, "gauge");
-        bool weather = ct && !strcmp(ct, "weather-forecast");   /* current weather; forecast not shown */
+        bool weather = ct && !strcmp(ct, "weather-forecast");   /* current weather + forecast */
         bool graph = is_graph(card), tile = is_tile(card), button = is_button(card), picture = is_picture(card);
         if (!clock && !graph && !tile && !button && !picture && !weather && !gauge) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
@@ -177,6 +177,11 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             continue;
         }
         set_item(it, card);
+        if (weather) {
+            if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(card, "show_forecast"))) it->flags |= LAYOUT_WX_FORECAST;
+            const char *ft = str(card, "forecast_type");
+            if (ft && !strcmp(ft, "hourly")) it->flags |= LAYOUT_WX_HOURLY;
+        }
         if (picture && cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_name"))) it->flags |= LAYOUT_PIC_NO_NAME;
         const char *fit = picture ? str(card, "fit_mode") : NULL;
         if (fit && !strcmp(fit, "cover")) it->flags |= LAYOUT_PIC_COVER;
@@ -380,7 +385,8 @@ bool layout_sanitize(ha_layout_t *l)
             if (pg->items[i].kind != LAYOUT_PICTURE || pg->items[i].image > LAYOUT_MAX_IMAGES) pg->items[i].image = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
             pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : pg->items[i].kind == LAYOUT_CLOCK ? LAYOUT_CLOCK_FLAGS
-                                : pg->items[i].kind == LAYOUT_GLANCE ? LAYOUT_GLANCE_FLAGS : 0;
+                                : pg->items[i].kind == LAYOUT_GLANCE ? LAYOUT_GLANCE_FLAGS
+                                : pg->items[i].kind == LAYOUT_WEATHER ? LAYOUT_WX_FLAGS : 0;
             if (pg->items[i].kind == LAYOUT_GAUGE) {   /* a usable range */
                 if (!isfinite(pg->items[i].min)) pg->items[i].min = 0;
                 if (!isfinite(pg->items[i].max) || pg->items[i].max <= pg->items[i].min) pg->items[i].max = pg->items[i].min + 100;

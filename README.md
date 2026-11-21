@@ -23,7 +23,8 @@ The main-screen pages come from the HA dashboard view `HA_DASHBOARD` (the view i
   Cameras refresh every 60 s while the page is shown (`HA_PICTURE_INTERVAL_MS`), image entities
   when their state changes, URLs on each page visit. JPEG (baseline) and PNG (non-interlaced)
 - a `weather-forecast` card = current weather of a `weather.*` entity: icon, condition, name,
-  temperature and humidity (the forecast is not shown)
+  temperature and humidity; with `show_forecast: true` also a forecast row (daily, or hourly
+  with `forecast_type: hourly`) when the block is tall enough, as many columns as fit
 - icons on tiles, sensor graphs and buttons, as in HA: the card's `icon`, else the entity's,
   else HA's icon for its integration, device class or domain (`show_icon: false` hides it).
   All Material Design Icons are built in (`tools/make_icons.py` -> `main/mdi_icons.bin`)

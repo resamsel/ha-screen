@@ -28,6 +28,11 @@ typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT
 #define LAYOUT_PIC_FILL      0x04   /* fit_mode: fill (stretch to the block) */
 #define LAYOUT_PIC_FLAGS     0x07   /* default fit_mode contain: whole image, aspect kept */
 
+/* weather-forecast card options (layout_item_t.flags) */
+#define LAYOUT_WX_FORECAST     0x01   /* show_forecast: true (off unless set) */
+#define LAYOUT_WX_HOURLY       0x02   /* forecast_type: hourly (else daily) */
+#define LAYOUT_WX_FLAGS        0x03
+
 /* glance card options (layout_item_t.flags), one item per entity of the card */
 #define LAYOUT_GLANCE_NO_NAME  0x01   /* show_name: false */
 #define LAYOUT_GLANCE_NO_STATE 0x02   /* show_state: false */
