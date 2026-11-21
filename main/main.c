@@ -1169,6 +1169,14 @@ static void wx_place(int pg, int i)
     lv_obj_set_pos(u, w - pad - uw, y + 3);
     lv_obj_set_pos(t, w - pad - uw - 3 - tw, y);
     lv_obj_set_pos(hm, w - pad - lv_obj_get_width(hm), y + th + 1);
+    if (top < 0) {                        /* side by side: condition and name get all the room
+                                           * left of the temperature/humidity, not a fixed guess */
+        lv_obj_t *c = s_wx_cond[pg][i], *n = s_wx_name[pg][i];
+        int tx = lv_obj_get_x(c);
+        int right = LV_MIN(w - pad - uw - 3 - tw, w - pad - lv_obj_get_width(hm)) - 8;
+        lv_obj_set_width(c, LV_MAX(right - tx, 20));
+        lv_obj_set_width(n, LV_MAX(right - tx, 20));
+    }
 }
 
 static void ha_weather_changed(int page, int row, const char *cond, const char *temp, const char *unit,
