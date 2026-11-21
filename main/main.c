@@ -2329,15 +2329,18 @@ static lv_timer_t *s_pres_timer;
 static lv_obj_t *s_pres_btn, *s_pres_int_btn, *s_pres_caption;
 static bool s_cfg_open, s_paging, s_dragging;   /* defined below */
 
-static void pres_touch(void) { s_pres_last = lv_tick_get(); }
+static bool s_pres_touched;          /* the last reset was a touch: wait at least PRES_PAUSE_MS */
+static void pres_touch(void) { s_pres_last = lv_tick_get(); s_pres_touched = true; }
 
 static void pres_timer_cb(lv_timer_t *t)
 {
     (void)t;
     if (!s_pres_on || s_cfg_open || PAGE_COUNT < 2 || s_paging || s_dragging) return;
     uint32_t wait = (uint32_t)s_pres_secs * 1000;
+    if (s_pres_touched && wait < PRES_PAUSE_MS) wait = PRES_PAUSE_MS;
     if (lv_tick_elaps(s_pres_last) < wait) return;
     s_pres_last = lv_tick_get();
+    s_pres_touched = false;
     show_page((s_page + 1) % PAGE_COUNT);
 }
 
