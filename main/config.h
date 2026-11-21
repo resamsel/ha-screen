@@ -21,6 +21,10 @@
 /* Screen orientation, toggled in Settings; on = landscape, off = portrait */
 #define HA_LANDSCAPE_ENTITY  "input_boolean.dev_landscape"
 
+/* Presentation mode (config panel page "Presentation"): on/off and the seconds per page */
+#define HA_PRES_ENTITY          "input_boolean.dev_presentation"
+#define HA_PRES_INTERVAL_ENTITY "input_number.dev_presentation_interval"
+
 /* Backlight brightness, shown and set by the slider (uses the entity's min/max) */
 #define HA_BRIGHTNESS_ENTITY "input_number.dev_brightness"
 
