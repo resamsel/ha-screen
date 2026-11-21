@@ -426,3 +426,24 @@ int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t
     l->count = np;
     return np;
 }
+
+int layout_parse_dashboards(const char *msg, const char *cur, layout_view_t *out, int max, int *current)
+{
+    int n = 0;
+    *current = -1;
+    cJSON *root = msg ? cJSON_Parse(msg) : NULL;
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "result"), *d;
+    if (cJSON_IsArray(list)) cJSON_ArrayForEach(d, list) {
+        if (n >= max) break;
+        const char *path = str(d, "url_path"), *title = str(d, "title");
+        if (!path || !path[0]) continue;
+        layout_view_t *v = &out[n];
+        memset(v, 0, sizeof(*v));
+        snprintf(v->path, sizeof(v->path), "%s", path);
+        snprintf(v->title, sizeof(v->title), "%s", title && title[0] ? title : path);
+        if (cur && !strcmp(v->path, cur)) *current = n;
+        n++;
+    }
+    cJSON_Delete(root);
+    return n;
+}
