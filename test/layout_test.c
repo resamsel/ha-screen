@@ -382,6 +382,32 @@ static void test_picture_glance(void)
     assert(parse_sections("[" SEC("{\"type\":\"picture-glance\",\"entities\":[\"sensor.a\"]}") "]", &l) == 0);   /* no image */
 }
 
+static void test_calendar(void)
+{
+    ha_layout_t l;
+    /* entities as strings or objects, title as name, one block per card */
+    assert(parse_sections("[" SEC("{\"type\":\"calendar\",\"title\":\"Termine\",\"initial_view\":\"listWeek\","
+                                  "\"entities\":[\"calendar.family\",{\"entity\":\"calendar.work\"}]}" "," TILE("sensor.t")) "]", &l) == 1);
+    const layout_item_t *it = &l.pages[0].items[0];
+    assert(l.pages[0].kind == LAYOUT_CALENDAR && l.pages[0].count == 2);
+    assert(!strcmp(it->entity, "calendar.family") && !strcmp(it->name, "Termine"));
+    assert(it->cal == 1 && !strcmp(l.cals[0], "calendar.family,calendar.work"));
+    assert((it->flags & LAYOUT_CAL_SPAN) == LAYOUT_CAL_WEEK);
+    uint32_t before = layout_hash(&l);
+    assert(layout_sanitize(&l) && layout_hash(&l) == before);   /* cache hit */
+    l.pages[0].items[0].flags = 0xFF;
+    assert(layout_sanitize(&l) && l.pages[0].items[0].flags == LAYOUT_CAL_FLAGS && l.pages[0].items[0].cal == 1);
+    l.pages[0].items[1].cal = 3;   /* only calendars keep an index */
+    assert(layout_sanitize(&l) && l.pages[0].items[1].cal == 0);
+    /* views from initial_view (none = month, as in HA); two cards get their own lists */
+    assert(parse_sections("[" SEC("{\"type\":\"calendar\",\"initial_view\":\"dayGridDay\",\"entities\":[\"calendar.a\"]}" ","
+                                  "{\"type\":\"calendar\",\"entities\":[\"calendar.b\"]}") "]", &l) == 1);
+    assert(l.pages[0].items[0].flags == LAYOUT_CAL_DAY && l.pages[0].items[1].flags == LAYOUT_CAL_MONTH);
+    assert(l.pages[0].items[1].cal == 2 && !strcmp(l.cals[1], "calendar.b"));
+    /* no entities: skipped */
+    assert(parse_sections("[" SEC("{\"type\":\"calendar\",\"entities\":[]}") "]", &l) == 0);
+}
+
 static void test_weather(void)
 {
     ha_layout_t l;
@@ -433,6 +459,7 @@ int main(void)
     test_buttons();
     test_filter_kind();
     test_sanitize();
+    test_calendar();
     test_fixture();
     test_name();
     test_name_template();

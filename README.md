@@ -25,6 +25,12 @@ once the board first reaches HA). The board re-reads it every minute and rebuild
 - a `weather-forecast` card = current weather of a `weather.*` entity: icon, condition, name,
   temperature and humidity; with `show_forecast: true` also a forecast row (daily, or hourly
   with `forecast_type: hourly`) when the block is tall enough, as many columns as fit
+- a `calendar` card = the events of its `calendar.*` entities, merged, in the card's
+  `initial_view`: Day = today's events ("● 13:00 title … 1h": a dot in the calendar's colour, the duration right-aligned, long
+  titles on up to two lines), List (7 days) = the next 7 days'
+  events under day headings, Month (HA's default) = a month grid with today circled and a dot on
+  days with events. Up to 8 events, as many as fit. The heading is `title`, else the date.
+  Up to 4 calendar cards per dashboard view
 - icons on tiles, sensor graphs and buttons, as in HA: the card's `icon`, else the entity's,
   else HA's icon for its integration, device class or domain (`show_icon: false` hides it).
   All Material Design Icons are built in (`tools/make_icons.py` -> `main/mdi_icons.bin`)
@@ -196,7 +202,7 @@ unset for firmware you share.
 
 ## Start-up cache
 
-The last dashboard layout and card data (values, graph history, buttons, weather, icons, theme)
+The last dashboard layout and card data (values, graph history, buttons, weather, calendars, icons, theme)
 are kept in the `cache` flash partition and shown right after booting, before Wi-Fi and HA
 answer. The layout is saved when it changes, the data a minute after start and then at most
 every 15 min (`HA_CACHE_INTERVAL_MS`). The partition table must be flashed once (see below).

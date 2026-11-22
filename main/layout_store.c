@@ -5,7 +5,7 @@
 #include "cache_store.h"
 
 /* The layout lives in the flash cache partition: at ~10 KB it no longer fits in NVS */
-#define VERSION 8   /* bump when ha_layout_t changes */
+#define VERSION 9   /* bump when ha_layout_t changes */
 
 bool layout_store_load(ha_layout_t *out)
 {

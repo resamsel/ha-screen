@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "layout.h"
+#include "cal_parse.h"
 
 typedef enum {
     HA_STATE_OFFLINE,  /* no Wi-Fi */
@@ -113,6 +114,12 @@ void ha_client_set_weather_cb(ha_weather_cb_t cb);  /* call before ha_client_sta
 typedef struct { int64_t t; char cond[16]; char hi[8]; char lo[8]; } ha_forecast_t;
 typedef void (*ha_forecast_cb_t)(int page, int row, const ha_forecast_t *f, int n, bool hourly);
 void ha_client_set_forecast_cb(ha_forecast_cb_t cb);  /* call before ha_client_start */
+
+/* Calendar card: up to CAL_MAX_EVENTS events of its calendars (calendar.get_events), earliest
+ * first: today's (day view), the next 7 days' (list view) or the month's (month view: also
+ * mask, bit d-1 = an event on day d of the month starting at month, local midnight UTC s). */
+typedef void (*ha_calendar_cb_t)(int page, int row, const cal_event_t *ev, int n, uint32_t mask, int64_t month);
+void ha_client_set_calendar_cb(ha_calendar_cb_t cb);  /* call before ha_client_start */
 
 /* The page now on screen and the size of each of its picture blocks (0 = no picture).
  * Its pictures are fetched at once, then every HA_PICTURE_INTERVAL_MS while it stays shown. */

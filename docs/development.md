@@ -4,8 +4,8 @@ Things that aren't obvious from the code.
 
 ## Host tests
 
-The parser (`main/layout.c`), name shortening (`main/names.c`) and the time-zone table
-(`main/tz.c`) build and run on the host without the board:
+The parser (`main/layout.c`), the calendar event parser (`main/cal_parse.c`), name shortening
+(`main/names.c`) and the time-zone table (`main/tz.c`) build and run on the host without the board:
 
 ```bash
 docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.3.2 sh test/run.sh
