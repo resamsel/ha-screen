@@ -42,6 +42,16 @@ void ha_client_press(int page, int row);
 typedef void (*ha_setup_cb_t)(const char *name_entity, const char *name);
 void ha_client_set_setup_cb(ha_setup_cb_t cb);  /* call before ha_client_start */
 
+/* The board's own settings, for helpers created after setup (they start with these values).
+ * Called from the network task. */
+typedef struct {
+    bool dark, landscape, pres_on;
+    int pres_secs, bri_pct, page;      /* page counted from 0 */
+    char dash[32], view[32];
+} ha_local_t;
+typedef void (*ha_local_cb_t)(ha_local_t *out);
+void ha_client_set_local_cb(ha_local_cb_t cb);  /* call before ha_client_start */
+
 /* true while the network task talks to HA (a poll, a tap, the dashboard check), then false */
 typedef void (*ha_busy_cb_t)(bool busy);
 void ha_client_set_busy_cb(ha_busy_cb_t cb);      /* call before ha_client_start */

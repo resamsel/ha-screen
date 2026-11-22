@@ -38,6 +38,10 @@ No helpers are needed: a new board works right after setup and keeps its setting
 orientation, brightness, presentation mode, dashboard, view, page) itself. Create any of the
 helpers below later and the board hands that setting to HA from then on.
 
+After the setup portal is saved, and whenever the board's name changes, the board creates its
+missing helpers itself, starting with its current settings. This needs the token of an HA
+admin user; with any other token it skips them.
+
 Each board gets an ID from its MAC, e.g. `screen_a1b2c3`. Its name (e.g. `kitchen`; slugified
 like HA object IDs) is set in the setup portal; the text helper `input_text.screen_a1b2c3`, if
 it exists and isn't empty, overrides it. The name prefixes the board's own helpers:

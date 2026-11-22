@@ -111,6 +111,7 @@ static void ha_update_done(bool ok, bool refresh);
 static void ha_errors(const char *errors);
 static void ha_setup(const char *name_entity, const char *name);
 static void portal_shown(const char *ap);
+static void local_settings(ha_local_t *o);
 static bool s_busy = false;
 static bool s_pres_on = false;        /* presentation mode (see "Presentation mode") */
 static uint16_t s_pres_secs = 10;   /* a refresh or view change is on its way */
@@ -264,6 +265,7 @@ void app_main(void)
     tzset();
     ha_client_set_error_cb(ha_errors);
     ha_client_set_setup_cb(ha_setup);
+    ha_client_set_local_cb(local_settings);
     ha_client_set_landscape_cb(ha_landscape_changed);
     ha_client_set_pres_cb(ha_pres_changed);
     ha_client_set_layout_cb(ha_layout_changed);
@@ -3195,6 +3197,21 @@ static void choose_open(bool dashboards)
         lv_obj_set_style_text_color(l, text, 0);
         lv_obj_center(l);
     }
+}
+
+/* The board's own settings, for helpers created after setup (network task) */
+static void local_settings(ha_local_t *o)
+{
+    if (!lvgl_port_lock(0)) return;
+    o->dark = !s_light;
+    o->landscape = s_landscape;
+    o->pres_on = s_pres_on;
+    o->pres_secs = s_pres_secs;
+    o->bri_pct = s_boot_bri;
+    o->page = s_page;
+    snprintf(o->dash, sizeof(o->dash), "%s", s_dash_path);
+    snprintf(o->view, sizeof(o->view), "%s", s_view_path);
+    lvgl_port_unlock();
 }
 
 /* Setup portal (issue #15): how to reach it */
