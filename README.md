@@ -65,6 +65,41 @@ flash. Dashboard, view and page are synced both ways (the last change wins): set
 HA switches the board, swiping or picking a view on the board writes them. The page isn't
 written while presentation mode is on. Diagnostics go to `sensor.<name>_*`.
 
+### Night mode
+
+While `input_boolean.<name>_night` is on, the backlight runs at the night brightness (0 = off);
+a touch on a dark screen only wakes it. The board has no schedule of its own: switch the helper
+from HA. Example automation (*Settings → Automations → Create → Edit in YAML*), night from
+sunset to dawn (30 min before sunrise) for a board named `kitchen`:
+
+```yaml
+alias: "kitchen screen: night mode at sunset, off at dawn"
+mode: single
+triggers:
+  - trigger: sun
+    event: sunset
+    id: night
+  - trigger: sun
+    event: sunrise
+    offset: "-00:30:00"
+    id: day
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: night
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.kitchen_night
+    default:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.kitchen_night
+```
+
+Any other trigger works the same way: a time, a bedtime scene, presence, a `schedule` helper.
+
 ## Wi-Fi and Home Assistant setup
 
 Wi-Fi name and password, the HA URL and the HA token are kept in flash (NVS) and set on the
