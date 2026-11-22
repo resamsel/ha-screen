@@ -38,8 +38,12 @@ fits a slot), the `cache` and `otadata`. NVS stays where it was, so a board keep
   everything over USB once, as above. After that, updates go over the air.
 - **USB flashing later**: writing only the app to `0x10000` doesn't run it when the board last
   updated into `ota_1`; also write `ota_data_initial.bin` to `0x7f0000` (resets to `ota_0`).
-- **Icons** aren't updated over the air. A changed `mdi_icons.bin` needs a USB flash of the
-  `icons` partition; without a valid blob the board just shows no icons.
+- **Icons** come with an update: after writing a new app, *Update* streams the release's
+  `mdi_icons.bin` (next to `ha-screen.bin`) and compares it with the `icons` partition; only if
+  it differs is it downloaded again and written (no RAM for 2.3 MB, so two passes). The magic
+  `MDI1` is written last, so an interrupted write leaves the board without icons rather than
+  with garbage; *Update* on the same app version then repairs a missing/broken blob. A failed
+  icon download still restarts into the new app.
 - **Releases**: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds with the
   tag as app version and publishes `ha-screen.bin` (plus the USB flashing files). The panel's
   Firmware page shows the running version; *Update* fetches
@@ -49,7 +53,7 @@ fits a slot), the `cache` and `otadata`. NVS stays where it was, so a board keep
   watchdog or reset before that boots the previous image again.
 - **Testing OTA locally**: add `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y`, point `HA_OTA_URL` at
   `http://<mac>:8765/ha-screen.bin`, give two builds different `version.txt` contents and
-  serve one with `python3 -m http.server 8765`.
+  serve one (plus `mdi_icons.bin`) with `python3 -m http.server 8765`.
 
 ## Generated assets
 

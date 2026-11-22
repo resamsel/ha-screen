@@ -78,7 +78,8 @@ written while presentation mode is on. Diagnostics go to `sensor.<name>_*`.
 ### Firmware updates
 
 The config panel's last page (*Firmware*) shows the running version. *Update* installs the
-latest [release](https://github.com/resamsel/ha-screen/releases) over Wi-Fi and restarts; if
+latest [release](https://github.com/resamsel/ha-screen/releases) (firmware and icons) over
+Wi-Fi and restarts; if
 the new firmware doesn't run for a minute, the board goes back to the previous one. Boards
 flashed before OTA support need one USB flash of everything first (see `docs/development.md`).
 
