@@ -2490,11 +2490,10 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colo
 static lv_obj_t *s_cfg = NULL;
 static lv_obj_t *s_cfg_title = NULL;
 static lv_obj_t *s_bri_caption = NULL;
-#define CFG_PAGES    5    /* settings (refresh, view), display, presentation, night, errors */
+#define CFG_PAGES    4    /* settings (refresh, view), display, presentation, night */
 #define CFG_PRES_PAGE 2
 #define CFG_NIGHT_PAGE 3
-#define CFG_ERR_PAGE 4
-static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Presentation", "Night", "Errors"};
+static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Presentation", "Night"};
 
 /* ---- Presentation mode: cycle through the pages every s_pres_secs, wrapping at the end.
  * A touch pauses it (PRES_PAUSE_MS after the last touch, or one interval if longer), and it
@@ -2764,28 +2763,10 @@ static void ha_night_changed(int night, int pct, int timeout_min)
     lvgl_port_unlock();
 }
 
-#define NO_ERRORS    "No errors"
-static lv_obj_t *s_err_box = NULL, *s_err_label = NULL;
 static lv_obj_t *s_cfg_strip = NULL, *s_cfg_dot[CFG_PAGES];
 static int s_cfg_page = 0;
-enum { CFG_UNDECIDED, CFG_VERTICAL, CFG_PAGING, CFG_SCROLL };
-static int s_cfg_mode;
-static lv_coord_t s_err_scroll, s_err_scroll_start;   /* error text scrolled up by this much */
-
-/* How far the error text can scroll: its height beyond the visible area */
-static lv_coord_t err_scroll_max(void)
-{
-    lv_obj_update_layout(s_err_label);
-    lv_coord_t m = lv_obj_get_height(s_err_label) - lv_obj_get_height(s_err_box);
-    return m > 0 ? m : 0;
-}
-
-static void err_scroll_to(lv_coord_t y)
-{
-    lv_coord_t m = err_scroll_max();
-    s_err_scroll = y < 0 ? 0 : y > m ? m : y;
-    lv_obj_set_y(s_err_label, -s_err_scroll);
-}                /* what a drag on the open panel does */
+enum { CFG_UNDECIDED, CFG_VERTICAL, CFG_PAGING };
+static int s_cfg_mode;                /* what a drag on the open panel does */
 static void apply_panel_theme(bool light);
 static void ha_errors(const char *errors);
 static bool s_cfg_open = false;
@@ -2884,11 +2865,7 @@ static void edge_swipe_cb(lv_event_t *e)
                 s_cfg_mode = CFG_PAGING;
                 lv_anim_del(s_cfg_strip, cfg_strip_x);
             } else {
-                /* errors page: scroll the text while it can move that way; dragging up
-                 * with the text already at its end (or fitting) closes the panel */
-                bool can = s_cfg_page == CFG_ERR_PAGE && (dy > 0 ? s_err_scroll > 0 : s_err_scroll < err_scroll_max());
-                s_cfg_mode = can ? CFG_SCROLL : CFG_VERTICAL;
-                s_err_scroll_start = s_err_scroll;
+                s_cfg_mode = CFG_VERTICAL;
             }
         }
         if (s_cfg_mode == CFG_PAGING) {
@@ -2897,7 +2874,6 @@ static void edge_swipe_cb(lv_event_t *e)
             lv_obj_set_x(s_cfg_strip, -s_cfg_page * CFG_W + dx);
             return;
         }
-        if (s_cfg_mode == CFG_SCROLL) { err_scroll_to(s_err_scroll_start - dy); return; }
         if (s_cfg_mode != CFG_VERTICAL) return;
         lv_coord_t y = (s_cfg_open ? 0 : -CFG_H) + dy;
         if (y > 0) y = 0;
@@ -2957,7 +2933,6 @@ static void create_ui(void)
     for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
         for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_fc_data[p][r]); s_fc_data[p][r] = NULL; }
     memset(s_full, 0, sizeof(s_full));
-    s_err_box = s_err_label = NULL;
     s_view_btn = s_view_caption = s_view_menu = NULL;
     s_pres_btn = s_pres_int_btn = s_pres_caption = NULL;
     s_night_btn = s_night_sl = s_scr_to_btn = NULL;
@@ -3081,21 +3056,6 @@ static void create_ui(void)
 
     create_night_page(cp[CFG_NIGHT_PAGE]);
 
-    /* Errors page: HA errors from the last poll, scrolls when the text is long */
-    lv_coord_t ey = STATUS_H + 6;
-    /* A plain, non-clickable clip area: touches pass through to the panel, which scrolls
-     * the text itself (see edge_swipe_cb) */
-    s_err_box = lv_obj_create(cp[CFG_ERR_PAGE]);
-    lv_obj_remove_style_all(s_err_box);
-    lv_obj_set_size(s_err_box, CFG_W - 20, SCR_H - ey - DOTS_H - 4);
-    lv_obj_set_pos(s_err_box, 10, ey);
-    lv_obj_clear_flag(s_err_box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    s_err_label = lv_label_create(s_err_box);
-    lv_label_set_long_mode(s_err_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_err_label, lv_pct(100));
-    lv_obj_set_style_text_font(s_err_label, &lv_font_latin_14, 0);
-    lv_label_set_text(s_err_label, NO_ERRORS);
-
     /* Page dots at the bottom of the panel */
     for (int i = 0; i < CFG_PAGES; i++) {
         s_cfg_dot[i] = lv_obj_create(s_cfg);
@@ -3130,11 +3090,6 @@ static void apply_panel_theme(bool light)
     if (s_view_caption) lv_obj_set_style_text_color(s_view_caption, text, 0);
     if (s_pres_caption) lv_obj_set_style_text_color(s_pres_caption, text, 0);
     if (s_dash_caption) lv_obj_set_style_text_color(s_dash_caption, text, 0);
-    if (s_err_box) {
-        bool none = strcmp(lv_label_get_text(s_err_label), NO_ERRORS) == 0;
-        lv_obj_set_style_text_color(s_err_label, none ? lv_color_hex(light ? 0x5F6368 : 0x8A8F98)
-                                                      : lv_color_hex(light ? 0xC62828 : 0xE74C3C), 0);
-    }
     for (int i = 0; i < CFG_PAGES; i++) {
         if (!s_cfg_dot[i]) continue;
         lv_obj_set_style_bg_color(s_cfg_dot[i], i == s_cfg_page ? text : lv_color_hex(light ? 0xAEB4BE : 0x4A5058), 0);
@@ -3261,7 +3216,7 @@ static void ha_update_done(bool ok, bool refresh)
     s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = false;
     if (!refresh) { lvgl_port_unlock(); return; }   /* a refresh still on its way stays busy */
     set_busy(false);
-    if (s_refreshing) { /* errors show in the panel's error box, not on the buttons */
+    if (s_refreshing) { /* errors show in the status icon and HA's log, not on the buttons */
         s_refreshing = false;
         lv_label_set_text(lv_obj_get_child(s_refresh_btn, 0), LV_SYMBOL_REFRESH " Refresh");
     }
@@ -3421,14 +3376,6 @@ static void ha_errors(const char *errors)
         load_err_update();
         lvgl_port_unlock();
     }
-    if (!s_err_label || !lvgl_port_lock(0)) return;
-    const char *t = errors[0] ? errors : NO_ERRORS;
-    if (strcmp(lv_label_get_text(s_err_label), t) != 0) {
-        lv_label_set_text(s_err_label, t);
-        err_scroll_to(s_err_scroll);  /* keep the offset within the new text */
-        apply_panel_theme(s_light);
-    }
-    lvgl_port_unlock();
 }
 
 static lv_color_t neutral_btn_color(void)
