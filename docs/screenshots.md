@@ -12,7 +12,7 @@ Every screen in each theme and orientation, taken from the board with `tools/scr
 
 ![demo 1](screenshots/dark-portrait/demo-page1.png) ![demo 2](screenshots/dark-portrait/demo-page2.png) ![demo 3](screenshots/dark-portrait/demo-page3.png) ![demo 4](screenshots/dark-portrait/demo-page4.png) ![demo 5](screenshots/dark-portrait/demo-page5.png)
 
-**Config panel (Settings, Display, Errors)**
+**Config panel (Settings, Display, Presentation, Night)**
 
 ![config 1](screenshots/dark-portrait/config-1.png) ![config 2](screenshots/dark-portrait/config-2.png) ![config 3](screenshots/dark-portrait/config-3.png)
 
@@ -26,7 +26,7 @@ Every screen in each theme and orientation, taken from the board with `tools/scr
 
 ![demo 1](screenshots/dark-landscape/demo-page1.png) ![demo 2](screenshots/dark-landscape/demo-page2.png) ![demo 3](screenshots/dark-landscape/demo-page3.png) ![demo 4](screenshots/dark-landscape/demo-page4.png) ![demo 5](screenshots/dark-landscape/demo-page5.png)
 
-**Config panel (Settings, Display, Errors)**
+**Config panel (Settings, Display, Presentation, Night)**
 
 ![config 1](screenshots/dark-landscape/config-1.png) ![config 2](screenshots/dark-landscape/config-2.png) ![config 3](screenshots/dark-landscape/config-3.png)
 
@@ -40,7 +40,7 @@ Every screen in each theme and orientation, taken from the board with `tools/scr
 
 ![demo 1](screenshots/light-portrait/demo-page1.png) ![demo 2](screenshots/light-portrait/demo-page2.png) ![demo 3](screenshots/light-portrait/demo-page3.png) ![demo 4](screenshots/light-portrait/demo-page4.png) ![demo 5](screenshots/light-portrait/demo-page5.png)
 
-**Config panel (Settings, Display, Errors)**
+**Config panel (Settings, Display, Presentation, Night)**
 
 ![config 1](screenshots/light-portrait/config-1.png) ![config 2](screenshots/light-portrait/config-2.png) ![config 3](screenshots/light-portrait/config-3.png)
 
@@ -54,6 +54,6 @@ Every screen in each theme and orientation, taken from the board with `tools/scr
 
 ![demo 1](screenshots/light-landscape/demo-page1.png) ![demo 2](screenshots/light-landscape/demo-page2.png) ![demo 3](screenshots/light-landscape/demo-page3.png) ![demo 4](screenshots/light-landscape/demo-page4.png) ![demo 5](screenshots/light-landscape/demo-page5.png)
 
-**Config panel (Settings, Display, Errors)**
+**Config panel (Settings, Display, Presentation, Night)**
 
 ![config 1](screenshots/light-landscape/config-1.png) ![config 2](screenshots/light-landscape/config-2.png) ![config 3](screenshots/light-landscape/config-3.png)
