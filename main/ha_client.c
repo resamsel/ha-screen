@@ -36,7 +36,7 @@ static void add_error(const char *fmt, ...);
 
 #include "config.h"
 
-#include "secrets_env.h"   /* WIFI_SSID, WIFI_PASS, HA_TOKEN from the build environment */
+#include "provision.h"
 
 static const char *TAG = "ha";
 
@@ -97,7 +97,7 @@ static ha_views_cb_t s_views_cb;
 void ha_client_set_views_cb(ha_views_cb_t cb) { s_views_cb = cb; }
 static portMUX_TYPE s_view_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_view[32];                   /* view path chosen in the config panel, "" = first */
-static char s_dash[32];                   /* dashboard url_path chosen there, "" = HA_DASHBOARD */
+static char s_dash[32];                   /* dashboard url_path chosen there, "" = none chosen yet */
 static ha_dashboards_cb_t s_dashes_cb;
 void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb) { s_dashes_cb = cb; }
 
@@ -147,6 +147,26 @@ static void report_dashboards(const char *msg, const char *cur)
     if (s_dashes_cb) s_dashes_cb(d, n, current);
 }
 
+/* Wi-Fi or HA never worked since boot (wrong password, URL or token; moved board): reboot
+ * into the setup portal with the reason. The portal returns to normal after a while if
+ * nobody uses it (router or HA outage). Stopped by HA's first answer that accepts the token. */
+static esp_timer_handle_t s_nowifi_timer;
+static volatile bool s_wifi_ever;           /* got an IP since boot */
+static volatile int s_ha_last = -1;         /* last HA status: -1 no answer, 401/403 token */
+static void nowifi_fired(void *arg)
+{
+    char why[160];
+    if (!s_wifi_ever)
+        snprintf(why, sizeof(why), "Couldn't join the Wi-Fi \"%s\". Check its name and password.", prov_ssid());
+    else if (s_ha_last == 401 || s_ha_last == 403)
+        snprintf(why, sizeof(why), "Home Assistant rejected the access token.");
+    else
+        snprintf(why, sizeof(why), "Couldn't reach Home Assistant at %s. Check the URL.", prov_url());
+    ESP_LOGW(TAG, "%s Opening the setup portal.", why);
+    prov_request_portal(why);
+    esp_restart();
+}
+
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -160,6 +180,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
         ESP_LOGI(TAG, "Wi-Fi up, IP " IPSTR, IP2STR(&e->ip_info.ip));
+        s_wifi_ever = true;
         xEventGroupSetBits(s_events, WIFI_UP_BIT | WAKE_BIT);
     }
 }
@@ -318,7 +339,7 @@ static int ha_request_once(esp_http_client_method_t method, const char *url, con
             .event_handler = http_event,
         };
         s_http = esp_http_client_init(&cfg);
-        esp_http_client_set_header(s_http, "Authorization", "Bearer " HA_TOKEN);
+        esp_http_client_set_header(s_http, "Authorization", prov_bearer());
         esp_http_client_set_header(s_http, "Content-Type", "application/json");
     }
     if (resp) { resp->len = 0; resp->buf[0] = 0; }
@@ -344,10 +365,11 @@ static int ha_request_once(esp_http_client_method_t method, const char *url, con
 /* Request with retries: transport errors, 5xx and 429 are retried up to HA_HTTP_RETRIES
  * times with growing pauses; 4xx are final. Toggles aren't idempotent, so they are only
  * retried when the connection couldn't be opened (the request never reached HA). */
+static bool s_optional;                /* the request is for an optional helper: 404 is fine */
 static int ha_request(esp_http_client_method_t method, const char *path, const char *body, resp_t *resp)
 {
     char url[256];
-    snprintf(url, sizeof(url), "%s%s", HA_URL, path);
+    snprintf(url, sizeof(url), "%s%s", prov_url(), path);
     bool idempotent = strstr(path, "/toggle") == NULL;
     esp_err_t err = ESP_OK;
     int status = -1;
@@ -361,9 +383,17 @@ static int ha_request(esp_http_client_method_t method, const char *path, const c
                                 : idempotent && (status >= 500 || status == 429);
         if (!retry) break;
     }
+    s_ha_last = status;
+    if (status >= 0 && status != 401 && status != 403 && s_nowifi_timer) {
+        esp_timer_stop(s_nowifi_timer);     /* HA answered and took the token: setup works */
+        esp_timer_delete(s_nowifi_timer);
+        s_nowifi_timer = NULL;
+    }
     if (status < 0) {
         ESP_LOGE(TAG, "%s failed: %s", path, esp_err_to_name(err));
         add_error("%s: %s", path, esp_err_to_name(err));
+    } else if (status == 404 && s_optional) {
+        /* an optional helper that doesn't exist: not an error */
     } else if (status >= 300) {
         ESP_LOGE(TAG, "%s -> HTTP %d", path, status);
         add_error("%s: HTTP %d", path, status);
@@ -394,10 +424,17 @@ static void add_error(const char *fmt, ...)
 static char s_board_id[20];             /* screen_a1b2c3 */
 static char s_name_ent[48];             /* input_text.screen_a1b2c3 */
 static char s_board[32];                /* the name ("" = not set) */
+static char s_board_raw[32];            /* the name as typed in the setup portal */
+static bool s_name_push;                /* portal saved a name: write it to the HA helper */
 static volatile bool s_name_changed;    /* live event: the name entity changed */
 static struct {
     char theme[80], land[80], pres[80], pres_int[80], bri[80], dash[80], view[80], page[80];
 } s_ent;
+/* Which board helpers HA has: 1 yes, 0 no (404), -1 not asked yet. Every helper is optional:
+ * without one the board keeps that setting itself, and writes to a missing one are skipped. */
+enum { H_THEME, H_LAND, H_PRES, H_PRES_INT, H_BRI, H_DASH, H_VIEW, H_PAGE, H_COUNT };
+static int8_t s_has[H_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1};
+static bool has(int h) { return s_has[h] != 0; }
 static ha_setup_cb_t s_setup_cb;
 void ha_client_set_setup_cb(ha_setup_cb_t cb) { s_setup_cb = cb; }
 
@@ -428,9 +465,10 @@ static void board_slug(const char *in, char *out, size_t n)
     out[o] = 0;
 }
 
+/* The board works without the name helper (the name comes from the setup portal) */
 static void board_report(void)
 {
-    if (s_setup_cb) s_setup_cb(s_board[0] ? NULL : s_name_ent, s_board);
+    if (s_setup_cb) s_setup_cb(NULL, s_board);
 }
 
 /* New name (already a slug, "" = not set): saved to NVS, helper IDs rebuilt. True if changed. */
@@ -462,6 +500,15 @@ static void board_init(void)
         if (nvs_get_str(h, "name", s_board, &n) != ESP_OK) s_board[0] = 0;
         nvs_close(h);
     }
+    uint8_t push = 0;
+    if (nvs_open("board", NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "push", &push);
+        nvs_close(h);
+    }
+    s_name_push = push;
+    snprintf(s_board_raw, sizeof(s_board_raw), "%s", s_board);   /* the portal stores it as typed */
+    board_slug(s_board_raw, s_board, sizeof(s_board));
+    if (!s_board[0]) snprintf(s_board, sizeof(s_board), "%s", s_board_id);   /* never named */
     ent_build();
     ESP_LOGI(TAG, "board %s, name '%s'", s_board_id, s_board);
 }
@@ -882,42 +929,75 @@ static void board_parse(const char *json, char *out, size_t n)
     board_slug(st, out, n);
 }
 
+static int ha_service(const char *path, const char *body);
+
+/* The portal's name goes to the name helper once, if HA has it; then the helper leads again */
+static void name_push_done(void)
+{
+    s_name_push = false;
+    nvs_handle_t h;
+    if (nvs_open("board", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, "push");
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
 static bool fetch_name(void)
 {
     resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
     char path[80], name[32] = "";
     snprintf(path, sizeof(path), "/api/states/%s", s_name_ent);
+    s_optional = true;
     int st = ha_request(HTTP_METHOD_GET, path, NULL, r);
-    if (st == 404) s_err[0] = 0;          /* not created yet: the setup screen says so */
-    if (st != 200 && st != 404) return false;
-    if (st == 200) board_parse(r->buf, name, sizeof(name));
+    s_optional = false;
+    if (st == 404 && s_name_push) name_push_done();   /* no helper: nothing to write */
+    if (st != 200) return false;          /* no helper (404) or no answer: keep the name */
+    if (s_name_push) {
+        char body[160];
+        snprintf(body, sizeof(body), "{\"entity_id\":\"%s\",\"value\":\"%s\"}", s_name_ent,
+                 s_board_raw[0] ? s_board_raw : s_board);
+        int ws = ha_service("/api/services/input_text/set_value", body);
+        ESP_LOGI(TAG, "name '%s' -> %s: %d", s_board_raw, s_name_ent, ws);
+        if (ws >= 200 && ws < 500) name_push_done();   /* done, or rejected: don't retry */
+        return false;                     /* the board's name stands */
+    }
+    board_parse(r->buf, name, sizeof(name));
+    if (!name[0]) return false;           /* helper empty: keep the name from the portal */
     return board_set(name);
 }
 
 /* GET a board helper; 0 while the board has no name (helpers aren't read then) */
-static int helper_get(const char *id, resp_t *r)
+static int helper_get(const char *id, resp_t *r, int h)
 {
     if (!s_board[0]) return 0;
     char path[112];
     snprintf(path, sizeof(path), "/api/states/%s", id);
-    return ha_request(HTTP_METHOD_GET, path, NULL, r);
+    s_optional = true;
+    int st = ha_request(HTTP_METHOD_GET, path, NULL, r);
+    s_optional = false;
+    if (st == 200) s_has[h] = 1;
+    else if (st == 404) s_has[h] = 0;
+    return st;
 }
 
 static bool fetch_state(void)
 {
     resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
-    int st = helper_get(s_ent.theme, r);
+    int st = helper_get(s_ent.theme, r, H_THEME);
     ha_state_t s = HA_STATE_UNKNOWN;
     if (st == 200) {
         if (strstr(r->buf, "\"state\":\"on\"")) s = HA_STATE_ON;
         else if (strstr(r->buf, "\"state\":\"off\"")) s = HA_STATE_OFF;
-    } else if (st != 0 && st != 404) {   /* no name / helper not created: HA still answered */
+    } else if (st == 404) {               /* no helper: the board keeps its own theme */
+        s = HA_STATE_LOCAL;
+    } else if (st != 0) {
         s = HA_STATE_ERROR;
     }
     if ((s == HA_STATE_ON || s == HA_STATE_OFF) && s != s_rec_theme) { s_rec_theme = s; s_rec_dirty = true; }
     if (s_state_cb) s_state_cb(s);
 
-    if (helper_get(s_ent.land, r) == 200) {
+    if (helper_get(s_ent.land, r, H_LAND) == 200) {
         bool on = strstr(r->buf, "\"state\":\"on\"") != NULL;
         bool off = strstr(r->buf, "\"state\":\"off\"") != NULL;
         if ((on || off) && s_land_cb) s_land_cb(on);
@@ -927,24 +1007,24 @@ static bool fetch_state(void)
     {
         int pon = -1;
         float secs = 0;
-        if (helper_get(s_ent.pres, r) == 200) {
+        if (helper_get(s_ent.pres, r, H_PRES) == 200) {
             if (strstr(r->buf, "\"state\":\"on\"")) pon = 1;
             else if (strstr(r->buf, "\"state\":\"off\"")) pon = 0;
         }
-        if (helper_get(s_ent.pres_int, r) == 200)
+        if (helper_get(s_ent.pres_int, r, H_PRES_INT) == 200)
             json_num(r->buf, "\"state\":\"", &secs);
         if (pon >= 0 && s_pres_cb) s_pres_cb(pon, (int)secs);
     }
 
     /* Brightness: input_number state like "42.0" plus its min/max attributes */
-    if (helper_get(s_ent.bri, r) == 200) parse_brightness(r->buf);
+    if (helper_get(s_ent.bri, r, H_BRI) == 200) parse_brightness(r->buf);
 
     /* Dashboard / view / page */
-    s_nav_dash_ok = helper_get(s_ent.dash, r) == 200 &&
+    s_nav_dash_ok = helper_get(s_ent.dash, r, H_DASH) == 200 &&
                     nav_text(r->buf, s_nav_dash, sizeof(s_nav_dash));
-    s_nav_view_ok = helper_get(s_ent.view, r) == 200 &&
+    s_nav_view_ok = helper_get(s_ent.view, r, H_VIEW) == 200 &&
                     nav_text(r->buf, s_nav_view, sizeof(s_nav_view));
-    s_nav_page = helper_get(s_ent.page, r) == 200 ? nav_page(r->buf) : -1;
+    s_nav_page = helper_get(s_ent.page, r, H_PAGE) == 200 ? nav_page(r->buf) : -1;
     nav_report();
 
     for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++) {
@@ -1375,7 +1455,7 @@ static void refresh_layout(bool force)
     taskEXIT_CRITICAL(&s_view_lock);
     char *list = NULL;
     char *json = dash_fetch_config(dash, &list);
-    if (list) report_dashboards(list, dash[0] ? dash : HA_DASHBOARD);
+    if (list) report_dashboards(list, dash);
     free(list);
     if (!json) return;
     int n = layout_parse_views(json, want, &l, views, LAYOUT_MAX_VIEWS, &nv, chosen);
@@ -1680,8 +1760,8 @@ static uint16_t *fetch_picture(const char *url, bool auth, uint8_t fit, int bw, 
     }
     d.http = esp_http_client_init(&cfg);
     if (!d.http) { free(d.win); free(d.inf); return NULL; }
-    if (auth) esp_http_client_set_header(d.http, "Authorization", "Bearer " HA_TOKEN);
-    const char *err = NULL, *path = auth ? url + strlen(HA_URL) : url;
+    if (auth) esp_http_client_set_header(d.http, "Authorization", prov_bearer());
+    const char *err = NULL, *path = auth ? url + strlen(prov_url()) : url;
     int st = -1;
     if (esp_http_client_open(d.http, 0) != ESP_OK || esp_http_client_fetch_headers(d.http) < 0) err = "connection failed";
     else if ((st = esp_http_client_get_status_code(d.http)) != 200) err = "HTTP error";
@@ -1735,10 +1815,10 @@ static void fetch_pictures(bool force)
         if (it->image && !entity) snprintf(key, sizeof(key), "%s", src);
         if (!camera && key[0] && !strcmp(key, s_pic_state[i])) continue;   /* same image */
         bool auth = true;
-        if (camera) snprintf(url, sizeof(url), "%s/api/camera_proxy/%s?width=%d&height=%d", HA_URL, src, w[i], h[i]);
-        else if (entity) snprintf(url, sizeof(url), "%s/api/image_proxy/%s", HA_URL, src);
-        else if (strstr(src, "://")) { snprintf(url, sizeof(url), "%s", src); auth = !strncmp(src, HA_URL "/", strlen(HA_URL) + 1); }
-        else snprintf(url, sizeof(url), "%s%s%s", HA_URL, src[0] == '/' ? "" : "/", src);
+        if (camera) snprintf(url, sizeof(url), "%s/api/camera_proxy/%s?width=%d&height=%d", prov_url(), src, w[i], h[i]);
+        else if (entity) snprintf(url, sizeof(url), "%s/api/image_proxy/%s", prov_url(), src);
+        else if (strstr(src, "://")) { snprintf(url, sizeof(url), "%s", src); size_t ul = strlen(prov_url()); auth = !strncmp(src, prov_url(), ul) && src[ul] == '/'; }
+        else snprintf(url, sizeof(url), "%s%s%s", prov_url(), src[0] == '/' ? "" : "/", src);
         int ow, oh, zoom;
         if (s_http) {                     /* two TLS sessions at once leave too little RAM to decode */
             esp_http_client_cleanup(s_http);
@@ -1956,6 +2036,11 @@ static bool do_user(EventBits_t b)
         b &= ~(SETBRI_BIT | PRES_BIT | NAV_BIT | ORIENT_BIT | TOGGLE_BIT);
         s_nav_writing = false;
     }
+    if (!has(H_BRI)) b &= ~SETBRI_BIT;    /* missing helpers: the board keeps the setting */
+    if (!has(H_PRES) && !has(H_PRES_INT)) b &= ~PRES_BIT;
+    if (!has(H_DASH) && !has(H_VIEW) && !has(H_PAGE)) { b &= ~NAV_BIT; s_nav_writing = false; }
+    if (!has(H_LAND)) b &= ~ORIENT_BIT;
+    if (!has(H_THEME)) b &= ~TOGGLE_BIT;
     if (b & SETBRI_BIT) {
         char sb[160];
         snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%.1f}", s_ent.bri, (double)s_set_value);
@@ -1968,10 +2053,10 @@ static bool do_user(EventBits_t b)
         char sb[160], pb[128];
         snprintf(pb, sizeof(pb), "{\"entity_id\":\"%s\"}", s_ent.pres);
         snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%d}", s_ent.pres_int, s_set_pres_secs);
-        int st = ha_service("/api/services/input_number/set_value", sb);
+        int st = has(H_PRES_INT) ? ha_service("/api/services/input_number/set_value", sb) : 200;
         ok &= st >= 200 && st < 300;
-        st = ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
-                        pb);
+        st = has(H_PRES) ? ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
+                                      pb) : 200;
         ok &= st >= 200 && st < 300;
     }
     if (b & NAV_BIT) {
@@ -2189,11 +2274,14 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
 
     wifi_config_t wc = {0};
-    strncpy((char *)wc.sta.ssid, WIFI_SSID, sizeof(wc.sta.ssid));
-    strncpy((char *)wc.sta.password, WIFI_PASS, sizeof(wc.sta.password));
+    strncpy((char *)wc.sta.ssid, prov_ssid(), sizeof(wc.sta.ssid));
+    strncpy((char *)wc.sta.password, prov_pass(), sizeof(wc.sta.password));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
+    const esp_timer_create_args_t ta = { .callback = nowifi_fired, .name = "nowifi" };
+    if (esp_timer_create(&ta, &s_nowifi_timer) == ESP_OK)
+        esp_timer_start_once(s_nowifi_timer, (uint64_t)HA_WIFI_PORTAL_S * 1000000);
 
     xTaskCreate(ha_task, "ha", 8192, NULL, 3, NULL);   /* also rebuilds the UI: 8 pages measured ~3.7 KB peak */
 }

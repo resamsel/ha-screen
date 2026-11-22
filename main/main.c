@@ -18,6 +18,9 @@
 #include "bsp_i2c.h"
 #include "bsp_spi.h"
 #include "ha_client.h"
+#include "provision.h"
+
+#define BUTTON_GPIO GPIO_NUM_9   /* BOOT button, low when pressed */
 #include "driver/gpio.h"
 static void button_init(void);
 #include "config.h"
@@ -107,11 +110,14 @@ static void slider_cb(lv_event_t *e);
 static void ha_update_done(bool ok, bool refresh);
 static void ha_errors(const char *errors);
 static void ha_setup(const char *name_entity, const char *name);
+static void portal_shown(const char *ap);
 static bool s_busy = false;
 static bool s_pres_on = false;        /* presentation mode (see "Presentation mode") */
 static uint16_t s_pres_secs = 10;   /* a refresh or view change is on its way */
 /* set locally, not yet confirmed by HA: HA's (older) value from a poll is ignored */
 static bool s_theme_pending, s_orient_pending, s_bri_pending, s_pres_pending;
+static float s_bri_min = 0, s_bri_max = 100;   /* the brightness helper's range (0-100 without one) */
+static uint8_t s_boot_bri = 100;   /* backlight % from NVS until HA (if it has the helper) answers */
 static bool s_theme_known;     /* the theme entity's state is known (label shows the action) */
 static bool s_offline_state = true;
 static void apply_theme(void);
@@ -135,10 +141,16 @@ static lv_obj_t *s_view_btn = NULL, *s_view_caption = NULL;
 static lv_obj_t *s_view_menu = NULL;  /* open view list (its backdrop), NULL when closed */
 static bool s_view_pending = false;   /* a view change is on its way */
 static void ha_views_changed(const layout_view_t *views, int n, int current);
+static void menu_open(lv_obj_t *btn, const layout_view_t *items, int n, int cur, lv_event_cb_t pick);
+static void view_pick_cb(lv_event_t *e);
+static void dash_pick_cb(lv_event_t *e);
+static bool s_ask_view;               /* dashboard picked in the modal: ask for the view next */
+static lv_obj_t *s_choose;            /* dashboard / view modal (layer top), or NULL */
+static void choose_open(bool dashboards);
 static void ha_dashes_changed(const layout_view_t *dashes, int n, int current);
 static layout_view_t s_dashes[LAYOUT_MAX_VIEWS];
 static int s_ndash, s_cur_dash = -1;
-static char s_dash_path[32];          /* chosen dashboard, kept in NVS; "" = HA_DASHBOARD */
+static char s_dash_path[32];          /* chosen dashboard, kept in NVS; "" = none chosen yet: asked for on the board */
 static int s_ha_page = -1;            /* page as the page helper last had it (0-based), -1 unknown */
 static lv_obj_t *s_dash_btn = NULL, *s_dash_caption = NULL;
 static void dash_cb(lv_event_t *e);
@@ -208,7 +220,7 @@ void app_main(void)
 
 
     bsp_display_brightness_init();
-    bsp_display_set_brightness(100);
+    bsp_display_set_brightness(100);   /* the stored brightness follows once NVS is read */
 
     if (lvgl_port_lock(0))
     {
@@ -225,16 +237,27 @@ void app_main(void)
             uint8_t pon = 0;
             if (nvs_get_u8(nv, "pres_on", &pon) == ESP_OK) s_pres_on = pon;
             nvs_get_u16(nv, "pres_s", &s_pres_secs);
+            uint8_t light, bri;
+            if (nvs_get_u8(nv, "light", &light) == ESP_OK) { s_light = light; s_theme_known = true; }
+            if (nvs_get_u8(nv, "bri", &bri) == ESP_OK) s_boot_bri = bri;
             if (s_pres_secs < 1) s_pres_secs = 10;
             size_t dlen = sizeof(s_dash_path);
             if (nvs_get_str(nv, "dash", s_dash_path, &dlen) != ESP_OK) s_dash_path[0] = 0;
             nvs_close(nv);
         }
         s_landscape = land;
+        bsp_display_set_brightness(s_boot_bri);
         apply_rotation();
         create_ui();
         button_init();
         lvgl_port_unlock();
+    }
+
+    prov_load();
+    bool boot_held = gpio_get_level(BUTTON_GPIO) == 0;   /* configured by button_init */
+    if (prov_portal_requested() || boot_held || !prov_ready()) {
+        screenshot_start();
+        prov_portal_run(HA_PORTAL_IDLE_S, portal_shown);   /* restarts, never returns */
     }
 
     setenv("TZ", HA_TIMEZONE, 1);   /* for local times on the graph axis */
@@ -1992,14 +2015,91 @@ static void create_graph(lv_obj_t *page)
 }
 
 
+/* Loading screen (no pages yet): what is wrong, and a way back to the setup portal */
+static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t color);
+static lv_obj_t *s_load_err;          /* its error text, or NULL when not shown */
+static char s_last_errors[640];       /* the network task's last error list */
+
+/* The gist of one error line ("<path>: <cause>"): the cause, in words where known */
+static void err_gist(const char *line, size_t len, char *out, size_t n)
+{
+    const char *c = line;
+    for (const char *p = line; p + 1 < line + len; p++)
+        if (p[0] == ':' && p[1] == ' ') c = p + 2;          /* after the last ": " */
+    int cl = (int)(line + len - c);
+    static const struct { const char *cause, *text; } map[] = {
+        {"HTTP 401", "Home Assistant rejected the access token"},
+        {"HTTP 403", "Home Assistant rejected the access token"},
+        {"ESP_ERR_HTTP_CONNECT", "Can't reach Home Assistant (check the URL)"},
+        {"ESP_ERR_HTTP_EAGAIN", "Home Assistant doesn't answer"},
+        {"ESP_ERR_HTTP_FETCH_HEADER", "Home Assistant doesn't answer"},
+        {"connection failed", "Can't reach Home Assistant (check the URL)"},
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if ((int)strlen(map[i].cause) == cl && !strncmp(c, map[i].cause, cl)) { snprintf(out, n, "%s", map[i].text); return; }
+    snprintf(out, n, "%.*s", cl, c);
+}
+
+/* Must be called with the LVGL lock held */
+static void load_err_update(void)
+{
+    if (!s_load_err) return;
+    if (!s_last_errors[0]) {
+        if (s_offline_state) lv_label_set_text_fmt(s_load_err, "Connecting to Wi-Fi \"%s\"...", prov_ssid());
+        else lv_label_set_text(s_load_err, "");
+        return;
+    }
+    char out[256] = "", g[96];             /* each different cause once, at most 3 */
+    int shown = 0;
+    for (const char *p = s_last_errors; *p && shown < 3; ) {
+        const char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        err_gist(p, len, g, sizeof(g));
+        if (g[0] && !strstr(out, g)) {
+            size_t o = strlen(out);
+            snprintf(out + o, sizeof(out) - o, "%s%s", o ? "\n" : "", g);
+            shown++;
+        }
+        p += len + (e ? 1 : 0);
+    }
+    lv_label_set_text(s_load_err, out);
+}
+
+static void setup_btn_cb(lv_event_t *e)
+{
+    prov_request_portal(NULL);
+    esp_restart();
+}
+
 static void create_pages(lv_obj_t *scr)
 {
+    s_load_err = NULL;
     if (!PAGE_COUNT) {   /* nothing from HA or the cache yet */
-        lv_obj_t *l = lv_label_create(scr);
-        lv_label_set_text(l, "Loading layout...");
+        lv_color_t text = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
+        lv_obj_t *box = lv_obj_create(scr);
+        lv_obj_remove_style_all(box);
+        lv_obj_set_size(box, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_style_pad_all(box, 10, 0);
+        lv_obj_set_style_pad_row(box, 10, 0);
+        lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(box, LV_OBJ_FLAG_EVENT_BUBBLE);   /* the config panel's edge swipe */
+        lv_obj_t *l = lv_label_create(box);
+        lv_label_set_text(l, "Loading...");
         lv_obj_set_style_text_font(l, &lv_font_latin_16, 0);
-        lv_obj_set_style_text_color(l, s_light ? lv_color_hex(0x1C1C1E) : lv_color_white(), 0);
-        lv_obj_center(l);
+        lv_obj_set_style_text_color(l, text, 0);
+        s_load_err = lv_label_create(box);
+        lv_obj_set_width(s_load_err, LV_PCT(100));
+        lv_obj_set_flex_grow(s_load_err, 0);
+        lv_label_set_long_mode(s_load_err, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_max_height(s_load_err, SCR_H / 2, 0);
+        lv_obj_set_style_text_font(s_load_err, &lv_font_latin_16, 0);
+        lv_obj_set_style_text_align(s_load_err, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_load_err, lv_color_hex(s_light ? 0x8E0E0E : 0xE74C3C), 0);
+        load_err_update();
+        lv_obj_t *b = make_button(box, "Setup", lv_color_hex(s_light ? 0x2C3440 : 0x5E5E6E));
+        lv_obj_add_event_cb(b, setup_btn_cb, LV_EVENT_CLICKED, NULL);
         s_strip = NULL;
         s_page_title = NULL;
         return;
@@ -2769,8 +2869,8 @@ static void create_ui(void)
     lv_obj_t *sl = lv_slider_create(cp[1]);
     lv_obj_set_width(sl, 132);
     lv_obj_align_to(sl, s_bri_caption, LV_ALIGN_OUT_BOTTOM_LEFT, 8, 16);
-    lv_slider_set_range(sl, 0, 100);
-    lv_slider_set_value(sl, 100, LV_ANIM_OFF);
+    lv_slider_set_range(sl, (int32_t)s_bri_min, (int32_t)s_bri_max);
+    lv_slider_set_value(sl, (int32_t)(s_bri_min + s_boot_bri * (s_bri_max - s_bri_min) / 100.0f + 0.5f), LV_ANIM_OFF);
     lv_obj_set_style_bg_color(sl, lv_color_hex(0x18BCF2), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(sl, lv_color_hex(0x18BCF2), LV_PART_KNOB);
     lv_obj_set_ext_click_area(sl, 12);
@@ -2987,10 +3087,9 @@ static void ha_update_done(bool ok, bool refresh)
 /* Setup screen (issue #24): while the board has no name, a full-screen note naming the HA
  * helper to create. Not clickable: taps still reach the screen below. */
 static lv_obj_t *s_setup;
-static void ha_setup(const char *name_entity, const char *name)
+static void setup_note(const char *text)   /* NULL hides it; call with the LVGL lock */
 {
-    if (!lvgl_port_lock(0)) return;
-    if (!name_entity) {
+    if (!text) {
         if (s_setup) { lv_obj_del(s_setup); s_setup = NULL; }
     } else {
         if (!s_setup) {
@@ -2999,7 +3098,7 @@ static void ha_setup(const char *name_entity, const char *name)
             lv_obj_set_size(s_setup, LV_PCT(100), LV_PCT(100));
             lv_obj_set_style_bg_color(s_setup, lv_color_black(), 0);
             lv_obj_set_style_bg_opa(s_setup, LV_OPA_COVER, 0);
-            lv_obj_set_style_pad_all(s_setup, 16, 0);
+            lv_obj_set_style_pad_all(s_setup, 4, 0);   /* "screen_a1b2c3" fits 172 px */
             lv_obj_clear_flag(s_setup, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_t *l = lv_label_create(s_setup);
             lv_obj_set_width(l, LV_PCT(100));
@@ -3009,16 +3108,112 @@ static void ha_setup(const char *name_entity, const char *name)
             lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
             lv_obj_center(l);
         }
-        const char *id = strchr(name_entity, '.');
-        lv_label_set_text_fmt(lv_obj_get_child(s_setup, 0),
-                              "Board %s\n\nIn Home Assistant, create the text helper\n%s\nand set it to this board's name.",
-                              id ? id + 1 : name_entity, name_entity);
+        lv_label_set_text(lv_obj_get_child(s_setup, 0), text);
     }
+}
+
+static void ha_setup(const char *name_entity, const char *name)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (!name_entity) setup_note(NULL);
+    else {
+        const char *id = strchr(name_entity, '.');
+        char t[200];
+        snprintf(t, sizeof(t), "Board %s\n\nIn Home Assistant, create the text helper\n%s\nand set it to this board's name.",
+                 id ? id + 1 : name_entity, name_entity);
+        setup_note(t);
+    }
+    lvgl_port_unlock();
+}
+
+/* Dashboard / view modal: a full screen list that only closes by picking one. Shown when no
+ * dashboard is chosen or HA doesn't have the chosen one, then for the picked dashboard's view.
+ * Called with the LVGL lock held. */
+static void dash_select(int i);
+static void choose_pick_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    bool dashboards = lv_obj_get_user_data(s_choose) != NULL;
+    if (dashboards && s_busy) return;       /* a refresh is under way: tap again in a moment */
+    lv_obj_del_async(s_choose);             /* we are inside one of its rows */
+    s_choose = NULL;
+    if (dashboards) {
+        s_ask_view = true;
+        dash_select(i);
+    } else if (i != s_cur_view) view_select(i);
+}
+
+static void choose_open(bool dashboards)
+{
+    if (s_choose) { lv_obj_del(s_choose); s_choose = NULL; }
+    view_menu_close();
+    const layout_view_t *items = dashboards ? s_dashes : s_views;
+    int n = dashboards ? s_ndash : s_nviews;
+    lv_color_t text = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
+
+    s_choose = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_choose);
+    lv_obj_set_size(s_choose, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_choose, lv_color_hex(s_light ? 0xF2F2F7 : 0x101317), 0);
+    lv_obj_set_style_bg_opa(s_choose, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_choose, 8, 0);
+    lv_obj_set_style_pad_row(s_choose, 6, 0);
+    lv_obj_set_flex_flow(s_choose, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_flag(s_choose, LV_OBJ_FLAG_CLICKABLE);   /* swallows taps and swipes */
+    lv_obj_clear_flag(s_choose, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_user_data(s_choose, dashboards ? (void *)1 : NULL);
+
+    lv_obj_t *t = lv_label_create(s_choose);
+    lv_label_set_text(t, dashboards ? "Choose a dashboard" : "Choose a view");
+    lv_obj_set_style_text_font(t, &lv_font_latin_16, 0);
+    lv_obj_set_style_text_color(t, text, 0);
+
+    lv_obj_t *list = lv_obj_create(s_choose);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, LV_PCT(100));
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_set_style_pad_row(list, 6, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *r = lv_obj_create(list);
+        lv_obj_remove_style_all(r);
+        lv_obj_set_size(r, LV_PCT(100), 44);
+        lv_obj_set_style_radius(r, 10, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(s_light ? 0xFFFFFF : 0x24282F), 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(0x18BCF2), LV_STATE_PRESSED);
+        lv_obj_set_style_pad_hor(r, 10, 0);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(r, choose_pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *l = lv_label_create(r);
+        lv_obj_set_width(l, LV_PCT(100));
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_label_set_text(l, items[i].title[0] ? items[i].title : items[i].path);
+        lv_obj_set_style_text_font(l, &lv_font_latin_16, 0);
+        lv_obj_set_style_text_color(l, text, 0);
+        lv_obj_center(l);
+    }
+}
+
+/* Setup portal (issue #15): how to reach it */
+static void portal_shown(const char *ap)
+{
+    if (!lvgl_port_lock(0)) return;
+    char t[160];
+    snprintf(t, sizeof(t), "Setup\n\nJoin Wi-Fi\n%s\nthen open\n192.168.4.1", ap);
+    setup_note(t);
     lvgl_port_unlock();
 }
 
 static void ha_errors(const char *errors)
 {
+    if (lvgl_port_lock(0)) {
+        snprintf(s_last_errors, sizeof(s_last_errors), "%s", errors);
+        load_err_update();
+        lvgl_port_unlock();
+    }
     if (!s_err_label || !lvgl_port_lock(0)) return;
     const char *t = errors[0] ? errors : NO_ERRORS;
     if (strcmp(lv_label_get_text(s_err_label), t) != 0) {
@@ -3046,11 +3241,22 @@ static void refresh_cb(lv_event_t *e)
 }
 
 /* Theme button: switch at once, then tell Home Assistant (entity on = dark) */
+/* Theme, brightness: kept on the board too, for boards without those HA helpers */
+static void ui_save_u8(const char *key, uint8_t v)
+{
+    nvs_handle_t nv;
+    if (nvs_open("ui", NVS_READWRITE, &nv) != ESP_OK) return;
+    uint8_t old;
+    if (nvs_get_u8(nv, key, &old) != ESP_OK || old != v) { nvs_set_u8(nv, key, v); nvs_commit(nv); }
+    nvs_close(nv);
+}
+
 static void ha_toggle_cb(lv_event_t *e)
 {
     if (s_swiped) return;
     s_light = !s_light;
     s_theme_known = true;
+    ui_save_u8("light", s_light);
     s_theme_pending = true;           /* HA's old state from a poll under way is ignored */
     apply_theme();
     ha_client_set_theme(!s_light);
@@ -3064,9 +3270,12 @@ static void ha_state_changed(ha_state_t state)
     if (!s_theme_pending && (state == HA_STATE_ON || state == HA_STATE_OFF)) {
         s_light = state == HA_STATE_OFF;
         s_theme_known = true;
+        ui_save_u8("light", s_light);
     }
+    if (state == HA_STATE_LOCAL) s_theme_known = true;   /* no helper: the board's own theme */
     if (state == HA_STATE_UNKNOWN && !s_theme_pending) s_theme_known = false;
     s_offline_state = state == HA_STATE_OFFLINE;
+    load_err_update();
     apply_theme();
     show_status(state);
     lvgl_port_unlock();
@@ -3106,7 +3315,6 @@ static void apply_theme(void)
 
 /* Backlight follows input_number.dev_brightness, mapped from its min..max to
  * 5-100 % (5 % floor so the screen never goes fully dark). */
-static float s_bri_min = 0, s_bri_max = 100;
 
 static void apply_backlight(float value)
 {
@@ -3122,7 +3330,14 @@ static void ha_brightness_changed(float value, float min, float max)
     ESP_LOGI(TAG, "brightness %.1f (range %.1f-%.1f)", (double)value, (double)min, (double)max);
     s_bri_min = min;
     s_bri_max = max;
-    if (!s_bri_pending) apply_backlight(value);
+    if (!s_bri_pending) {
+        apply_backlight(value);
+        float span = max - min;
+        if (span > 0) {
+            s_boot_bri = (uint8_t)LV_CLAMP(5, (int)((value - min) * 100.0f / span + 0.5f), 100);
+            ui_save_u8("bri", s_boot_bri);
+        }
+    }
 
     if (!s_slider || !lvgl_port_lock(0)) return;
     /* don't fight a drag in progress, nor a value still on its way to HA */
@@ -3140,6 +3355,9 @@ static void slider_cb(lv_event_t *e)
     float v = (float)lv_slider_get_value(sl);
     apply_backlight(v);
     if (lv_event_get_code(e) == LV_EVENT_RELEASED) {
+        int pct = s_bri_max > s_bri_min ? (int)((v - s_bri_min) * 100.0f / (s_bri_max - s_bri_min) + 0.5f) : 100;
+        s_boot_bri = (uint8_t)LV_CLAMP(5, pct, 100);
+        ui_save_u8("bri", s_boot_bri);   /* % of the range, for boot */
         s_bri_pending = true;
         ha_client_set_brightness(v);
     }
@@ -3212,7 +3430,6 @@ static esp_err_t app_lvgl_init(void)
 
 /* ---- BOOT button (GPIO9, low when pressed): next page on the visible screen, wrapping
  * around, on release. Polled from an LVGL timer, so the UI is touched in the LVGL task. */
-#define BUTTON_GPIO GPIO_NUM_9
 
 static void button_poll(lv_timer_t *t)
 {
@@ -3295,6 +3512,10 @@ static void ha_views_changed(const layout_view_t *views, int n, int current)
     s_nviews = n;
     s_cur_view = current;
     view_btn_update();
+    if (s_ask_view && n > 0) {        /* setup: the dashboard picked in the modal -> its views */
+        s_ask_view = false;
+        choose_open(false);
+    }
     lvgl_port_unlock();
 }
 
@@ -3408,7 +3629,7 @@ static void dash_btn_update(void)
     lv_obj_t *l = lv_obj_get_child(s_dash_btn, 0);
     if (s_view_pending) lv_label_set_text(l, "Loading...");
     else if (s_cur_dash >= 0) lv_label_set_text_fmt(l, "%s " LV_SYMBOL_DOWN, s_dashes[s_cur_dash].title);
-    else lv_label_set_text(l, s_ndash ? HA_DASHBOARD " " LV_SYMBOL_DOWN : "Connecting...");
+    else lv_label_set_text(l, s_ndash ? "Choose " LV_SYMBOL_DOWN : "Connecting...");
 }
 
 /* Network task: HA's dashboards and the one shown */
@@ -3421,6 +3642,14 @@ static void ha_dashes_changed(const layout_view_t *dashes, int n, int current)
     s_ndash = n;
     s_cur_dash = current;
     dash_btn_update();
+    /* no dashboard chosen, or one HA doesn't have: the dashboard modal (not while a change
+     * is on its way, nor over the board-name setup screen; retried every refresh) */
+    if (n > 0 && (!s_dash_path[0] || current < 0) && !s_view_pending && !s_setup && !s_choose)
+        choose_open(true);
+    else if (s_choose && lv_obj_get_user_data(s_choose) && s_dash_path[0] && current >= 0) {
+        lv_obj_del(s_choose);              /* HA's dashboard helper chose one meanwhile */
+        s_choose = NULL;
+    }
     lvgl_port_unlock();
 }
 
@@ -3449,13 +3678,7 @@ static void dash_select(int i)
     ha_client_set_nav(s_dash_path, s_view_path, 0);
 }
 
-/* Dashboard paths: "" and HA_DASHBOARD are the same one */
-static bool dash_same(const char *a, const char *b)
-{
-    if (!a[0]) a = HA_DASHBOARD;
-    if (!b[0]) b = HA_DASHBOARD;
-    return !strcmp(a, b);
-}
+static bool dash_same(const char *a, const char *b) { return !strcmp(a, b); }
 
 /* HA's dashboard / view / page entities (LVGL task): follow them when they differ */
 static struct { char dash[32], view[32]; bool dash_ok, view_ok; int page; bool queued; } s_nav_in;

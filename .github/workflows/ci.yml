@@ -20,11 +20,6 @@ jobs:
     name: Firmware build
     runs-on: ubuntu-latest
     container: espressif/idf:v5.3.2
-    env:
-      # placeholders: the build only needs the values to exist (see main/gen_secrets.cmake)
-      WIFI_SSID: ci
-      WIFI_PASS: ci
-      HA_TOKEN: ci
     steps:
       - uses: actions/checkout@v4
       - name: Build

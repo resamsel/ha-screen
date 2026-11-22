@@ -6,6 +6,7 @@
 typedef enum {
     HA_STATE_OFFLINE,  /* no Wi-Fi */
     HA_STATE_UNKNOWN,  /* reachable, state not on/off */
+    HA_STATE_LOCAL,    /* reachable, no theme helper: the board keeps its own theme */
     HA_STATE_ERROR,    /* HA unreachable or rejected the request */
     HA_STATE_OFF,
     HA_STATE_ON,
@@ -115,10 +116,10 @@ void ha_client_set_views_cb(ha_views_cb_t cb);  /* call before ha_client_start *
  * May be called before ha_client_start to set the view to start with. */
 void ha_client_set_view(const char *path);
 /* The HA dashboards (lovelace/dashboards/list) after every dashboard read; current = the one
- * shown (-1 when it isn't in the list, e.g. HA_DASHBOARD as default). */
+ * shown (-1 when it isn't in the list or none is chosen yet). */
 typedef void (*ha_dashboards_cb_t)(const layout_view_t *dashes, int n, int current);
 void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb);  /* call before ha_client_start */
-/* Show this dashboard's views (url_path; "" = HA_DASHBOARD), starting with its view `view`
+/* Show this dashboard's views (url_path; "" = none chosen yet), starting with its view `view`
  * ("" = the first): re-reads the dashboard like ha_client_refresh. */
 void ha_client_set_dashboard(const char *url_path, const char *view);
 

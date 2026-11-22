@@ -5,8 +5,8 @@ Settings (HA URL, settings entities, poll interval, graph style) are in `main/co
 
 ## Pages from a dashboard
 
-The main-screen pages come from the HA dashboard view `HA_DASHBOARD` (the view is chosen in the config panel)
-(`esp32-c6-dev`). The board re-reads it every minute and rebuilds when it changed:
+The main-screen pages come from an HA dashboard view chosen on the board (config panel; asked for
+once the board first reaches HA). The board re-reads it every minute and rebuilds when it changed:
 
 - each section = one page; its heading card = the page title
 - `tile` cards = value rows (up to 4), in dashboard order; name = the card's name or the
@@ -34,10 +34,13 @@ The last good layout is kept in flash, so the board starts with it when HA isn't
 
 ### Board name and helpers in HA
 
-Each board gets an ID from its MAC, e.g. `screen_a1b2c3`. Create the text helper
-`input_text.screen_a1b2c3` and set it to the board's name (e.g. `kitchen`; slugified like HA
-object IDs). Until it is set, the board shows a setup screen with the helper to create. The
-name prefixes the board's own helpers, all optional:
+No helpers are needed: a new board works right after setup and keeps its settings (theme,
+orientation, brightness, presentation mode, dashboard, view, page) itself. Create any of the
+helpers below later and the board hands that setting to HA from then on.
+
+Each board gets an ID from its MAC, e.g. `screen_a1b2c3`. Its name (e.g. `kitchen`; slugified
+like HA object IDs) is set in the setup portal; the text helper `input_text.screen_a1b2c3`, if
+it exists and isn't empty, overrides it. The name prefixes the board's own helpers:
 
 | Entity (name `kitchen`)                     | Value                                         |
 |---------------------------------------------|-----------------------------------------------|
@@ -46,7 +49,7 @@ name prefixes the board's own helpers, all optional:
 | `input_boolean.kitchen_presentation`        | presentation mode on/off                      |
 | `input_number.kitchen_presentation_interval`| seconds per page                              |
 | `input_number.kitchen_brightness`           | backlight (uses the entity's min/max)         |
-| `input_text.kitchen_dashboard`              | dashboard url_path (empty = `HA_DASHBOARD`)   |
+| `input_text.kitchen_dashboard`              | dashboard url_path (empty = ask on the board) |
 | `input_text.kitchen_view`                   | view path (empty = the first view)            |
 | `input_number.kitchen_page`                 | page, from 1 (min 1, max 8, step 1)           |
 
@@ -55,21 +58,37 @@ flash. Dashboard, view and page are synced both ways (the last change wins): set
 HA switches the board, swiping or picking a view on the board writes them. The page isn't
 written while presentation mode is on. Diagnostics go to `sensor.<name>_*`.
 
-## Secrets
+## Wi-Fi and Home Assistant setup
 
-Wi-Fi credentials and the HA token are read from environment variables **at build time**
-and compiled into the firmware. The build stops if one is missing. Keep them in `.env`
-(gitignored; copy `.env.example`), which the build command passes to Docker with
-`--env-file`. Format: `NAME=value`, one per line, no quotes.
+Wi-Fi name and password, the HA URL and the HA token are kept in flash (NVS) and set on the
+board itself, so CI firmware can be flashed as-is. The board opens a **setup portal** when:
+
+- a setting is missing (first boot),
+- the BOOT button is held while it powers on, or
+- Wi-Fi or Home Assistant didn't work within 2 min of booting (`HA_WIFI_PORTAL_S`): no Wi-Fi,
+  HA unreachable at the URL, or the token rejected. The form then says which.
+
+The screen then shows an access point named after the board ID (`screen_a1b2c3`): join it with a phone (the setup page
+usually opens by itself, else open `http://192.168.4.1`), fill in the form and save; the board
+restarts and connects. The form also asks for the device name (default: the board ID). Empty
+password or token fields keep the stored value. With settings
+already stored, the portal gives up after 5 min without a connected phone
+(`HA_PORTAL_IDLE_S`) and restarts normally, so a router outage doesn't strand the board.
+
+### Optional build-time defaults
+
+`WIFI_SSID`, `WIFI_PASS` and `HA_TOKEN` environment variables, if set at build time, are used
+until the portal stores a value (`HA_URL_DEFAULT` in `main/config.h` likewise). Keep them in
+`.env` (gitignored; copy `.env.example`), which the build command passes to Docker with
+`--env-file`. Format: `NAME=value`, one per line, no quotes. They end up in the generated
+`build/esp-idf/main/secrets_env.h` and anyone with such a binary can read them; leave them
+unset for firmware you share.
 
 | Variable    | Value                                                        |
 |-------------|--------------------------------------------------------------|
 | `WIFI_SSID` | Wi-Fi network name                                           |
 | `WIFI_PASS` | Wi-Fi password                                               |
 | `HA_TOKEN`  | HA > your profile > Security > Long-lived access tokens      |
-
-They end up in the generated `build/esp-idf/main/secrets_env.h` (in the build directory,
-never in the source tree). Anyone with the firmware binary can read them.
 
 ## Start-up cache
 

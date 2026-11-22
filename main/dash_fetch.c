@@ -7,7 +7,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_websocket_client.h"
 #include "config.h"
-#include "secrets_env.h"
+#include "provision.h"
 
 #define MAX_LEN     (32 * 1024)
 #define TIMEOUT_MS  10000
@@ -58,6 +58,10 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     ctx_t *c = arg;
     esp_websocket_event_data_t *d = data;
+    /* Send auth once connected, without waiting for auth_required (HA accepts that): over
+     * plain ws:// the client keeps bytes that came with the handshake buffered until more
+     * data arrives, so auth_required would only show up when the socket closes */
+    if (id == WEBSOCKET_EVENT_CONNECTED) { xEventGroupSetBits(c->ev, AUTH_REQ_BIT); return; }
     if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_ERROR) {
         xEventGroupSetBits(c->ev, FAIL_BIT);
         return;
@@ -92,8 +96,8 @@ static bool wait(ctx_t *c, EventBits_t bit, TickType_t deadline)
 dash_ws_t *dash_ws_open(void)
 {
     char uri[160];
-    const char *host = strstr(HA_URL, "://");
-    snprintf(uri, sizeof(uri), "%s%s/api/websocket", strncmp(HA_URL, "https", 5) ? "ws" : "wss", host ? host : "");
+    const char *host = strstr(prov_url(), "://");
+    snprintf(uri, sizeof(uri), "%s%s/api/websocket", strncmp(prov_url(), "https", 5) ? "ws" : "wss", host ? host : "");
     dash_ws_t *d = calloc(1, sizeof(*d));
     if (!d) return NULL;
     d->c.ev = xEventGroupCreate();
@@ -110,7 +114,8 @@ dash_ws_t *dash_ws_open(void)
     esp_websocket_register_events(d->ws, WEBSOCKET_EVENT_ANY, ws_event, &d->c);
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(TIMEOUT_MS);
     if (esp_websocket_client_start(d->ws) == ESP_OK && wait(&d->c, AUTH_REQ_BIT, deadline)) {
-        const char *auth = "{\"type\":\"auth\",\"access_token\":\"" HA_TOKEN "\"}";
+        char auth[360];
+        snprintf(auth, sizeof(auth), "{\"type\":\"auth\",\"access_token\":\"%s\"}", prov_token());
         esp_websocket_client_send_text(d->ws, auth, strlen(auth), pdMS_TO_TICKS(TIMEOUT_MS));
         if (wait(&d->c, AUTH_OK_BIT, deadline)) return d;
     }
@@ -164,11 +169,13 @@ char *dash_fetch_config(const char *url_path, char **list)
 {
     dash_ws_t *d = dash_ws_open();
     if (list) *list = d ? dash_ws_call(d, "\"type\":\"lovelace/dashboards/list\"") : NULL;
-    char body[128];
-    snprintf(body, sizeof(body), "\"type\":\"lovelace/config\",\"url_path\":\"%s\"",
-             url_path && url_path[0] ? url_path : HA_DASHBOARD);
-    char *out = d ? dash_ws_call(d, body) : NULL;
-    if (!out) ESP_LOGW(TAG, "dashboard fetch failed");
+    char *out = NULL;
+    if (url_path && url_path[0]) {        /* none chosen yet: only the list, for the picker */
+        char body[128];
+        snprintf(body, sizeof(body), "\"type\":\"lovelace/config\",\"url_path\":\"%s\"", url_path);
+        out = d ? dash_ws_call(d, body) : NULL;
+        if (!out) ESP_LOGW(TAG, "dashboard fetch failed");
+    }
     dash_ws_close(d);
     return out;
 }
