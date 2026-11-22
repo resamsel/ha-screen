@@ -9,8 +9,10 @@
 #define LAYOUT_HOURS_MAX     168
 #define LAYOUT_MAX_IMAGES    4      /* picture cards with an image:/camera_image: source */
 #define LAYOUT_IMAGE_LEN     128
+#define LAYOUT_MAX_CALS      4      /* calendar cards */
+#define LAYOUT_CALS_LEN      192    /* a calendar card's calendar.* ids, comma-separated */
 
-typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER, LAYOUT_GAUGE, LAYOUT_GLANCE } layout_kind_t;
+typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER, LAYOUT_GAUGE, LAYOUT_GLANCE, LAYOUT_CALENDAR } layout_kind_t;
 
 /* clock card options (layout_item_t.flags) */
 #define LAYOUT_CLOCK_SECONDS 0x01
@@ -38,6 +40,13 @@ typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT
 #define LAYOUT_GLANCE_NO_STATE 0x02   /* show_state: false */
 #define LAYOUT_GLANCE_FLAGS    0x03
 
+/* calendar card options (layout_item_t.flags): the card's initial_view */
+#define LAYOUT_CAL_SPAN       0x03
+#define LAYOUT_CAL_MONTH      0x00   /* dayGridMonth (HA's default): month grid, days with events marked */
+#define LAYOUT_CAL_DAY        0x01   /* dayGridDay / listDay: today's events */
+#define LAYOUT_CAL_WEEK       0x02   /* listWeek: the next 7 days' events, by day */
+#define LAYOUT_CAL_FLAGS      0x03
+
 /* what a tap on a button does: toggle/run/activate, or nothing (other tap_action types) */
 typedef enum { LAYOUT_ACT_TOGGLE, LAYOUT_ACT_NONE } layout_action_t;
 
@@ -52,6 +61,7 @@ typedef struct {
     uint8_t flags;          /* LAYOUT_CLOCK_* (clock cards), LAYOUT_PIC_* (pictures) */
     uint8_t kind;           /* layout_kind_t of this card: each card is its own block */
     uint8_t image;          /* pictures: 1-based index into ha_layout_t.images, 0 = the entity itself */
+    uint8_t cal;            /* calendars: 1-based index into ha_layout_t.cals (entity = the first one) */
     char icon[40];          /* card icon ("mdi:..."); "" = the entity's own; "-" = none (show_icon: false) */
     char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
                              * entity, text:<text>; resolved by the network task */
@@ -71,6 +81,7 @@ typedef struct {
     /* picture sources: a camera entity id (camera_image:) or an image URL (image:),
      * absolute or relative to HA */
     char images[LAYOUT_MAX_IMAGES][LAYOUT_IMAGE_LEN];
+    char cals[LAYOUT_MAX_CALS][LAYOUT_CALS_LEN];   /* calendar cards' entity lists */
 } ha_layout_t;
 
 /* json: full websocket result message ({"result":{...}}) or the bare dashboard config.

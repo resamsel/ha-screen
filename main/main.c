@@ -90,6 +90,7 @@ static void ha_button_changed(int page, int row, ha_btn_state_t state, const cha
 static void ha_button_pressed(int page, int row, bool ok);
 static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, int zoom, const char *name);
 static void ha_forecast_changed(int page, int row, const ha_forecast_t *f, int n, bool hourly);
+static void ha_calendar_changed(int page, int row, const cal_event_t *ev, int n, uint32_t mask, int64_t month);
 static void ha_weather_changed(int page, int row, const char *cond, const char *temp, const char *unit,
                                const char *hum, const char *name);
 static void apply_panel_theme(bool light);
@@ -289,6 +290,7 @@ void app_main(void)
     ha_client_set_picture_cb(ha_picture_changed);
     ha_client_set_weather_cb(ha_weather_changed);
     ha_client_set_forecast_cb(ha_forecast_changed);
+    ha_client_set_calendar_cb(ha_calendar_changed);
     ha_client_set_icon_cb(ha_icon_changed);
     ha_client_set_views_cb(ha_views_changed);
     ha_client_set_dashboards_cb(ha_dashes_changed);
@@ -1311,6 +1313,257 @@ static void ha_forecast_changed(int page, int row, const ha_forecast_t *f, int n
     lvgl_port_unlock();
 }
 
+/* ---- Calendar cards, by the card's initial_view like HA: day = today's events, list = the
+ * next 7 days' events under day headings, month = a month grid with the days that have
+ * events marked. The heading is the card's title, else the date (month: the month) ---- */
+#define CAL_SIDE  12                      /* margin left and right */
+#define CAL_TOP   8
+typedef struct { int n; uint32_t mask; int64_t month; cal_event_t ev[CAL_MAX_EVENTS]; } cal_data_t;
+static lv_obj_t *s_cal_box[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static cal_data_t *s_cal_data[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];   /* last events (theme redraws) */
+
+static void create_calendar(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    lv_obj_t *b = lv_obj_create(page);
+    lv_obj_remove_style_all(b);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(b, lv_area_get_width(&blk) - 2 * CARD_INSET - 2 * CAL_SIDE, lv_area_get_height(&blk) - 2 * CARD_INSET - 2 * CAL_TOP);
+    lv_obj_set_pos(b, blk.x1 + CARD_INSET + CAL_SIDE, blk.y1 + CARD_INSET + CAL_TOP);
+    s_cal_box[pg][i] = b;
+}
+
+static lv_obj_t *cal_label(lv_obj_t *b, const char *text, const lv_font_t *f, lv_color_t col, int x, int y, int w)
+{
+    lv_obj_t *l = lv_label_create(b);
+    lv_obj_set_style_text_font(l, f, 0);
+    lv_obj_set_style_text_color(l, col, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);   /* fixed one-line height: shortens with "..." */
+    lv_obj_set_size(l, LV_MAX(w, 10), f->line_height);
+    lv_obj_set_pos(l, x, y);
+    lv_label_set_text(l, text);
+    return l;
+}
+
+/* text cut to fit w on one line, mid-word if need be, with "..." */
+static void cal_fit(const char *t, const lv_font_t *f, int w, char *out, size_t n)
+{
+    lv_point_t sz;
+    lv_txt_get_size(&sz, t, f, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (sz.x <= w) { snprintf(out, n, "%s", t); return; }
+    lv_txt_get_size(&sz, "...", f, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int room = w - sz.x, x = 0;
+    size_t k = 0;
+    while (t[k] && k + 4 < n) {
+        size_t c = 1;                     /* one UTF-8 character */
+        while (t[k + c] && ((unsigned char)t[k + c] & 0xC0) == 0x80) c++;
+        uint32_t letter = _lv_txt_encoded_next(t, &(uint32_t){ k });
+        int cw = lv_font_get_glyph_width(f, letter, 0);
+        if (x + cw > room) break;
+        x += cw;
+        k += c;
+    }
+    while (k > 0 && t[k - 1] == ' ') k--;
+    snprintf(out, n, "%.*s...", (int)k, t);
+}
+
+static int cal_day(time_t t)              /* ordered, unique per local day */
+{
+    struct tm tm;
+    localtime_r(&t, &tm);
+    return (tm.tm_year + 1900) * 400 + tm.tm_yday;
+}
+
+/* time "13:00" / "All day" / "until 09:00" (from an earlier day), duration "1h", "1h30",
+ * "45m", "2d" or "" */
+static void cal_range(const cal_event_t *e, int day, char *tl, size_t tn, char *dl, size_t dn)
+{
+    dl[0] = 0;
+    if (e->all_day) { snprintf(tl, tn, "All day"); return; }
+    time_t s = (time_t)e->start, t = (time_t)e->end;
+    struct tm tm;
+    if (cal_day(s) != day) {
+        char z[8];
+        localtime_r(&t, &tm); strftime(z, sizeof(z), "%H:%M", &tm);
+        snprintf(tl, tn, "until %s", z);
+        return;
+    }
+    localtime_r(&s, &tm); strftime(tl, tn, "%H:%M", &tm);
+    long m = e->end > e->start ? (long)(e->end - e->start) / 60 : 0;
+    if (m <= 0) return;
+    if (m >= 1440 && m % 1440 == 0) snprintf(dl, dn, "%ldd", m / 1440);
+    else if (m < 60) snprintf(dl, dn, "%ldm", m);
+    else if (m % 60 == 0) snprintf(dl, dn, "%ldh", m / 60);
+    else snprintf(dl, dn, "%ldh%02ld", m / 60, m % 60);
+}
+
+static void cal_draw_month(lv_obj_t *b, const cal_data_t *d, int y, int w, int h)
+{
+    lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light), acc = lv_color_hex(0x03A9F4);
+    const lv_font_t *f = &lv_font_latin_12;
+    time_t m = d ? (time_t)d->month : time(NULL);
+    struct tm tm;
+    localtime_r(&m, &tm);
+    tm.tm_mday = 1; tm.tm_hour = 12; tm.tm_isdst = -1;
+    mktime(&tm);
+    int lead = (tm.tm_wday + 6) % 7;      /* weeks start on Monday */
+    int mon = tm.tm_mon, days = 0;
+    for (; days < 31; days++) {
+        struct tm t2 = tm;
+        t2.tm_mday = days + 1; t2.tm_isdst = -1;
+        mktime(&t2);
+        if (t2.tm_mon != mon) break;
+    }
+    time_t now = time(NULL);
+    struct tm nt;
+    localtime_r(&now, &nt);
+    int today = nt.tm_mon == mon && nt.tm_year == tm.tm_year ? nt.tm_mday : 0;
+    int rows = (lead + days + 6) / 7, cw = w / 7;
+    static const char *const wd[7] = { "Mo", "Tu", "We", "Th", "Fr", "Sa", "Su" };
+    for (int c = 0; c < 7; c++) {
+        lv_obj_t *l = cal_label(b, wd[c], f, sec, c * cw, y, cw);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    y += f->line_height + 2;
+    int rh = LV_MIN((h - y) / LV_MAX(rows, 1), 40);
+    if (rh < f->line_height) return;
+    for (int k = 0; k < days; k++) {
+        int c = (lead + k) % 7, r = (lead + k) / 7, cx = c * cw, cy = y + r * rh;
+        bool is_today = k + 1 == today;
+        if (is_today) {
+            lv_obj_t *o = lv_obj_create(b);
+            lv_obj_remove_style_all(o);
+            int dsz = LV_MIN(LV_MIN(cw, rh) - 2, f->line_height + 8);
+            lv_obj_set_size(o, dsz, dsz);
+            lv_obj_set_pos(o, cx + (cw - dsz) / 2, cy + (f->line_height - dsz) / 2 + 1);
+            lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(o, acc, 0);
+            lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        }
+        char num[4];
+        snprintf(num, sizeof(num), "%d", k + 1);
+        lv_obj_t *l = cal_label(b, num, f, is_today ? lv_color_white() : fg, cx, cy, cw);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        if (d && (d->mask >> k & 1) && rh >= f->line_height + 6) {   /* a dot under days with events */
+            lv_obj_t *o = lv_obj_create(b);
+            lv_obj_remove_style_all(o);
+            lv_obj_set_size(o, 5, 5);
+            lv_obj_set_pos(o, cx + (cw - 5) / 2, cy + f->line_height + 3);
+            lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(o, lv_color_hex(0xB388FF), 0);
+            lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        }
+    }
+}
+
+static void cal_draw(int pg, int i)
+{
+    lv_obj_t *b = s_cal_box[pg][i];
+    const cal_data_t *d = s_cal_data[pg][i];
+    if (!b) return;
+    lv_obj_clean(b);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    int view = it->flags & LAYOUT_CAL_SPAN;
+    lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light);
+    int w = lv_obj_get_width(b), h = lv_obj_get_height(b), y = 0;
+    const lv_font_t *tf = &lv_font_latin_22, *hf = &lv_font_latin_14, *ef = &lv_font_latin_22;
+    char head[32];
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    if (it->name[0]) snprintf(head, sizeof(head), "%s", it->name);
+    else strftime(head, sizeof(head), view == LAYOUT_CAL_MONTH ? "%B %Y" : "%d %B %Y", &tm);
+    if (!it->name[0] && head[0] == '0') memmove(head, head + 1, strlen(head));   /* "2 November" */
+    cal_label(b, head, tf, fg, 0, y, w);
+    y += tf->line_height + 6;
+    if (view == LAYOUT_CAL_MONTH) { cal_draw_month(b, d, y, w, h); return; }
+    if (!d) return;                       /* nothing read yet */
+    if (d->n == 0) { cal_label(b, view == LAYOUT_CAL_DAY ? "No events today" : "No events", ef, sec, 0, y, w); return; }
+    int today = cal_day(now), last = -1, timew = 0;
+    for (int k = 0; k < d->n; k++) {      /* one time column for all rows: the titles line up */
+        char tl[24], dl[12];
+        const cal_event_t *e = &d->ev[k];
+        cal_range(e, e->start < now ? today : cal_day((time_t)e->start), tl, sizeof(tl), dl, sizeof(dl));
+        lv_point_t ts;
+        lv_txt_get_size(&ts, tl, ef, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        timew = LV_MAX(timew, ts.x);
+    }
+    for (int k = 0; k < d->n; k++) {
+        const cal_event_t *e = &d->ev[k];
+        int day = e->start < now ? today : cal_day((time_t)e->start);
+        if (view == LAYOUT_CAL_WEEK && day != last) {   /* "SUNDAY 22" */
+            if (y + hf->line_height + ef->line_height > h) break;
+            char dl[24];
+            time_t tt = day == today ? now : (time_t)e->start;
+            struct tm dt;
+            localtime_r(&tt, &dt);
+            strftime(dl, sizeof(dl), "%A %d", &dt);
+            for (char *c = dl; *c; c++) if (*c >= 'a' && *c <= 'z') *c -= 32;
+            cal_label(b, dl, hf, sec, 0, y + 2, w);
+            y += hf->line_height + 4;
+            last = day;
+        }
+        if (y + ef->line_height > h) break;
+        char tl[24], dl[12];
+        cal_range(e, day, tl, sizeof(tl), dl, sizeof(dl));
+        lv_point_t ds;
+        lv_txt_get_size(&ds, dl, ef, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        int dot = 20, tx = dot + 8 + timew + 10, dw = dl[0] ? ds.x + 10 : 0, sw = LV_MAX(w - tx - dw, 40);
+        lv_obj_t *o = lv_obj_create(b);      /* the calendar's colour, as in HA */
+        lv_obj_remove_style_all(o);
+        lv_obj_set_size(o, dot, dot);
+        lv_obj_set_pos(o, 0, y + (ef->line_height - dot) / 2);
+        lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(o, lv_color_hex(e->color), 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        cal_label(b, tl, ef, sec, dot + 8, y, timew + 10);
+        if (dl[0]) {                          /* duration, right-aligned on the first line */
+            lv_obj_t *dlab = cal_label(b, dl, ef, sec, w - ds.x, y, ds.x);
+            lv_obj_set_style_text_align(dlab, LV_TEXT_ALIGN_RIGHT, 0);
+        }
+        /* the title: as much as fits beside the duration, the rest on a second line that also
+         * uses the room below the duration (if there is room), then "..." */
+        uint32_t cut = _lv_txt_get_next_line(e->summary, ef, 0, sw, NULL, LV_TEXT_FLAG_NONE);
+        const char *rest = e->summary + cut;
+        while (*rest == ' ') rest++;
+        bool two = *rest && y + 2 * ef->line_height <= h;
+        char fit[CAL_SUMMARY_LEN + 4];
+        if (!two) {
+            cal_fit(e->summary, ef, sw, fit, sizeof(fit));
+            cal_label(b, fit, ef, fg, tx, y, sw);
+            y += ef->line_height + 6;
+            continue;
+        }
+        char first[CAL_SUMMARY_LEN];
+        snprintf(first, sizeof(first), "%.*s", (int)cut, e->summary);
+        for (int n = strlen(first); n > 0 && first[n - 1] == ' '; n--) first[n - 1] = 0;
+        cal_label(b, first, ef, fg, tx, y, sw);
+        cal_fit(rest, ef, w - tx, fit, sizeof(fit));
+        cal_label(b, fit, ef, fg, tx, y + ef->line_height, w - tx);
+        y += 2 * ef->line_height + 6;
+    }
+}
+
+static void ha_calendar_changed(int page, int row, const cal_event_t *ev, int n, uint32_t mask, int64_t month)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page < 0 || page >= PAGE_COUNT || row < 0 || row >= ROWS(page) || KIND(page, row) != LAYOUT_CALENDAR || !s_cal_box[page][row]) {
+        lvgl_port_unlock();
+        return;
+    }
+    cal_data_t *d = s_cal_data[page][row];
+    if (!d) d = s_cal_data[page][row] = malloc(sizeof(*d));
+    if (d) {
+        d->n = LV_MIN(LV_MAX(n, 0), CAL_MAX_EVENTS);
+        d->mask = mask;
+        d->month = month;
+        memcpy(d->ev, ev, d->n * sizeof(*ev));
+        cal_draw(page, row);
+    }
+    lvgl_port_unlock();
+}
+
 /* ---- Gauge cards: the value on a half-circle arc, like HA's gauge card ---- */
 static lv_obj_t *s_gz_arc[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_val[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_gz_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
@@ -1731,6 +1984,9 @@ static void apply_temp_theme(bool light)
             if (s_wx_last[pg][i][0]) wx_draw_icon(s_wx_icon[pg][i], lv_obj_get_width(s_wx_icon[pg][i]), s_wx_last[pg][i]);
             wx_draw_forecast(pg, i);
         }
+    for (int pg = 0; pg < PAGE_COUNT; pg++)   /* calendar cards: redrawn in the new colours */
+        for (int i = 0; i < ROWS(pg); i++)
+            if (KIND(pg, i) == LAYOUT_CALENDAR) cal_draw(pg, i);
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
         if (!s_dot[pg]) continue;
         lv_obj_set_style_bg_color(s_dot[pg], pg == s_page ? fg : lv_color_hex(light ? 0xAEB4BE : 0x4A5058), 0);
@@ -2137,6 +2393,7 @@ static void create_pages(lv_obj_t *scr)
             if (it->kind == LAYOUT_WEATHER) { create_weather(page, pg, i); continue; }
             if (it->kind == LAYOUT_GAUGE) { create_gauge(page, pg, i); continue; }
             if (it->kind == LAYOUT_GLANCE) { create_glance(page, pg, i); continue; }
+            if (it->kind == LAYOUT_CALENDAR) { create_calendar(page, pg, i); cal_draw(pg, i); continue; }
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
@@ -2932,6 +3189,9 @@ static void create_ui(void)
     memset(s_fc_box, 0, sizeof(s_fc_box));
     for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
         for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_fc_data[p][r]); s_fc_data[p][r] = NULL; }
+    memset(s_cal_box, 0, sizeof(s_cal_box));
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_cal_data[p][r]); s_cal_data[p][r] = NULL; }
     memset(s_full, 0, sizeof(s_full));
     s_view_btn = s_view_caption = s_view_menu = NULL;
     s_pres_btn = s_pres_int_btn = s_pres_caption = NULL;

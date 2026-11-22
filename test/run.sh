@@ -13,3 +13,5 @@ gcc -std=c11 -Wall -Werror -I main -I $J main/live.c $J/cJSON.c test/live_test.c
 /tmp/live_test
 gcc -std=c11 -Wall -Werror -I main main/screen.c test/screen_test.c -o /tmp/screen_test
 /tmp/screen_test
+gcc -std=gnu11 -Wall -Werror -I main main/cal_parse.c test/cal_parse_test.c -o /tmp/cal_parse_test
+TZ=UTC /tmp/cal_parse_test

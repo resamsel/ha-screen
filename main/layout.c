@@ -148,6 +148,36 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             }
             continue;
         }
+        if (ct && !strcmp(ct, "calendar")) {   /* upcoming events of its calendars, one block */
+            const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
+            char ids[LAYOUT_CALS_LEN] = "";
+            cJSON_ArrayForEach(e, ents) {
+                const char *ent = cJSON_IsString(e) ? e->valuestring : cJSON_IsObject(e) ? str(e, "entity") : NULL;
+                if (!ent || !ent[0] || strchr(ent, ',') || strchr(ent, '"')) continue;
+                size_t n = strlen(ids);
+                if (n + strlen(ent) + 2 > sizeof(ids)) { LOGW("section %d: calendar '%s' skipped, too many", idx, ent); continue; }
+                if (n) strcat(ids, ",");
+                strcat(ids, ent);
+            }
+            if (!ids[0]) { LOGW("section %d: calendar card without entities, skipped", idx); continue; }
+            int k = 0;
+            while (k < LAYOUT_MAX_CALS && l->cals[k][0]) k++;
+            if (k == LAYOUT_MAX_CALS) { LOGW("section %d: more than %d calendar cards, skipped", idx, LAYOUT_MAX_CALS); continue; }
+            if (pg->count == LAYOUT_MAX_ROWS) { LOGW("section %d: more than %d cards, extra skipped", idx, LAYOUT_MAX_ROWS); continue; }
+            layout_item_t *it = &pg->items[pg->count++];
+            it->kind = LAYOUT_CALENDAR;
+            if (pg->count == 1) pg->kind = it->kind;
+            copy(l->cals[k], LAYOUT_CALS_LEN, ids);
+            it->cal = k + 1;
+            size_t first = strcspn(ids, ",");
+            if (first < sizeof(it->entity)) { memcpy(it->entity, ids, first); it->entity[first] = 0; }
+            const char *title = str(card, "title");
+            if (title) copy(it->name, sizeof(it->name), title);
+            const char *iv = str(card, "initial_view");
+            if (iv && (!strcmp(iv, "listDay") || !strcmp(iv, "dayGridDay"))) it->flags = LAYOUT_CAL_DAY;
+            else if (iv && !strcmp(iv, "listWeek")) it->flags = LAYOUT_CAL_WEEK;   /* else month, HA's default */
+            continue;
+        }
         bool clock = ct && !strcmp(ct, "clock");
         bool gauge = ct && !strcmp(ct, "gauge");
         bool weather = ct && !strcmp(ct, "weather-forecast");   /* current weather + forecast */
@@ -380,7 +410,7 @@ bool layout_sanitize(ha_layout_t *l)
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
         for (int i = 0; i < pg->count; i++)
-            if (pg->items[i].kind > LAYOUT_GLANCE) pg->items[i].kind = LAYOUT_VALUES;
+            if (pg->items[i].kind > LAYOUT_CALENDAR) pg->items[i].kind = LAYOUT_VALUES;
         pg->kind = pg->items[0].kind;   /* kind of the first card */
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
@@ -389,10 +419,12 @@ bool layout_sanitize(ha_layout_t *l)
             pg->items[i].name_type[sizeof(pg->items[i].name_type) - 1] = 0;
             pg->items[i].icon[sizeof(pg->items[i].icon) - 1] = 0;
             if (pg->items[i].kind != LAYOUT_PICTURE || pg->items[i].image > LAYOUT_MAX_IMAGES) pg->items[i].image = 0;
+            if (pg->items[i].kind != LAYOUT_CALENDAR || pg->items[i].cal > LAYOUT_MAX_CALS) pg->items[i].cal = 0;
             if (pg->items[i].action > LAYOUT_ACT_NONE) pg->items[i].action = LAYOUT_ACT_NONE;
             pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : pg->items[i].kind == LAYOUT_CLOCK ? LAYOUT_CLOCK_FLAGS
                                 : pg->items[i].kind == LAYOUT_GLANCE ? LAYOUT_GLANCE_FLAGS
-                                : pg->items[i].kind == LAYOUT_WEATHER ? LAYOUT_WX_FLAGS : 0;
+                                : pg->items[i].kind == LAYOUT_WEATHER ? LAYOUT_WX_FLAGS
+                                : pg->items[i].kind == LAYOUT_CALENDAR ? LAYOUT_CAL_FLAGS : 0;
             if (pg->items[i].kind == LAYOUT_GAUGE) {   /* a usable range */
                 if (!isfinite(pg->items[i].min)) pg->items[i].min = 0;
                 if (!isfinite(pg->items[i].max) || pg->items[i].max <= pg->items[i].min) pg->items[i].max = pg->items[i].min + 100;
@@ -405,6 +437,7 @@ bool layout_sanitize(ha_layout_t *l)
         }
     }
     for (int k = 0; k < LAYOUT_MAX_IMAGES; k++) l->images[k][LAYOUT_IMAGE_LEN - 1] = 0;
+    for (int k = 0; k < LAYOUT_MAX_CALS; k++) l->cals[k][LAYOUT_CALS_LEN - 1] = 0;
     if (!ok) memset(l, 0, sizeof(*l));
     return ok;
 }
@@ -417,7 +450,7 @@ int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t
         int n = 0;
         for (int i = 0; i < pg.count; i++)
             if (pg.items[i].kind == LAYOUT_CLOCK || (pg.items[i].image && !pg.items[i].entity[0]) ||   /* nothing to check */
-                keep(pg.items[i].entity, pg.items[i].image ? LAYOUT_VALUES : pg.items[i].kind, ctx)) pg.items[n++] = pg.items[i];
+                keep(pg.items[i].entity, pg.items[i].image && pg.items[i].kind == LAYOUT_PICTURE ? LAYOUT_VALUES : pg.items[i].kind, ctx)) pg.items[n++] = pg.items[i];
         for (int i = n; i < LAYOUT_MAX_ROWS; i++) memset(&pg.items[i], 0, sizeof(layout_item_t));
         pg.count = n;
         if (n) { pg.kind = pg.items[0].kind; l->pages[np++] = pg; }

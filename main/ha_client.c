@@ -25,6 +25,7 @@ static void add_error(const char *fmt, ...);
 #include "nvs.h"
 #include "ha_client.h"
 #include "dash_fetch.h"
+#include "cJSON.h"
 #include "icon_rule.h"
 #include "cache_store.h"
 #include "layout_store.h"
@@ -93,6 +94,8 @@ static ha_weather_cb_t s_weather_cb;
 void ha_client_set_weather_cb(ha_weather_cb_t cb) { s_weather_cb = cb; }
 static ha_forecast_cb_t s_forecast_cb;
 void ha_client_set_forecast_cb(ha_forecast_cb_t cb) { s_forecast_cb = cb; }
+static ha_calendar_cb_t s_calendar_cb;
+void ha_client_set_calendar_cb(ha_calendar_cb_t cb) { s_calendar_cb = cb; }
 static portMUX_TYPE s_pic_lock = portMUX_INITIALIZER_UNLOCKED;
 static int s_pic_page = -1;               /* page on screen, and its picture block sizes */
 static uint16_t s_pic_w[LAYOUT_MAX_ROWS], s_pic_h[LAYOUT_MAX_ROWS];
@@ -205,6 +208,7 @@ static int s_fc_len, s_fc_state;          /* 0 = before the list, 1 = in it, 2 =
 static void fc_entry(char *obj);
 static ha_forecast_t s_fc[HA_FORECAST_MAX];
 static int s_fc_n;
+static cal_parse_t *s_cal;                /* calendar.get_events response being parsed, or NULL */
 
 /* ---- 24 h history, parsed while it streams in (the response can be large) ---- */
 static bool s_hist_mode;                  /* route response body to the history parser */
@@ -310,6 +314,10 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
         r->len += n;
         r->buf[r->len] = 0;
     }
+    if (evt->event_id == HTTP_EVENT_ON_DATA && s_cal) {
+        cal_parse_feed(s_cal, evt->data, evt->data_len);
+        return ESP_OK;
+    }
     if (evt->event_id == HTTP_EVENT_ON_DATA && s_fc_mode) {
         static const char key[] = "\"forecast\":[";
         const char *d = evt->data;
@@ -349,6 +357,7 @@ static int ha_request_once(esp_http_client_method_t method, const char *url, con
     if (resp) { resp->len = 0; resp->buf[0] = 0; }
     if (s_fc_mode) { s_fc_state = 0; s_fc_len = 0; s_fc_n = 0; }   /* fresh on retry */
     if (s_hist_mode) { memset(s_hist_has, 0, sizeof(s_hist_has)); s_hist_len = 0; s_hist_depth = 0; } /* fresh on retry */
+    if (s_cal) cal_parse_init(s_cal);   /* fresh on retry */
     s_resp = resp;
     esp_http_client_set_url(s_http, url);
     esp_http_client_set_method(s_http, method);
@@ -671,7 +680,7 @@ static bool json_num(const char *json, const char *key, float *out)
 
 /* ---- Card data cache: the last data sent for every card, saved to flash (cache_store) and
  * replayed through the same callbacks at boot, so the board shows it before HA answers ---- */
-enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_FORECAST, REC_TYPES };
+enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_FORECAST, REC_CALENDAR, REC_TYPES };
 static uint8_t *s_rec[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
 static uint16_t s_rec_len[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
 static uint8_t s_rec_theme = 0xFF;        /* HA_STATE_ON/OFF of the theme entity */
@@ -790,6 +799,19 @@ static void emit_forecast(int pg, int row, const ha_forecast_t *f, int n, bool h
     if (s_forecast_cb) s_forecast_cb(pg, row, f, n, hourly);
 }
 
+/* record: u32 mask, i64 month, u8 n, n x cal_event_t */
+static void emit_calendar(int pg, int row, const cal_event_t *ev, int n, uint32_t mask, int64_t month)
+{
+    static uint8_t b[13 + CAL_MAX_EVENTS * sizeof(cal_event_t)];   /* HA task only, under no lock */
+    if (n < 0 || n > CAL_MAX_EVENTS) return;
+    memcpy(b, &mask, 4);
+    memcpy(b + 4, &month, 8);
+    b[12] = n;
+    memcpy(b + 13, ev, n * sizeof(cal_event_t));
+    rec_put(REC_CALENDAR, pg, row, b, 13 + n * sizeof(cal_event_t));
+    if (s_calendar_cb) s_calendar_cb(pg, row, ev, n, mask, month);
+}
+
 static void emit_icon(int pg, int row, const char *icon)
 {
     uint8_t b[52];
@@ -870,6 +892,19 @@ static void rec_emit(int t, int pg, int row, const uint8_t *d, const uint8_t *de
         emit_forecast(pg, row, f, d[1], d[0]);
         break;
     }
+    case REC_CALENDAR: {
+        if (l < 13 || d[12] > CAL_MAX_EVENTS || l != 13 + d[12] * sizeof(cal_event_t)) break;
+        static cal_event_t ev[CAL_MAX_EVENTS];   /* off the stack: replay runs at boot */
+        uint32_t mask;
+        int64_t month;
+        int n = d[12];
+        memcpy(&mask, d, 4);
+        memcpy(&month, d + 4, 8);
+        memcpy(ev, d + 13, n * sizeof(cal_event_t));
+        for (int k = 0; k < n; k++) ev[k].summary[CAL_SUMMARY_LEN - 1] = 0;
+        emit_calendar(pg, row, ev, n, mask, month);
+        break;
+    }
     case REC_ICON: {
         const char *ic = unpack_str(&d, de);
         snprintf(s_icon_last[pg][row], sizeof(s_icon_last[pg][row]), "%s", ic);
@@ -923,6 +958,7 @@ static void report_icon(int pg, int row, const char *json);
 static void utf8_trim(char *s);
 static void fetch_weather(int pg, int row);
 static void fetch_forecast(int pg, int row);
+static void fetch_calendar(int pg, int row);
 static void fetch_button(int pg, int row);
 
 /* A tap/toggle is waiting: background reads (graph history, pictures, the rest of a poll)
@@ -1136,6 +1172,7 @@ static bool fetch_state(void)
             const layout_item_t *it = &s_layout.pages[pg].items[i];
             if (it->kind == LAYOUT_BUTTONS) { fetch_button(pg, i); continue; }
             if (it->kind == LAYOUT_WEATHER) { fetch_weather(pg, i); continue; }
+            if (it->kind == LAYOUT_CALENDAR) { fetch_calendar(pg, i); continue; }
             if (it->kind != LAYOUT_VALUES && it->kind != LAYOUT_GAUGE && it->kind != LAYOUT_GLANCE) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
             bool got;
@@ -1331,6 +1368,11 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
         ESP_LOGW(TAG, "layout: %s is not a weather entity, skipped", entity);
         return false;
     }
+    if (kind == LAYOUT_CALENDAR) {
+        if (is_domain(entity, "calendar")) return true;
+        ESP_LOGW(TAG, "layout: %s is not a calendar, skipped", entity);
+        return false;
+    }
     if (kind == LAYOUT_PICTURE) {
         if (is_domain(entity, "camera") || is_domain(entity, "image")) return true;
         ESP_LOGW(TAG, "layout: %s is not a camera or image, no picture", entity);
@@ -1410,6 +1452,92 @@ static void fetch_forecast(int pg, int row)
     s_fc_mode = false;
     if (st != 200) return;               /* keep the last data */
     emit_forecast(pg, row, s_fc, s_fc_n, hourly);
+}
+
+/* Calendar card: the events of all its calendars through calendar.get_events, on every poll
+ * like the rest: day view = today, list view = now + 7 days, month view = this month */
+/* Calendar colours as HA's calendar card picks them: the calendar's colour from the entity
+ * registry (options.calendar.color), else HA's palette (--color-N) by its place in the card.
+ * Read once per layout and card. */
+#define CAL_IDS_MAX 8
+static uint32_t s_cal_rgb[LAYOUT_MAX_CALS][CAL_IDS_MAX];
+static bool s_cal_rgb_ok[LAYOUT_MAX_CALS];
+static const uint32_t CAL_PALETTE[CAL_IDS_MAX] = {
+    0x4269d0, 0xf4bd4a, 0xff725c, 0x6cc5b0, 0xa463f2, 0xff8ab7, 0x9c6b4e, 0x97bbf5,
+};
+
+static void cal_colors(int k)
+{
+    const char *ids = s_layout.cals[k];
+    for (int i = 0; i < CAL_IDS_MAX; i++) s_cal_rgb[k][i] = CAL_PALETTE[i];
+    dash_ws_t *d = dash_ws_open();
+    if (!d) return;                       /* palette for now; tried again on the next poll */
+    bool ok = true;
+    int i = 0;
+    for (const char *p = ids; *p && i < CAL_IDS_MAX; i++) {
+        size_t m = strcspn(p, ",");
+        char body[128];
+        snprintf(body, sizeof(body), "\"type\":\"config/entity_registry/get\",\"entity_id\":\"%.*s\"", (int)m, p);
+        p += m + (p[m] == ',');
+        char *msg = dash_ws_call(d, body);
+        if (!msg) { ok = false; break; }
+        cJSON *root = cJSON_Parse(msg);
+        const cJSON *c = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(
+                         cJSON_GetObjectItemCaseSensitive(root, "result"), "options"), "calendar"), "color");
+        unsigned v;
+        if (cJSON_IsString(c) && c->valuestring[0] == '#' && strlen(c->valuestring) == 7 && sscanf(c->valuestring + 1, "%6x", &v) == 1)
+            s_cal_rgb[k][i] = v;
+        else if (cJSON_IsString(c) && c->valuestring[0])
+            ESP_LOGW(TAG, "calendar colour '%s' not supported, palette used", c->valuestring);
+        cJSON_Delete(root);
+        free(msg);
+    }
+    dash_ws_close(d);
+    s_cal_rgb_ok[k] = ok;
+}
+
+static void fetch_calendar(int pg, int row)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    if (!it->cal || it->cal > LAYOUT_MAX_CALS) return;
+    int view = it->flags & LAYOUT_CAL_SPAN;
+    const char *ids = s_layout.cals[it->cal - 1];
+    char body[LAYOUT_CALS_LEN * 2 + 160];
+    int n = snprintf(body, sizeof(body), "{\"entity_id\":[");
+    for (const char *p = ids; *p && n < (int)sizeof(body) - 120; ) {
+        size_t k = strcspn(p, ",");
+        n += snprintf(body + n, sizeof(body) - n, "%s\"%.*s\"", p == ids ? "" : ",", (int)k, p);
+        p += k + (p[k] == ',');
+    }
+    time_t now = time(NULL), from = now, to = now + 7 * 86400;
+    struct tm tm;
+    localtime_r(&now, &tm);
+    tm.tm_hour = tm.tm_min = tm.tm_sec = 0; tm.tm_isdst = -1;
+    if (view == LAYOUT_CAL_DAY) {          /* local midnight to midnight */
+        from = mktime(&tm);
+        tm.tm_mday++; tm.tm_isdst = -1;
+        to = mktime(&tm);
+    } else if (view == LAYOUT_CAL_MONTH) { /* the 1st to the 1st of the next month */
+        tm.tm_mday = 1;
+        from = mktime(&tm);
+        tm.tm_mon++; tm.tm_isdst = -1;
+        to = mktime(&tm);
+    }
+    struct tm u;
+    gmtime_r(&from, &u);
+    snprintf(body + n, sizeof(body) - n, "],\"start_date_time\":\"%04d-%02d-%02dT%02d:%02d:%02d+00:00\",\"duration\":{\"seconds\":%ld}}",
+             u.tm_year + 1900, u.tm_mon + 1, u.tm_mday, u.tm_hour, u.tm_min, u.tm_sec, (long)(to - from));
+    static cal_parse_t cp;
+    cp.mask_from = view == LAYOUT_CAL_MONTH ? from : 0;
+    cp.ids = ids;
+    if (!s_cal_rgb_ok[it->cal - 1]) cal_colors(it->cal - 1);
+    cal_parse_init(&cp);
+    s_cal = &cp;
+    int st = ha_request(HTTP_METHOD_POST, "/api/services/calendar/get_events?return_response", body, NULL);
+    s_cal = NULL;
+    if (st != 200) return;               /* keep the last data */
+    for (int k = 0; k < cp.n; k++) cp.ev[k].color = s_cal_rgb[it->cal - 1][cp.ev[k].src % CAL_IDS_MAX];
+    emit_calendar(pg, row, cp.ev, cp.n, cp.mask, cp.mask_from);
 }
 
 /* Drop a UTF-8 sequence cut off at the end of s by truncation */
@@ -1530,6 +1658,7 @@ static void use_layout(const ha_layout_t *l)
     if (layout_hash(l) != s_layout_hash) rec_clear();   /* the rows mean something else now */
     s_layout = *l;
     s_layout_hash = layout_hash(l);
+    memset(s_cal_rgb_ok, 0, sizeof(s_cal_rgb_ok));   /* calendar colours: read again */
     rec_unlock();
     if (s_layout_cb) s_layout_cb(&s_layout);
     load_icon_rules();
