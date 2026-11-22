@@ -2618,6 +2618,9 @@ static int screen_level_now(void)
 /* LVGL task */
 static void screen_apply(void)
 {
+    /* a slider previews its value while dragged; its release applies the level */
+    if ((s_night_sl && lv_obj_has_state(s_night_sl, LV_STATE_PRESSED)) ||
+        (s_slider && lv_obj_has_state(s_slider, LV_STATE_PRESSED))) return;
     int lv = screen_level_now();
     if (lv == 0) s_woken = false;
     if (lv != s_level) {
@@ -2626,7 +2629,10 @@ static void screen_apply(void)
         s_level = lv;
     }
     if (s_wake_layer) {
-        if (lv == 0) lv_obj_clear_flag(s_wake_layer, LV_OBJ_FLAG_HIDDEN);
+        if (lv == 0) {   /* above the chooser / setup screens, which share the top layer */
+            lv_obj_clear_flag(s_wake_layer, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(s_wake_layer);
+        }
         else lv_obj_add_flag(s_wake_layer, LV_OBJ_FLAG_HIDDEN);
     }
 }
