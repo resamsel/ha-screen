@@ -53,7 +53,10 @@ static const char *TAG = "ha";
 #define LIVE_BIT    BIT9  /* live state events are queued */
 #define NAV_BIT     BIT10 /* dashboard / view / page to write to HA */
 #define NIGHT_BIT   BIT11 /* night mode / night brightness / screen timeout changed */
-#define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT)
+#define TARGET_BIT  BIT12 /* a thermostat's target temperature was changed */
+#define MEDIA_BIT   BIT13 /* play/pause or next on a media card */
+#define LIGHT_BIT   BIT14 /* a light card was switched or dimmed */
+#define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT)
 
 static volatile float s_set_value;
 static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
@@ -90,6 +93,16 @@ static ha_icon_cb_t s_icon_cb;
 void ha_client_set_icon_cb(ha_icon_cb_t cb) { s_icon_cb = cb; }
 static char *s_icon_rule[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];      /* from HA's icon tables */
 static char s_icon_last[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][48];   /* last icon reported */
+static ha_climate_cb_t s_climate_cb;
+void ha_client_set_climate_cb(ha_climate_cb_t cb) { s_climate_cb = cb; }
+static volatile int s_tgt_page = -1, s_tgt_row = -1;
+static volatile float s_tgt_value;
+static ha_media_cb_t s_media_cb;
+void ha_client_set_media_cb(ha_media_cb_t cb) { s_media_cb = cb; }
+static volatile int s_med_page = -1, s_med_row = -1, s_med_cmd;
+static ha_light_cb_t s_light_cb;
+void ha_client_set_light_cb(ha_light_cb_t cb) { s_light_cb = cb; }
+static volatile int s_lt_page = -1, s_lt_row = -1, s_lt_pct;
 static ha_weather_cb_t s_weather_cb;
 void ha_client_set_weather_cb(ha_weather_cb_t cb) { s_weather_cb = cb; }
 static ha_forecast_cb_t s_forecast_cb;
@@ -680,7 +693,7 @@ static bool json_num(const char *json, const char *key, float *out)
 
 /* ---- Card data cache: the last data sent for every card, saved to flash (cache_store) and
  * replayed through the same callbacks at boot, so the board shows it before HA answers ---- */
-enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_FORECAST, REC_CALENDAR, REC_TYPES };
+enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_FORECAST, REC_CALENDAR, REC_CLIMATE, REC_MEDIA, REC_LIGHT, REC_TYPES };
 static uint8_t *s_rec[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
 static uint16_t s_rec_len[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
 static uint8_t s_rec_theme = 0xFF;        /* HA_STATE_ON/OFF of the theme entity */
@@ -786,6 +799,32 @@ static void emit_weather(int pg, int row, const char *cond, const char *temp, co
     const char *a[] = { cond, temp, unit, hum, name };
     rec_put(REC_WEATHER, pg, row, b, pack_strs(b, sizeof(b), a, 5));
     if (s_weather_cb) s_weather_cb(pg, row, cond, temp, unit, hum, name);
+}
+
+static void emit_climate(int pg, int row, const ha_climate_t *c, const char *name)
+{
+    uint8_t b[160];
+    const char *a[] = { c->mode, c->action, c->cur, c->target, c->min, c->max, c->step, name };
+    rec_put(REC_CLIMATE, pg, row, b, pack_strs(b, sizeof(b), a, 8));
+    if (s_climate_cb) s_climate_cb(pg, row, c, name);
+}
+
+static void emit_media(int pg, int row, const char *st, const char *title, const char *artist, const char *name)
+{
+    uint8_t b[160];
+    const char *a[] = { st, title, artist, name };
+    rec_put(REC_MEDIA, pg, row, b, pack_strs(b, sizeof(b), a, 4));
+    if (s_media_cb) s_media_cb(pg, row, st, title, artist, name);
+}
+
+/* record: i8 pct, state, name */
+static void emit_light(int pg, int row, const char *st, int pct, const char *name)
+{
+    uint8_t b[64];
+    b[0] = (uint8_t)(int8_t)pct;
+    const char *a[] = { st, name };
+    rec_put(REC_LIGHT, pg, row, b, 1 + pack_strs(b + 1, sizeof(b) - 1, a, 2));
+    if (s_light_cb) s_light_cb(pg, row, st, pct, name);
 }
 
 /* record: u8 hourly, u8 n, n x ha_forecast_t */
@@ -905,6 +944,26 @@ static void rec_emit(int t, int pg, int row, const uint8_t *d, const uint8_t *de
         emit_calendar(pg, row, ev, n, mask, month);
         break;
     }
+    case REC_CLIMATE: {
+        ha_climate_t c;
+        char *f[] = { c.mode, c.action, c.cur, c.target, c.min, c.max, c.step };
+        size_t sz[] = { sizeof(c.mode), sizeof(c.action), sizeof(c.cur), sizeof(c.target), sizeof(c.min), sizeof(c.max), sizeof(c.step) };
+        for (int k = 0; k < 7; k++) snprintf(f[k], sz[k], "%s", unpack_str(&d, de));
+        emit_climate(pg, row, &c, unpack_str(&d, de));
+        break;
+    }
+    case REC_MEDIA: {
+        const char *st = unpack_str(&d, de), *ti = unpack_str(&d, de), *ar = unpack_str(&d, de);
+        emit_media(pg, row, st, ti, ar, unpack_str(&d, de));
+        break;
+    }
+    case REC_LIGHT: {
+        if (l < 1) break;
+        const uint8_t *q = d + 1;
+        const char *st = unpack_str(&q, de);
+        emit_light(pg, row, st, (int8_t)d[0], unpack_str(&q, de));
+        break;
+    }
     case REC_ICON: {
         const char *ic = unpack_str(&d, de);
         snprintf(s_icon_last[pg][row], sizeof(s_icon_last[pg][row]), "%s", ic);
@@ -959,13 +1018,19 @@ static void utf8_trim(char *s);
 static void fetch_weather(int pg, int row);
 static void fetch_forecast(int pg, int row);
 static void fetch_calendar(int pg, int row);
+static void fetch_climate(int pg, int row);
+static void fetch_media(int pg, int row);
+static void fetch_light(int pg, int row);
+static void parse_light(int pg, int row, const char *json);
+static void parse_media(int pg, int row, const char *json);
+static void parse_climate(int pg, int row, const char *json);
 static void fetch_button(int pg, int row);
 
 /* A tap/toggle is waiting: background reads (graph history, pictures, the rest of a poll)
  * stop so it reaches HA at once; they are picked up again on the next poll */
 static bool user_waiting(void)
 {
-    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NIGHT_BIT);
+    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT);
 }
 
 static void parse_brightness(const char *json)
@@ -1173,7 +1238,11 @@ static bool fetch_state(void)
             if (it->kind == LAYOUT_BUTTONS) { fetch_button(pg, i); continue; }
             if (it->kind == LAYOUT_WEATHER) { fetch_weather(pg, i); continue; }
             if (it->kind == LAYOUT_CALENDAR) { fetch_calendar(pg, i); continue; }
-            if (it->kind != LAYOUT_VALUES && it->kind != LAYOUT_GAUGE && it->kind != LAYOUT_GLANCE) continue;   /* graphs: fetch_graph; clocks: no data */
+            if (it->kind == LAYOUT_THERMOSTAT) { fetch_climate(pg, i); continue; }
+            if (it->kind == LAYOUT_MEDIA) { fetch_media(pg, i); continue; }
+            if (it->kind == LAYOUT_LIGHT) { fetch_light(pg, i); continue; }
+            if (it->kind != LAYOUT_VALUES && it->kind != LAYOUT_GAUGE && it->kind != LAYOUT_GLANCE &&
+                it->kind != LAYOUT_ENTITIES) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
             bool got;
             read_entity(pg, i, text, unit, name, &got);
@@ -1362,10 +1431,25 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
         ESP_LOGW(TAG, "layout: %s can't be switched ('%s'), skipped", entity, state);
         return false;
     }
-    if (kind == LAYOUT_VALUES || kind == LAYOUT_GLANCE) return true;   /* text states are shown as text */
+    if (kind == LAYOUT_VALUES || kind == LAYOUT_GLANCE || kind == LAYOUT_ENTITIES) return true;   /* text states are shown as text */
     if (kind == LAYOUT_WEATHER) {
         if (is_domain(entity, "weather")) return true;
         ESP_LOGW(TAG, "layout: %s is not a weather entity, skipped", entity);
+        return false;
+    }
+    if (kind == LAYOUT_LIGHT) {
+        if (is_domain(entity, "light")) return true;
+        ESP_LOGW(TAG, "layout: %s is not a light, skipped", entity);
+        return false;
+    }
+    if (kind == LAYOUT_MEDIA) {
+        if (is_domain(entity, "media_player")) return true;
+        ESP_LOGW(TAG, "layout: %s is not a media player, skipped", entity);
+        return false;
+    }
+    if (kind == LAYOUT_THERMOSTAT) {
+        if (is_domain(entity, "climate")) return true;
+        ESP_LOGW(TAG, "layout: %s is not a climate entity, skipped", entity);
         return false;
     }
     if (kind == LAYOUT_CALENDAR) {
@@ -1421,6 +1505,82 @@ static void parse_weather(int pg, int row, const char *json)
     json_numtext(json, "\"humidity\":", hum, sizeof(hum));
     json_str(json, "\"temperature_unit\":\"", unit, sizeof(unit));
     emit_weather(pg, row, cond, temp, unit, hum, name);
+}
+
+/* Thermostat card: mode, action and temperatures of a climate entity */
+static void parse_climate(int pg, int row, const char *json)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    ha_climate_t c = {0};
+    char name[32];
+    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    report_icon(pg, row, json);
+    if (!it->name[0] && json_str(json, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+    json_str(json, "\"state\":\"", c.mode, sizeof(c.mode));
+    json_str(json, "\"hvac_action\":\"", c.action, sizeof(c.action));
+    json_numtext(json, "\"current_temperature\":", c.cur, sizeof(c.cur));
+    json_numtext(json, "\"temperature\":", c.target, sizeof(c.target));   /* not current_: '"' first */
+    json_numtext(json, "\"min_temp\":", c.min, sizeof(c.min));
+    json_numtext(json, "\"max_temp\":", c.max, sizeof(c.max));
+    json_numtext(json, "\"target_temp_step\":", c.step, sizeof(c.step));
+    emit_climate(pg, row, &c, name);
+}
+
+static void fetch_climate(int pg, int row)
+{
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
+    char path[96];
+    snprintf(path, sizeof(path), "/api/states/%s", s_layout.pages[pg].items[row].entity);
+    if (ha_request(HTTP_METHOD_GET, path, NULL, r) != 200) return;   /* keep the last data */
+    if (r->len >= (int)sizeof(r->buf) - 1) ESP_LOGW(TAG, "%s: state longer than %d bytes, cut", s_layout.pages[pg].items[row].entity, (int)sizeof(r->buf) - 1);
+    parse_climate(pg, row, r->buf);
+}
+
+/* Media control card: state, title and artist of a media player */
+static void parse_media(int pg, int row, const char *json)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    char st[16] = "", title[40] = "", artist[32] = "", name[32];
+    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    if (!it->name[0] && json_str(json, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+    json_str(json, "\"state\":\"", st, sizeof(st));
+    if (json_str(json, "\"media_title\":\"", title, sizeof(title))) utf8_trim(title);
+    if (json_str(json, "\"media_artist\":\"", artist, sizeof(artist))) utf8_trim(artist);
+    emit_media(pg, row, st, title, artist, name);
+}
+
+static void fetch_media(int pg, int row)
+{
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
+    char path[96];
+    snprintf(path, sizeof(path), "/api/states/%s", s_layout.pages[pg].items[row].entity);
+    if (ha_request(HTTP_METHOD_GET, path, NULL, r) != 200) return;   /* keep the last data */
+    if (r->len >= (int)sizeof(r->buf) - 1) ESP_LOGW(TAG, "%s: state longer than %d bytes, cut", s_layout.pages[pg].items[row].entity, (int)sizeof(r->buf) - 1);
+    parse_media(pg, row, r->buf);
+}
+
+/* Light card: on/off and brightness (0-255 in HA, shown in %) */
+static void parse_light(int pg, int row, const char *json)
+{
+    const layout_item_t *it = &s_layout.pages[pg].items[row];
+    char st[16] = "", name[32];
+    float bri;
+    snprintf(name, sizeof(name), "%.31s", it->name[0] ? it->name : it->entity);
+    if (!it->name[0] && json_str(json, "\"friendly_name\":\"", name, sizeof(name))) utf8_trim(name);
+    json_str(json, "\"state\":\"", st, sizeof(st));
+    int pct = -1;
+    if (json_num(json, "\"brightness\":", &bri) && bri >= 0) pct = (int)(bri * 100 / 255 + 0.5f);
+    if (pct > 100) pct = 100;
+    emit_light(pg, row, st, pct, name);
+}
+
+static void fetch_light(int pg, int row)
+{
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
+    char path[96];
+    snprintf(path, sizeof(path), "/api/states/%s", s_layout.pages[pg].items[row].entity);
+    if (ha_request(HTTP_METHOD_GET, path, NULL, r) != 200) return;   /* keep the last data */
+    parse_light(pg, row, r->buf);
 }
 
 /* Forecast of a weather card through weather.get_forecasts, on every poll like the rest */
@@ -1580,7 +1740,8 @@ static void resolve_names(ha_layout_t *l)
  * class, else the domain default), like HA's frontend */
 static bool has_icon(const layout_item_t *it)
 {
-    return (it->kind == LAYOUT_VALUES || it->kind == LAYOUT_GRAPH || it->kind == LAYOUT_BUTTONS || it->kind == LAYOUT_GLANCE) &&
+    return (it->kind == LAYOUT_VALUES || it->kind == LAYOUT_GRAPH || it->kind == LAYOUT_BUTTONS || it->kind == LAYOUT_GLANCE ||
+            it->kind == LAYOUT_ENTITIES) &&
            it->icon[0] != '-';
 }
 
@@ -2113,8 +2274,8 @@ static void live_stop(void)
 
 static bool live_kind(layout_kind_t k)
 {
-    return k == LAYOUT_VALUES || k == LAYOUT_GAUGE || k == LAYOUT_GLANCE || k == LAYOUT_GRAPH ||
-           k == LAYOUT_BUTTONS || k == LAYOUT_WEATHER;
+    return k == LAYOUT_VALUES || k == LAYOUT_GAUGE || k == LAYOUT_GLANCE || k == LAYOUT_ENTITIES || k == LAYOUT_GRAPH ||
+           k == LAYOUT_BUTTONS || k == LAYOUT_WEATHER || k == LAYOUT_THERMOSTAT || k == LAYOUT_MEDIA || k == LAYOUT_LIGHT;
 }
 
 static bool live_start(void)
@@ -2221,6 +2382,9 @@ static void live_dispatch(const char *id, const char *json)
             switch (it->kind) {
             case LAYOUT_BUTTONS: parse_button(pg, i, json); break;
             case LAYOUT_WEATHER: parse_weather(pg, i, json); break;
+            case LAYOUT_THERMOSTAT: parse_climate(pg, i, json); break;
+            case LAYOUT_MEDIA: parse_media(pg, i, json); break;
+            case LAYOUT_LIGHT: parse_light(pg, i, json); break;
             case LAYOUT_GRAPH:
                 parse_entity(pg, i, json, text, unit, name);
                 emit_graph(pg, i, text, unit, name, NULL, 0, 0, it->hours, !strcmp(unit, "%"));
@@ -2358,6 +2522,44 @@ static bool do_user(EventBits_t b)
         if (s_press_cb) s_press_cb(pg, row, pok);
         vTaskDelay(pdMS_TO_TICKS(300)); /* let HA switch before the state is re-read */
     }
+    if (b & LIGHT_BIT) {
+        int pg = s_lt_page, row = s_lt_row, pct = s_lt_pct;
+        if (pg >= 0 && pg < s_layout.count && row >= 0 && row < s_layout.pages[pg].count &&
+            s_layout.pages[pg].items[row].kind == LAYOUT_LIGHT) {
+            const char *e = s_layout.pages[pg].items[row].entity;
+            char lb[112];
+            if (pct > 0) snprintf(lb, sizeof(lb), "{\"entity_id\":\"%s\",\"brightness_pct\":%d}", e, pct);
+            else snprintf(lb, sizeof(lb), "{\"entity_id\":\"%s\"}", e);
+            const char *svc = pct > 0 ? "/api/services/light/turn_on" : pct == 0 ? "/api/services/light/turn_off" : "/api/services/light/toggle";
+            ESP_LOGI(TAG, "%s -> %s (%d)", e, svc, pct);
+            int st = ha_service(svc, lb);
+            ok &= st >= 200 && st < 300;
+        }
+    }
+    if (b & MEDIA_BIT) {
+        int pg = s_med_page, row = s_med_row;
+        if (pg >= 0 && pg < s_layout.count && row >= 0 && row < s_layout.pages[pg].count &&
+            s_layout.pages[pg].items[row].kind == LAYOUT_MEDIA) {
+            char mb[96];
+            const char *svc = s_med_cmd == HA_MEDIA_NEXT ? "/api/services/media_player/media_next_track"
+                                                         : "/api/services/media_player/media_play_pause";
+            snprintf(mb, sizeof(mb), "{\"entity_id\":\"%s\"}", s_layout.pages[pg].items[row].entity);
+            ESP_LOGI(TAG, "%s -> %s", s_layout.pages[pg].items[row].entity, svc);
+            int st = ha_service(svc, mb);
+            ok &= st >= 200 && st < 300;
+        }
+    }
+    if (b & TARGET_BIT) {
+        int pg = s_tgt_page, row = s_tgt_row;
+        if (pg >= 0 && pg < s_layout.count && row >= 0 && row < s_layout.pages[pg].count &&
+            s_layout.pages[pg].items[row].kind == LAYOUT_THERMOSTAT) {
+            char tb[112];
+            snprintf(tb, sizeof(tb), "{\"entity_id\":\"%s\",\"temperature\":%.1f}", s_layout.pages[pg].items[row].entity, s_tgt_value);
+            ESP_LOGI(TAG, "%s target %.1f", s_layout.pages[pg].items[row].entity, s_tgt_value);
+            int st = ha_service("/api/services/climate/set_temperature", tb);
+            ok &= st >= 200 && st < 300;
+        }
+    }
     return ok;
 }
 
@@ -2435,7 +2637,7 @@ static void ha_task(void *arg)
         }
         round_at = xTaskGetTickCount();
         if (s_busy_cb && !quiet) s_busy_cb(true);
-        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NIGHT_BIT);
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
         if (refresh || (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)))) {
@@ -2540,6 +2742,30 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
         esp_timer_start_once(s_nowifi_timer, (uint64_t)HA_WIFI_PORTAL_S * 1000000);
 
     xTaskCreate(ha_task, "ha", 8192, NULL, 3, NULL);   /* also rebuilds the UI: 8 pages measured ~3.7 KB peak */
+}
+
+void ha_client_light(int page, int row, int pct)
+{
+    s_lt_page = page;
+    s_lt_row = row;
+    s_lt_pct = pct;
+    if (s_events) xEventGroupSetBits(s_events, LIGHT_BIT);
+}
+
+void ha_client_media(int page, int row, ha_media_cmd_t cmd)
+{
+    s_med_page = page;
+    s_med_row = row;
+    s_med_cmd = cmd;
+    if (s_events) xEventGroupSetBits(s_events, MEDIA_BIT);
+}
+
+void ha_client_set_target(int page, int row, float target)
+{
+    s_tgt_page = page;
+    s_tgt_row = row;
+    s_tgt_value = target;
+    if (s_events) xEventGroupSetBits(s_events, TARGET_BIT);
 }
 
 void ha_client_press(int page, int row)

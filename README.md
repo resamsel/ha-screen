@@ -15,6 +15,10 @@ once the board first reaches HA). The board re-reads it every minute and rebuild
 - an `entity` card = like a tile
 - a `gauge` card = the value on a half-circle arc (`min`/`max`, `severity` colours like HA)
 - a `glance` card = one cell per entity (icon, state, name), up to 4 per page
+- an `entities` card = one row per entity (icon, name, state), up to 4 per page; its title becomes the section heading; dividers and other special rows are skipped
+- a `thermostat` card = the target temperature between − and + (sent 1 s after the last tap, within the entity's min/max and step), the action (heating, idle, ...) and the current temperature below
+- a `media-control` card = name, title and artist (the state when nothing plays), play/pause and next buttons
+- a `light` card = name and brightness, an on/off button and a brightness bar: a tap on the bar sets the brightness there (sent 0.6 s after the last tap)
 - a `button` card = a tap toggles on/off entities, runs scripts, activates scenes and presses
   `button.*` / `input_button.*` entities
 - a `picture-entity` card = a picture fitted into its block, name along the bottom
