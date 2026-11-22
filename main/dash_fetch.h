@@ -3,7 +3,7 @@
 #include <stdbool.h>
 
 /* Returns the malloc'd lovelace/config result message for dashboard url_path ("" =
- * HA_DASHBOARD), or NULL. If list is given, it gets the lovelace/dashboards/list result
+ * none chosen: then only the list is fetched), or NULL. If list is given, it gets the lovelace/dashboards/list result
  * from the same session (or NULL). Caller frees both. */
 char *dash_fetch_config(const char *url_path, char **list);
 

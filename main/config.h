@@ -1,9 +1,16 @@
-/* Non-secret device configuration. Wi-Fi credentials and the HA token come from the
- * WIFI_SSID, WIFI_PASS and HA_TOKEN environment variables at build time. */
+/* Non-secret device configuration. Wi-Fi credentials, the HA URL and the HA token are kept
+ * in NVS and set in the setup portal (provision.h); build-time values are only defaults. */
 #pragma once
 
-/* Home Assistant base URL, no trailing slash */
-#define HA_URL               "https://home.panzar.io"
+/* Default Home Assistant base URL (no trailing slash) until the setup portal stores one */
+#define HA_URL_DEFAULT       "http://homeassistant.local:8123"
+
+/* Setup portal (provision.h): opened at boot when settings are missing, when the BOOT
+ * button is held while powering on, or when Wi-Fi or HA (unreachable, token rejected) didn't
+ * work for this many seconds since boot; the form then says why.
+ * With settings stored it gives up after HA_PORTAL_IDLE_S without a phone connected. */
+#define HA_WIFI_PORTAL_S     120
+#define HA_PORTAL_IDLE_S     300
 
 /* How often the display reads all data from Home Assistant (entities and the graph
  * history), in milliseconds */
@@ -19,25 +26,26 @@
 #define HA_HTTP_RETRIES      2
 #define HA_HTTP_RETRY_MS     500
 
-/* Board helpers (issue #24): each board's ID comes from its MAC (screen_a1b2c3); the HA
- * helper input_text.<id> holds its name, which prefixes the board's helpers. Name kitchen:
+/* Board helpers (issue #24): each board's ID comes from its MAC (screen_a1b2c3); its name
+ * prefixes the board's helpers; the HA helper input_text.<id> can hold the name. Name kitchen:
  *   input_boolean.kitchen_theme         on = dark theme, off = light (the button)
  *   input_boolean.kitchen_landscape     on = landscape, off = portrait (Settings)
  *   input_boolean.kitchen_presentation  presentation mode on/off
  *   input_number.kitchen_presentation_interval  seconds per page
  *   input_number.kitchen_brightness     backlight (the slider; uses the entity's min/max)
  *   input_text.kitchen_dashboard / _view, input_number.kitchen_page  (see below)
- * Until the name is set the board shows a setup screen naming the helper to create. */
+ * The name is set in the setup portal (board ID if none); the helper, when it exists, overrides
+ * it. Every helper is optional: without one the board keeps that setting itself (NVS), and
+ * creating it later hands the setting to HA. */
 
-/* Dashboard that defines the main-screen pages: each section of the view chosen in the
- * config panel (first page, "View") is one page (tiles = value rows, a line-graph sensor
- * card = graph page). Re-read every interval. */
-#define HA_DASHBOARD          "esp32-c6-dev"
+/* The main-screen pages come from the dashboard and view chosen on the board (config panel,
+ * first page; asked for once the board reaches HA): each section of the view is one page
+ * (tiles = value rows, a line-graph sensor card = graph page). Re-read every interval. */
 #define HA_LAYOUT_INTERVAL_MS 60000
 
 /* Shown dashboard, view and page, kept in sync both ways (the last change wins; flash keeps
  * them when HA is unreachable). Optional: missing or unavailable entities are ignored.
- * input_text: dashboard url_path ("" = HA_DASHBOARD) and view path ("" = the first view);
+ * input_text: dashboard url_path ("" = none chosen yet) and view path ("" = the first view);
  * input_number: page, counted from 1 (not written while presentation mode is on). */
 
 /* Picture cards (picture-entity, camera.* / image.*): refresh interval while the page is shown */
