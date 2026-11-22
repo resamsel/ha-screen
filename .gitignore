@@ -2,6 +2,8 @@
 build/
 out/
 sdkconfig.old
+# written by the release workflow (the tag); locally the version comes from git describe
+version.txt
 
 # fetched by the IDF component manager from dependencies.lock
 managed_components/
@@ -78,3 +80,6 @@ dkms.conf
 shots/
 __pycache__/
 .pytest_cache/
+
+# macOS Finder metadata
+.DS_Store

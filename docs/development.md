@@ -44,11 +44,10 @@ fits a slot), the `cache` and `otadata`. NVS stays where it was, so a board keep
   `MDI1` is written last, so an interrupted write leaves the board without icons rather than
   with garbage; *Update* on the same app version then repairs a missing/broken blob. A failed
   icon download still restarts into the new app.
-- **Releases**: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds with the
-  tag as app version and publishes `ha-screen.bin` (plus the USB flashing files). The panel's
-  Firmware page shows the running version; *Update* fetches
+- **Update**: the panel's Firmware page shows the running version; *Update* fetches
   `releases/latest/download/ha-screen.bin` (`HA_OTA_URL`), skips it when the version is the
-  same, otherwise writes it to the other slot and restarts.
+  same, otherwise writes it to the other slot and restarts. Versions are only compared for
+  equality, so a board on a dev build always installs the latest release.
 - **Rollback**: a new image is on trial until it has run `HA_OTA_CONFIRM_MS` (60 s); a crash,
   watchdog or reset before that boots the previous image again.
 - **Testing OTA locally**: add `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y`, point `HA_OTA_URL` at
@@ -103,3 +102,33 @@ To try a card type on the real dashboard (`esp32-c6-dev/main`), back up the view
 first, edit, check the serial log (115200 baud) and the screen, then restore and compare
 the restored config with the backup. The board picks up changes within 60 s, or at once
 with the refresh button.
+
+## Versions and releases
+
+The version is the git tag, [semver](https://semver.org) with a `v`: `v1.2.0`.
+
+- **Dev builds** take it from `git describe` (`v1.2.0-3-gabc1234`, `-dirty` with local changes;
+  the commit hash before the first tag). CI checks out the history for that.
+- **Releases**: tag a commit on `main` and push the tag:
+
+  ```bash
+  git tag -a v1.2.0 -m "v1.2.0" && git push origin v1.2.0
+  ```
+
+  `.github/workflows/release.yml` checks the tag, builds with it as the version (`version.txt`)
+  with no Wi-Fi/HA defaults compiled in, and publishes a GitHub release with notes generated
+  from the merged PRs. Boards pick it up with *Update*.
+- **Pre-releases**: a suffix (`v1.2.0-rc.1`) publishes a pre-release. `releases/latest` skips
+  it, so boards don't; install it by USB to try it.
+- **Bump**: patch for fixes, minor for features, major when boards need a USB flash again (a
+  partition layout change; OTA can't change the partition table).
+
+Release assets:
+
+| File | What |
+|------|------|
+| `ha-screen.bin` | the app; what *Update* installs, USB at `0x10000` |
+| `mdi_icons.bin` | the icons partition; *Update* writes it too, USB at `0x570000` |
+| `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin` | USB at `0x0`, `0x8000`, `0x7f0000` |
+| `ha-screen-full.bin` | everything in one image, USB at `0x0`. **Erases the board's settings** (Wi-Fi, HA, name): for a new board or a recovery; to keep settings flash the files above |
+| `SHA256SUMS` | checksums |
