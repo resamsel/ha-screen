@@ -1,13 +1,34 @@
 #include "icons.h"
 #include <string.h>
 
-extern const uint8_t mdi_start[] asm("_binary_mdi_icons_bin_start");
+#ifdef ESP_PLATFORM
+#include "esp_partition.h"
+#include "esp_log.h"
+#endif
+
+/* The blob, memory-mapped from the "icons" partition (issue #14: not in the app, so the app
+ * fits an OTA slot). NULL = no icons (partition missing or not written) */
+static const uint8_t *mdi_start;
+
+void icons_init(void)
+{
+#ifdef ESP_PLATFORM
+    const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x41, "icons");
+    const void *ptr; esp_partition_mmap_handle_t h;
+    if (!p || esp_partition_mmap(p, 0, p->size, ESP_PARTITION_MMAP_DATA, &ptr, &h) != ESP_OK) {
+        ESP_LOGW("icons", "no icons partition");
+        return;
+    }
+    if (memcmp(ptr, "MDI1", 4)) { ESP_LOGW("icons", "icons partition is empty (idf.py flash writes it)"); return; }
+    mdi_start = ptr;
+#endif
+}
 
 static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
 const uint8_t *icon_bitmap(const char *name)
 {
-    if (!name || !name[0] || memcmp(mdi_start, "MDI1", 4) || rd32(mdi_start + 8) != ICON_SIZE) return NULL;
+    if (!mdi_start || !name || !name[0] || memcmp(mdi_start, "MDI1", 4) || rd32(mdi_start + 8) != ICON_SIZE) return NULL;
     if (!strncmp(name, "mdi:", 4)) name += 4;
     else if (strchr(name, ':')) return NULL;          /* other icon sets (hass:, custom) */
     uint32_t n = rd32(mdi_start + 4), sz = ICON_SIZE * ICON_SIZE / 2;

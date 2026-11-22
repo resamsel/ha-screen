@@ -34,3 +34,5 @@ jobs:
             build/lvgl_example.bin
             build/partition_table/partition-table.bin
             build/bootloader/bootloader.bin
+            build/ota_data_initial.bin
+            main/mdi_icons.bin

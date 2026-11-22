@@ -4,6 +4,9 @@
 
 #define ICON_SIZE 24   /* pixels; must match tools/make_icons.py */
 
+/* Maps the icon blob from its flash partition; call once at boot */
+void icons_init(void);
+
 /* The 4 bpp alpha bitmap (ICON_SIZE x ICON_SIZE, LV_IMG_CF_ALPHA_4BIT) of "mdi:name" or
  * "name"; NULL when unknown */
 const uint8_t *icon_bitmap(const char *name);

@@ -20,10 +20,36 @@ throwaway virtualenv:
 
 ```bash
 python3 -m venv /tmp/esp && /tmp/esp/bin/pip install esptool
-/tmp/esp/bin/esptool.py --chip esp32c6 -p $(ls /dev/cu.usbmodem* | head -1) -b 460800 write_flash 0x10000 out/lvgl_example.bin
+/tmp/esp/bin/esptool.py --chip esp32c6 -p $(ls /dev/cu.usbmodem* | head -1) -b 460800 write_flash \
+  0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 lvgl_example.bin \
+  0x570000 main/mdi_icons.bin 0x7f0000 ota_data_initial.bin
 ```
 
-esptool 4.x spells it `write_flash`, 5.x `write-flash`.
+esptool 4.x spells it `write_flash`, 5.x `write-flash`. The files are in `build/` (and
+`build/bootloader/`, `build/partition_table/`), or in a release / the CI `firmware` artifact.
+
+## Flash layout and OTA updates
+
+`partitions.csv`: two app slots (`ota_0`, `ota_1`, 2.75 MB each), the icon blob in its own
+`icons` partition (`main/mdi_icons.bin`, mapped by `icons_init()`; not part of the app so the app
+fits a slot), the `cache` and `otadata`. NVS stays where it was, so a board keeps its settings.
+
+- **First time on this layout** (boards from before issue #14 had one 6 MB `factory` app): flash
+  everything over USB once, as above. After that, updates go over the air.
+- **USB flashing later**: writing only the app to `0x10000` doesn't run it when the board last
+  updated into `ota_1`; also write `ota_data_initial.bin` to `0x7f0000` (resets to `ota_0`).
+- **Icons** aren't updated over the air. A changed `mdi_icons.bin` needs a USB flash of the
+  `icons` partition; without a valid blob the board just shows no icons.
+- **Releases**: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds with the
+  tag as app version and publishes `ha-screen.bin` (plus the USB flashing files). The panel's
+  Firmware page shows the running version; *Update* fetches
+  `releases/latest/download/ha-screen.bin` (`HA_OTA_URL`), skips it when the version is the
+  same, otherwise writes it to the other slot and restarts.
+- **Rollback**: a new image is on trial until it has run `HA_OTA_CONFIRM_MS` (60 s); a crash,
+  watchdog or reset before that boots the previous image again.
+- **Testing OTA locally**: add `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y`, point `HA_OTA_URL` at
+  `http://<mac>:8765/ha-screen.bin`, give two builds different `version.txt` contents and
+  serve one with `python3 -m http.server 8765`.
 
 ## Generated assets
 

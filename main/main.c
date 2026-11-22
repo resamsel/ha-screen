@@ -20,6 +20,8 @@
 #include "bsp_spi.h"
 #include "ha_client.h"
 #include "provision.h"
+#include "icons.h"
+#include "ota.h"
 
 #define BUTTON_GPIO GPIO_NUM_9   /* BOOT button, low when pressed */
 #include "driver/gpio.h"
@@ -223,6 +225,8 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    icons_init();
+    ota_boot();   /* a freshly updated image is confirmed once it has run a while */
 
     i2c_bus_handle = bsp_i2c_init();
     bsp_spi_init();
@@ -3203,10 +3207,11 @@ static lv_obj_t *s_cfg_title = NULL;
 static lv_obj_t *s_cfg_board = NULL;   /* the board's name (screen_abc) on the settings page */
 static char s_board_name[32];          /* from ha_setup, "" until known */
 static lv_obj_t *s_bri_caption = NULL;
-#define CFG_PAGES    4    /* settings (refresh, view), display, presentation, night */
+#define CFG_PAGES    5    /* settings (refresh, view), display, presentation, night, firmware */
 #define CFG_PRES_PAGE 2
 #define CFG_NIGHT_PAGE 3
-static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Presentation", "Night"};
+#define CFG_FW_PAGE  4
+static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Presentation", "Night", "Firmware"};
 
 /* ---- Presentation mode: cycle through the pages every s_pres_secs, wrapping at the end.
  * A touch pauses it (PRES_PAUSE_MS after the last touch, or one interval if longer), and it
@@ -3476,6 +3481,67 @@ static void ha_night_changed(int night, int pct, int timeout_min)
     lvgl_port_unlock();
 }
 
+/* ---- Firmware page: version and OTA update (issue #14) ---- */
+static lv_obj_t *s_fw_btn, *s_fw_status, *s_fw_caption, *s_fw_ver;
+static char s_fw_msg[64];          /* last OTA status, kept across rebuilds */
+static bool s_fw_busy;
+
+static void fw_labels(void)
+{
+    if (s_fw_status) lv_label_set_text(s_fw_status, s_fw_msg);
+    if (s_fw_btn) {
+        lv_label_set_text(lv_obj_get_child(s_fw_btn, 0), s_fw_busy ? "Updating..." : "Update");
+        if (s_fw_busy) lv_obj_add_state(s_fw_btn, LV_STATE_DISABLED);
+        else lv_obj_clear_state(s_fw_btn, LV_STATE_DISABLED);
+    }
+}
+
+static void fw_apply(void *arg) { fw_labels(); }
+
+/* OTA task: progress */
+static void fw_progress(ota_state_t st, int pct, const char *msg)
+{
+    if (!lvgl_port_lock(0)) return;
+    snprintf(s_fw_msg, sizeof s_fw_msg, "%s", msg);
+    s_fw_busy = st == OTA_CHECKING || st == OTA_DOWNLOADING || st == OTA_REBOOTING;
+    lv_async_call(fw_apply, NULL);
+    lvgl_port_unlock();
+}
+
+static void fw_update_cb(lv_event_t *e)
+{
+    if (s_fw_busy) return;
+    if (ota_start(HA_OTA_URL, fw_progress)) { s_fw_busy = true; snprintf(s_fw_msg, sizeof s_fw_msg, "Checking..."); }
+    fw_labels();
+}
+
+static void create_fw_page(lv_obj_t *pg)
+{
+    lv_obj_t *cap = s_fw_caption = lv_label_create(pg);
+    lv_label_set_text(cap, "Version");
+    lv_obj_set_style_text_font(cap, &lv_font_latin_14, 0);
+    lv_obj_t *ver = s_fw_ver = lv_label_create(pg);
+    lv_label_set_text(ver, ota_version());
+    lv_label_set_long_mode(ver, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(ver, 148);
+    lv_obj_set_style_text_font(ver, &lv_font_latin_16, 0);
+    lv_obj_align(ver, LV_ALIGN_TOP_MID, s_landscape ? -SCR_W / 4 : 0, s_landscape ? 64 : 68);
+    lv_obj_align_to(cap, ver, LV_ALIGN_OUT_TOP_LEFT, 0, -4);
+
+    s_fw_btn = make_button(pg, "Update", lv_color_hex(0x5E5E6E));
+    lv_obj_align(s_fw_btn, LV_ALIGN_TOP_MID, s_landscape ? SCR_W / 4 : 0, s_landscape ? 56 : 110);
+    lv_obj_add_event_cb(s_fw_btn, fw_update_cb, LV_EVENT_CLICKED, NULL);
+
+    s_fw_status = lv_label_create(pg);
+    lv_obj_set_style_text_font(s_fw_status, &lv_font_latin_14, 0);
+    lv_obj_set_style_text_color(s_fw_status, COL_SEC(s_light), 0);
+    lv_label_set_long_mode(s_fw_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_fw_status, 148);
+    lv_obj_set_style_text_align(s_fw_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align_to(s_fw_status, s_fw_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+    fw_labels();
+}
+
 static lv_obj_t *s_cfg_strip = NULL, *s_cfg_dot[CFG_PAGES];
 static int s_cfg_page = 0;
 enum { CFG_UNDECIDED, CFG_VERTICAL, CFG_PAGING };
@@ -3660,6 +3726,7 @@ static void create_ui(void)
     s_view_btn = s_view_caption = s_view_menu = NULL;
     s_pres_btn = s_pres_int_btn = s_pres_caption = NULL;
     s_night_btn = s_night_sl = s_scr_to_btn = NULL;
+    s_fw_btn = s_fw_status = s_fw_caption = s_fw_ver = NULL;
     s_dash_btn = s_dash_caption = s_cfg_board = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
@@ -3779,6 +3846,7 @@ static void create_ui(void)
     if (!s_pres_timer) { s_pres_timer = lv_timer_create(pres_timer_cb, 1000, NULL); pres_touch(); }
 
     create_night_page(cp[CFG_NIGHT_PAGE]);
+    create_fw_page(cp[CFG_FW_PAGE]);
 
     /* Page dots at the bottom of the panel */
     for (int i = 0; i < CFG_PAGES; i++) {
@@ -3825,6 +3893,9 @@ static void apply_panel_theme(bool light)
     if (s_pres_caption) lv_obj_set_style_text_color(s_pres_caption, text, 0);
     if (s_dash_caption) lv_obj_set_style_text_color(s_dash_caption, text, 0);
     if (s_cfg_board) lv_obj_set_style_text_color(s_cfg_board, COL_SEC(light), 0);
+    if (s_fw_caption) lv_obj_set_style_text_color(s_fw_caption, text, 0);
+    if (s_fw_ver) lv_obj_set_style_text_color(s_fw_ver, text, 0);
+    if (s_fw_status) lv_obj_set_style_text_color(s_fw_status, COL_SEC(light), 0);
     for (int i = 0; i < CFG_PAGES; i++) {
         if (!s_cfg_dot[i]) continue;
         lv_obj_set_style_bg_color(s_cfg_dot[i], i == s_cfg_page ? text : lv_color_hex(light ? 0xAEB4BE : 0x4A5058), 0);

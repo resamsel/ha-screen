@@ -75,3 +75,10 @@
  * _largest_free_block, _uptime and _firmware (version, reset reason); errors go to HA's
  * logbook on sensor.<board name>_firmware (show them with a Logbook card on that entity) */
 #define HA_DIAG_INTERVAL_MS  (5 * 60 * 1000)
+
+/* OTA updates (issue #14): the firmware image the "Update" button on the panel's Firmware page
+ * installs. A GitHub release's asset; the release workflow uploads it on each v* tag */
+#define HA_OTA_URL           "https://github.com/resamsel/ha-screen/releases/latest/download/ha-screen.bin"
+/* A newly installed image counts as good once it has run this long; a crash or reset before
+ * that boots the previous one again */
+#define HA_OTA_CONFIRM_MS    60000
