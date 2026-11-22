@@ -1,6 +1,7 @@
 #include "ota.h"
 #include "config.h"
 #include "icons.h"
+#include "ha_client.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_https_ota.h"
@@ -10,6 +11,7 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_partition.h"
 #include "esp_http_client.h"
 #include <stdlib.h>
@@ -165,6 +167,10 @@ static void ota_task(void *arg)
     esp_https_ota_handle_t h = NULL;
     char msg[64];
     report(OTA_CHECKING, 0, "Checking...");
+    /* HA's TLS session and GitHub's don't both fit in RAM (16 KB record buffer each) */
+    if (!ha_client_pause(30000)) ESP_LOGW(TAG, "HA client still busy; trying anyway");
+    ESP_LOGI(TAG, "heap free %u, largest block %u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     esp_err_t err = esp_https_ota_begin(&cfg, &h);
     if (err != ESP_OK) { snprintf(msg, sizeof msg, "Download failed"); goto fail; }
 
@@ -187,8 +193,8 @@ static void ota_task(void *arg)
     while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
         int got = esp_https_ota_get_image_len_read(h);
         int pct = total > 0 ? (int)((int64_t)got * 100 / total) : 0;
-        if (pct != last) {
-            last = pct;
+        if (pct / 5 != last) {
+            last = pct / 5;
             snprintf(msg, sizeof msg, "%.20s %d%%", desc.version, pct);
             report(OTA_DOWNLOADING, pct, msg);
         }
@@ -211,6 +217,7 @@ fail:
     ESP_LOGW(TAG, "update failed: %s", esp_err_to_name(err));
     report(OTA_FAILED, 0, msg);
 done:
+    ha_client_resume();
     s_busy = false;
     vTaskDelete(NULL);
 }

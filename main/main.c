@@ -3486,9 +3486,13 @@ static lv_obj_t *s_fw_btn, *s_fw_status, *s_fw_caption, *s_fw_ver;
 static char s_fw_msg[64];          /* last OTA status, kept across rebuilds */
 static bool s_fw_busy;
 
+static lv_timer_t *s_fw_timer;
+static volatile bool s_fw_dirty;
+
 static void fw_labels(void)
 {
-    if (s_fw_status) lv_label_set_text(s_fw_status, s_fw_msg);
+    s_fw_dirty = false;
+    if (s_fw_status) lv_label_set_text_static(s_fw_status, s_fw_msg);   /* no copy: no heap */
     if (s_fw_btn) {
         lv_label_set_text(lv_obj_get_child(s_fw_btn, 0), s_fw_busy ? "Updating..." : "Update");
         if (s_fw_busy) lv_obj_add_state(s_fw_btn, LV_STATE_DISABLED);
@@ -3496,7 +3500,10 @@ static void fw_labels(void)
     }
 }
 
-static void fw_apply(void *arg) { fw_labels(); }
+/* LVGL timer: shows the OTA task's progress. Polled rather than lv_async_call'ed: during
+ * a download the heap must not churn, or the TLS record buffer (16 KB, re-allocated for
+ * every record) no longer finds a block */
+static void fw_poll(lv_timer_t *t) { if (s_fw_dirty) fw_labels(); }
 
 /* OTA task: progress */
 static void fw_progress(ota_state_t st, int pct, const char *msg)
@@ -3504,7 +3511,7 @@ static void fw_progress(ota_state_t st, int pct, const char *msg)
     if (!lvgl_port_lock(0)) return;
     snprintf(s_fw_msg, sizeof s_fw_msg, "%s", msg);
     s_fw_busy = st == OTA_CHECKING || st == OTA_DOWNLOADING || st == OTA_REBOOTING;
-    lv_async_call(fw_apply, NULL);
+    s_fw_dirty = true;
     lvgl_port_unlock();
 }
 
@@ -3540,6 +3547,7 @@ static void create_fw_page(lv_obj_t *pg)
     lv_obj_set_style_text_align(s_fw_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align_to(s_fw_status, s_fw_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
     fw_labels();
+    if (!s_fw_timer) s_fw_timer = lv_timer_create(fw_poll, 250, NULL);
 }
 
 static lv_obj_t *s_cfg_strip = NULL, *s_cfg_dot[CFG_PAGES];
