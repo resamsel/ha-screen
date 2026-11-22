@@ -32,6 +32,9 @@
  *   input_boolean.kitchen_landscape     on = landscape, off = portrait (Settings)
  *   input_boolean.kitchen_presentation  presentation mode on/off
  *   input_number.kitchen_presentation_interval  seconds per page
+ *   input_boolean.kitchen_night         night mode on/off (set it from an HA schedule/automation)
+ *   input_number.kitchen_night_brightness  backlight % at night, 0 = off
+ *   input_number.kitchen_screen_timeout    screen off after N min without touch, 0 = never
  *   input_number.kitchen_brightness     backlight (the slider; uses the entity's min/max)
  *   input_text.kitchen_dashboard / _view, input_number.kitchen_page  (see below)
  * The name is set in the setup portal (board ID if none); the helper, when it exists, overrides

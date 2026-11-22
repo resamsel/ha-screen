@@ -47,6 +47,8 @@ void ha_client_set_setup_cb(ha_setup_cb_t cb);  /* call before ha_client_start *
 typedef struct {
     bool dark, landscape, pres_on;
     int pres_secs, bri_pct, page;      /* page counted from 0 */
+    bool night;
+    int night_pct, timeout_min;        /* night brightness %, screen timeout in minutes */
     char dash[32], view[32];
 } ha_local_t;
 typedef void (*ha_local_cb_t)(ha_local_t *out);
@@ -78,6 +80,13 @@ void ha_client_set_landscape(bool landscape);
 typedef void (*ha_pres_cb_t)(bool on, int secs);
 void ha_client_set_pres_cb(ha_pres_cb_t cb);  /* call before ha_client_start */
 void ha_client_set_presentation(bool on, int secs);
+
+/* Night mode (issue #17): input_boolean.<name>_night, input_number.<name>_night_brightness (%),
+ * input_number.<name>_screen_timeout (minutes, 0 = never). The callback gets -1 for a value
+ * whose helper HA doesn't have (the board keeps its own); ha_client_set_night writes them. */
+typedef void (*ha_night_cb_t)(int night, int night_pct, int timeout_min);
+void ha_client_set_night_cb(ha_night_cb_t cb);  /* call before ha_client_start */
+void ha_client_set_night(bool night, int night_pct, int timeout_min);
 
 /* Picture card (picture-entity): pixels = w*h RGB565 in LVGL's byte order (LV_COLOR_16_SWAP),
  * the whole image scaled to fit w x h of the requested size; name = card name or friendly_name.

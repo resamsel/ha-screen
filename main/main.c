@@ -15,6 +15,7 @@
 
 #include "bsp_display.h"
 #include "bsp_touch.h"
+#include "screen.h"
 #include "bsp_i2c.h"
 #include "bsp_spi.h"
 #include "ha_client.h"
@@ -118,6 +119,9 @@ static uint16_t s_pres_secs = 10;   /* a refresh or view change is on its way */
 /* set locally, not yet confirmed by HA: HA's (older) value from a poll is ignored */
 static bool s_theme_pending, s_orient_pending, s_bri_pending, s_pres_pending;
 static float s_bri_min = 0, s_bri_max = 100;   /* the brightness helper's range (0-100 without one) */
+static bool s_night;            /* night mode (issue #17), NVS "night" */
+static uint8_t s_night_pct;     /* backlight % at night, 0 = off, NVS "nbri" */
+static uint8_t s_timeout_min;   /* screen off after this idle time, 0 = never, NVS "scr_to" */
 static uint8_t s_boot_bri = 100;   /* backlight % from NVS until HA (if it has the helper) answers */
 static bool s_theme_known;     /* the theme entity's state is known (label shows the action) */
 static bool s_offline_state = true;
@@ -195,6 +199,11 @@ static void set_screen_bg(lv_obj_t *scr, bool light)
 }
 static void ha_landscape_changed(bool landscape);
 static void ha_pres_changed(bool on, int secs);
+static void ha_night_changed(int night, int pct, int timeout_min);
+static void screen_apply(void);
+static void screen_init(void);
+static void ui_save_u8(const char *key, uint8_t v);
+static bool screen_wake(void);
 static void ha_nav_changed(const char *dash, const char *view, int page);
 static lv_obj_t *s_ha_btn = NULL;
 
@@ -241,16 +250,20 @@ void app_main(void)
             uint8_t light, bri;
             if (nvs_get_u8(nv, "light", &light) == ESP_OK) { s_light = light; s_theme_known = true; }
             if (nvs_get_u8(nv, "bri", &bri) == ESP_OK) s_boot_bri = bri;
+            uint8_t nt;
+            if (nvs_get_u8(nv, "night", &nt) == ESP_OK) s_night = nt;
+            if (nvs_get_u8(nv, "nbri", &nt) == ESP_OK) s_night_pct = nt > 100 ? 100 : nt;
+            if (nvs_get_u8(nv, "scr_to", &nt) == ESP_OK) s_timeout_min = nt;
             if (s_pres_secs < 1) s_pres_secs = 10;
             size_t dlen = sizeof(s_dash_path);
             if (nvs_get_str(nv, "dash", s_dash_path, &dlen) != ESP_OK) s_dash_path[0] = 0;
             nvs_close(nv);
         }
         s_landscape = land;
-        bsp_display_set_brightness(s_boot_bri);
         apply_rotation();
         create_ui();
         button_init();
+        screen_init();   /* sets the backlight */
         lvgl_port_unlock();
     }
 
@@ -268,6 +281,7 @@ void app_main(void)
     ha_client_set_local_cb(local_settings);
     ha_client_set_landscape_cb(ha_landscape_changed);
     ha_client_set_pres_cb(ha_pres_changed);
+    ha_client_set_night_cb(ha_night_changed);
     ha_client_set_layout_cb(ha_layout_changed);
     ha_client_set_busy_cb(ha_busy);
     ha_client_set_button_cb(ha_button_changed);
@@ -2476,10 +2490,11 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colo
 static lv_obj_t *s_cfg = NULL;
 static lv_obj_t *s_cfg_title = NULL;
 static lv_obj_t *s_bri_caption = NULL;
-#define CFG_PAGES    4    /* settings (refresh, view), display, presentation, errors */
+#define CFG_PAGES    5    /* settings (refresh, view), display, presentation, night, errors */
 #define CFG_PRES_PAGE 2
-#define CFG_ERR_PAGE 3
-static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Presentation", "Errors"};
+#define CFG_NIGHT_PAGE 3
+#define CFG_ERR_PAGE 4
+static const char *const s_cfg_titles[CFG_PAGES] = {"Settings", "Display", "Presentation", "Night", "Errors"};
 
 /* ---- Presentation mode: cycle through the pages every s_pres_secs, wrapping at the end.
  * A touch pauses it (PRES_PAUSE_MS after the last touch, or one interval if longer), and it
@@ -2580,6 +2595,169 @@ static void ha_pres_changed(bool on, int secs)
     if (!s_pres_pending) lv_async_call(pres_apply, (void *)(intptr_t)((secs << 1) | on));
     lvgl_port_unlock();
 }
+/* ---- Night mode and screen-off timeout (issue #17). screen_level() decides the backlight
+ * from day/night brightness, idle time and presentation mode; a 1 s timer applies it. While
+ * the screen is off, a transparent layer on top takes the touch that wakes it, so that touch
+ * presses nothing. Settings are in NVS and mirrored to the optional HA helpers. */
+static const uint8_t SCR_TO[] = {0, 1, 2, 5, 10, 30};
+static lv_obj_t *s_night_btn, *s_night_sl, *s_scr_to_btn, *s_wake_layer;
+static bool s_woken;             /* the last touch woke a screen that should be off */
+static int s_level = -1;         /* backlight % last set */
+static bool s_night_pending;     /* set here, not yet confirmed by HA */
+
+static int screen_level_now(void)
+{
+    screen_in_t in = {
+        .normal_pct = s_boot_bri, .night_pct = s_night_pct, .night = s_night,
+        .timeout_min = s_timeout_min, .presenting = s_pres_on && PAGE_COUNT > 1,
+        .idle_ms = lv_disp_get_inactive_time(NULL), .woken = s_woken,
+    };
+    return screen_level(&in);
+}
+
+/* LVGL task */
+static void screen_apply(void)
+{
+    int lv = screen_level_now();
+    if (lv == 0) s_woken = false;
+    if (lv != s_level) {
+        ESP_LOGI(TAG, "backlight %d%%", lv);
+        bsp_display_set_brightness((uint8_t)lv);
+        s_level = lv;
+    }
+    if (s_wake_layer) {
+        if (lv == 0) lv_obj_clear_flag(s_wake_layer, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_wake_layer, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* A touch or the button while the screen is off: light it, report true (the input is used up) */
+static bool screen_wake(void)
+{
+    lv_disp_trig_activity(NULL);
+    if (s_level != 0) return false;
+    s_woken = true;
+    screen_apply();
+    return true;
+}
+
+static void wake_layer_cb(lv_event_t *e) { (void)e; screen_wake(); }
+static void screen_timer_cb(lv_timer_t *t) { (void)t; screen_apply(); }
+
+static void screen_init(void)
+{
+    s_wake_layer = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_wake_layer);
+    lv_obj_set_size(s_wake_layer, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_wake_layer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_wake_layer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(s_wake_layer, wake_layer_cb, LV_EVENT_PRESSED, NULL);
+    lv_timer_create(screen_timer_cb, 1000, NULL);
+    screen_apply();
+}
+
+static void night_labels(void)
+{
+    if (s_night_btn) lv_label_set_text(lv_obj_get_child(s_night_btn, 0), s_night ? "Night: on" : "Night: off");
+    if (s_night_sl && !lv_obj_has_state(s_night_sl, LV_STATE_PRESSED)) lv_slider_set_value(s_night_sl, s_night_pct, LV_ANIM_OFF);
+    if (s_scr_to_btn) {
+        char b[24];
+        if (s_timeout_min) snprintf(b, sizeof(b), "Off after %u min", s_timeout_min);
+        else snprintf(b, sizeof(b), "Always on");
+        lv_label_set_text(lv_obj_get_child(s_scr_to_btn, 0), b);
+    }
+}
+
+/* A local change: NVS, HA, backlight */
+static void night_changed(void)
+{
+    ui_save_u8("night", s_night);
+    ui_save_u8("nbri", s_night_pct);
+    ui_save_u8("scr_to", s_timeout_min);
+    s_night_pending = true;
+    ha_client_set_night(s_night, s_night_pct, s_timeout_min);
+    night_labels();
+    screen_apply();
+}
+
+static void night_toggle_cb(lv_event_t *e) { (void)e; if (s_swiped) return; s_night = !s_night; night_changed(); }
+
+static void night_slider_cb(lv_event_t *e)
+{
+    int v = lv_slider_get_value(lv_event_get_target(e));
+    if (lv_event_get_code(e) != LV_EVENT_RELEASED) {   /* preview */
+        bsp_display_set_brightness((uint8_t)(v < 5 ? 5 : v));
+        s_level = -1;
+        return;
+    }
+    s_night_pct = (uint8_t)v;
+    night_changed();
+}
+
+static void scr_to_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_swiped) return;
+    int n = sizeof(SCR_TO), i = 0;
+    while (i < n && SCR_TO[i] <= s_timeout_min) i++;   /* next step up (HA may hold any value) */
+    s_timeout_min = SCR_TO[i % n];
+    night_changed();
+}
+
+static void create_night_page(lv_obj_t *pg)
+{
+    s_night_btn = make_button(pg, "", lv_color_hex(0x5E5E6E));
+    lv_obj_align(s_night_btn, LV_ALIGN_TOP_MID, s_landscape ? -SCR_W / 4 : 0, s_landscape ? 40 : 44);
+    lv_obj_add_event_cb(s_night_btn, night_toggle_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cap = lv_label_create(pg);
+    lv_label_set_text(cap, "Night brightness");
+    lv_obj_set_style_text_font(cap, &lv_font_latin_14, 0);
+    lv_obj_align_to(cap, s_night_btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 16);
+    s_night_sl = lv_slider_create(pg);
+    lv_obj_set_width(s_night_sl, 132);
+    lv_obj_align_to(s_night_sl, cap, LV_ALIGN_OUT_BOTTOM_LEFT, 8, 16);
+    lv_slider_set_range(s_night_sl, 0, 100);
+    lv_obj_set_style_bg_color(s_night_sl, lv_color_hex(0x18BCF2), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_night_sl, lv_color_hex(0x18BCF2), LV_PART_KNOB);
+    lv_obj_set_ext_click_area(s_night_sl, 12);
+    lv_obj_add_event_cb(s_night_sl, night_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_night_sl, night_slider_cb, LV_EVENT_RELEASED, NULL);
+
+    lv_obj_t *cap2 = lv_label_create(pg);
+    lv_label_set_text(cap2, "Screen");
+    lv_obj_set_style_text_font(cap2, &lv_font_latin_14, 0);
+    s_scr_to_btn = make_button(pg, "", lv_color_hex(0x5E5E6E));
+    lv_obj_align(s_scr_to_btn, LV_ALIGN_TOP_MID, s_landscape ? SCR_W / 4 : 0, s_landscape ? 64 : 200);
+    lv_obj_align_to(cap2, s_scr_to_btn, LV_ALIGN_OUT_TOP_LEFT, 0, -4);
+    lv_obj_add_event_cb(s_scr_to_btn, scr_to_cb, LV_EVENT_CLICKED, NULL);
+    night_labels();
+}
+
+/* HA's values (LVGL task): packed, each field +1 so -1 (no helper) is 0 */
+static void night_apply(void *arg)
+{
+    uint32_t v = (uint32_t)(uintptr_t)arg;
+    int night = (int)(v & 0x3) - 1, pct = (int)((v >> 2) & 0xFF) - 1, to = (int)((v >> 10) & 0xFF) - 1;
+    if (s_night_pending) return;
+    bool ch = false;
+    if (night >= 0 && night != s_night) { s_night = night; ui_save_u8("night", s_night); ch = true; }
+    if (pct >= 0 && pct <= 100 && pct != s_night_pct) { s_night_pct = pct; ui_save_u8("nbri", pct); ch = true; }
+    if (to >= 0 && to != s_timeout_min) { s_timeout_min = to; ui_save_u8("scr_to", to); ch = true; }
+    if (ch) { night_labels(); screen_apply(); }
+}
+
+/* Network task: the night helpers' state, -1 for a helper HA doesn't have */
+static void ha_night_changed(int night, int pct, int timeout_min)
+{
+    if (pct > 100) pct = 100;
+    if (timeout_min > 254) timeout_min = 254;
+    if (!lvgl_port_lock(0)) return;
+    if (!s_night_pending)
+        lv_async_call(night_apply, (void *)(uintptr_t)((uint32_t)(night + 1) | (uint32_t)(pct + 1) << 2 | (uint32_t)(timeout_min + 1) << 10));
+    lvgl_port_unlock();
+}
+
 #define NO_ERRORS    "No errors"
 static lv_obj_t *s_err_box = NULL, *s_err_label = NULL;
 static lv_obj_t *s_cfg_strip = NULL, *s_cfg_dot[CFG_PAGES];
@@ -2776,6 +2954,7 @@ static void create_ui(void)
     s_err_box = s_err_label = NULL;
     s_view_btn = s_view_caption = s_view_menu = NULL;
     s_pres_btn = s_pres_int_btn = s_pres_caption = NULL;
+    s_night_btn = s_night_sl = s_scr_to_btn = NULL;
     s_dash_btn = s_dash_caption = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
@@ -2893,6 +3072,8 @@ static void create_ui(void)
     lv_obj_add_event_cb(s_pres_int_btn, pres_interval_cb, LV_EVENT_CLICKED, NULL);
     pres_labels();
     if (!s_pres_timer) { s_pres_timer = lv_timer_create(pres_timer_cb, 1000, NULL); pres_touch(); }
+
+    create_night_page(cp[CFG_NIGHT_PAGE]);
 
     /* Errors page: HA errors from the last poll, scrolls when the text is long */
     lv_coord_t ey = STATUS_H + 6;
@@ -3071,7 +3252,7 @@ static void ha_update_done(bool ok, bool refresh)
 {
     if (!lvgl_port_lock(0)) return;
     /* the local changes reached HA (or failed: the next poll brings HA's values back) */
-    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = false;
+    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = false;
     if (!refresh) { lvgl_port_unlock(); return; }   /* a refresh still on its way stays busy */
     set_busy(false);
     if (s_refreshing) { /* errors show in the panel's error box, not on the buttons */
@@ -3208,6 +3389,9 @@ static void local_settings(ha_local_t *o)
     o->pres_on = s_pres_on;
     o->pres_secs = s_pres_secs;
     o->bri_pct = s_boot_bri;
+    o->night = s_night;
+    o->night_pct = s_night_pct;
+    o->timeout_min = s_timeout_min;
     o->page = s_page;
     snprintf(o->dash, sizeof(o->dash), "%s", s_dash_path);
     snprintf(o->view, sizeof(o->view), "%s", s_view_path);
@@ -3348,7 +3532,6 @@ static void ha_brightness_changed(float value, float min, float max)
     s_bri_min = min;
     s_bri_max = max;
     if (!s_bri_pending) {
-        apply_backlight(value);
         float span = max - min;
         if (span > 0) {
             s_boot_bri = (uint8_t)LV_CLAMP(5, (int)((value - min) * 100.0f / span + 0.5f), 100);
@@ -3356,7 +3539,9 @@ static void ha_brightness_changed(float value, float min, float max)
         }
     }
 
-    if (!s_slider || !lvgl_port_lock(0)) return;
+    if (!lvgl_port_lock(0)) return;
+    screen_apply();   /* night / idle decide what actually shows */
+    if (!s_slider) { lvgl_port_unlock(); return; }
     /* don't fight a drag in progress, nor a value still on its way to HA */
     if (!s_bri_pending && !lv_obj_has_state(s_slider, LV_STATE_PRESSED)) {
         lv_slider_set_range(s_slider, (int32_t)min, (int32_t)max);
@@ -3377,6 +3562,7 @@ static void slider_cb(lv_event_t *e)
         ui_save_u8("bri", s_boot_bri);   /* % of the range, for boot */
         s_bri_pending = true;
         ha_client_set_brightness(v);
+        screen_apply();   /* at night the night level shows again */
     }
 }
 
@@ -3448,10 +3634,14 @@ static esp_err_t app_lvgl_init(void)
 /* ---- BOOT button (GPIO9, low when pressed): next page on the visible screen, wrapping
  * around, on release. Polled from an LVGL timer, so the UI is touched in the LVGL task. */
 
+static bool s_btn_woke;   /* this press woke the screen: its release does nothing */
+
 static void button_poll(lv_timer_t *t)
 {
     static bool was_down = false;
     bool down = gpio_get_level(BUTTON_GPIO) == 0;
+    if (down && !was_down && screen_wake()) { was_down = true; s_btn_woke = true; return; }
+    if (!down && was_down && s_btn_woke) { s_btn_woke = false; was_down = false; return; }
     if (!down && was_down) {   /* act on release, not on press */
         if (s_cfg_open) cfg_show_page((s_cfg_page + 1) % CFG_PAGES);
         else if (PAGE_COUNT) show_page((s_page + 1) % PAGE_COUNT);
