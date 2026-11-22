@@ -51,7 +51,8 @@ static const char *TAG = "ha";
 #define PRES_BIT    BIT8  /* presentation on/off or interval changed */
 #define LIVE_BIT    BIT9  /* live state events are queued */
 #define NAV_BIT     BIT10 /* dashboard / view / page to write to HA */
-#define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NAV_BIT)
+#define NIGHT_BIT   BIT11 /* night mode / night brightness / screen timeout changed */
+#define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT)
 
 static volatile float s_set_value;
 static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
@@ -62,6 +63,9 @@ static ha_landscape_cb_t s_land_cb;
 void ha_client_set_landscape_cb(ha_landscape_cb_t cb) { s_land_cb = cb; }
 static ha_pres_cb_t s_pres_cb;
 void ha_client_set_pres_cb(ha_pres_cb_t cb) { s_pres_cb = cb; }
+static ha_night_cb_t s_night_cb;
+void ha_client_set_night_cb(ha_night_cb_t cb) { s_night_cb = cb; }
+static volatile int s_set_night, s_set_night_pct, s_set_scr_to;
 static volatile bool s_set_pres_on;
 static volatile int s_set_pres_secs;
 static ha_brightness_cb_t s_brightness_cb;
@@ -432,14 +436,17 @@ void ha_client_set_local_cb(ha_local_cb_t cb) { s_local_cb = cb; }
 static volatile bool s_name_changed;    /* live event: the name entity changed */
 static struct {
     char theme[80], land[80], pres[80], pres_int[80], bri[80], dash[80], view[80], page[80];
+    char night[80], night_bri[80], scr_to[80];
 } s_ent;
 /* Which board helpers HA has: 1 yes, 0 no (404), -1 not asked yet. Every helper is optional:
  * without one the board keeps that setting itself, and writes to a missing one are skipped. */
-enum { H_THEME, H_LAND, H_PRES, H_PRES_INT, H_BRI, H_DASH, H_VIEW, H_PAGE, H_COUNT };
-static int8_t s_has[H_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1};
+enum { H_THEME, H_LAND, H_PRES, H_PRES_INT, H_BRI, H_DASH, H_VIEW, H_PAGE, H_NIGHT, H_NIGHT_BRI, H_SCR_TO, H_COUNT };
+static int8_t s_has[H_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static bool has(int h) { return s_has[h] != 0; }
 static ha_setup_cb_t s_setup_cb;
 void ha_client_set_setup_cb(ha_setup_cb_t cb) { s_setup_cb = cb; }
+
+static int s_ln_night = -1, s_ln_pct = -1, s_ln_to = -1;   /* night helpers, as last received */
 
 static void ent_build(void)
 {
@@ -452,6 +459,9 @@ static void ent_build(void)
     snprintf(s_ent.dash, 80, "input_text.%s_dashboard", b);
     snprintf(s_ent.view, 80, "input_text.%s_view", b);
     snprintf(s_ent.page, 80, "input_number.%s_page", b);
+    snprintf(s_ent.night, 80, "input_boolean.%s_night", b);
+    snprintf(s_ent.night_bri, 80, "input_number.%s_night_brightness", b);
+    snprintf(s_ent.scr_to, 80, "input_number.%s_screen_timeout", b);
 }
 
 /* Like HA's object IDs: lowercase, runs of anything else become one '_', no '_' at the ends */
@@ -913,7 +923,7 @@ static void fetch_button(int pg, int row);
  * stop so it reaches HA at once; they are picked up again on the next poll */
 static bool user_waiting(void)
 {
-    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT);
+    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NIGHT_BIT);
 }
 
 static void parse_brightness(const char *json)
@@ -992,10 +1002,13 @@ static void create_helpers(void)
         case H_PAGE: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s page\",\"min\":1,\"max\":8,\"step\":1,\"mode\":\"box\",\"initial\":%d", b, L.page + 1); break;
         case H_DASH: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s dashboard\",\"max\":64,\"initial\":\"%s\"", b, L.dash); break;
         case H_VIEW: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s view\",\"max\":64,\"initial\":\"%s\"", b, L.view); break;
+        case H_NIGHT: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s night\",\"icon\":\"mdi:weather-night\",\"initial\":%s", b, L.night ? "true" : "false"); break;
+        case H_NIGHT_BRI: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s night brightness\",\"min\":0,\"max\":100,\"step\":1,\"mode\":\"slider\",\"unit_of_measurement\":\"%%\",\"initial\":%d", b, L.night_pct); break;
+        case H_SCR_TO: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s screen timeout\",\"min\":0,\"max\":240,\"step\":1,\"mode\":\"box\",\"unit_of_measurement\":\"min\",\"icon\":\"mdi:timer-off-outline\",\"initial\":%d", b, L.timeout_min); break;
         }
         char *res = dash_ws_call(d, body);
         bool ok = res && strstr(res, "\"success\":true");
-        ESP_LOGI(TAG, "helpers: create %s %s: %s", b, (const char *[]){"theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page"}[h], ok ? "ok" : res ? res : "no answer");
+        ESP_LOGI(TAG, "helpers: create %s %s: %s", b, (const char *[]){"theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page", "night", "night brightness", "screen timeout"}[h], ok ? "ok" : res ? res : "no answer");
         if (ok) s_has[h] = 1;
         free(res);
     }
@@ -1083,6 +1096,21 @@ static bool fetch_state(void)
         if (helper_get(s_ent.pres_int, r, H_PRES_INT) == 200)
             json_num(r->buf, "\"state\":\"", &secs);
         if (pon >= 0 && s_pres_cb) s_pres_cb(pon, (int)secs);
+    }
+
+    {   /* night mode helpers; -1 = no helper, the board keeps its own */
+        int night = -1;
+        float pct = -1, to = -1;
+        if (helper_get(s_ent.night, r, H_NIGHT) == 200) {
+            if (strstr(r->buf, "\"state\":\"on\"")) night = 1;
+            else if (strstr(r->buf, "\"state\":\"off\"")) night = 0;
+        }
+        if (helper_get(s_ent.night_bri, r, H_NIGHT_BRI) != 200 || !json_num(r->buf, "\"state\":\"", &pct)) pct = -1;
+        if (helper_get(s_ent.scr_to, r, H_SCR_TO) != 200 || !json_num(r->buf, "\"state\":\"", &to)) to = -1;
+        s_ln_night = night; s_ln_pct = (int)(pct + 0.5f); s_ln_to = (int)(to + 0.5f);
+        if (pct < 0) s_ln_pct = -1;
+        if (to < 0) s_ln_to = -1;
+        if (s_night_cb) s_night_cb(s_ln_night, s_ln_pct, s_ln_to);
     }
 
     /* Brightness: input_number state like "42.0" plus its min/max attributes */
@@ -1957,7 +1985,7 @@ static bool live_start(void)
 {
     if (s_lws) return true;
     if (!s_live_q && !(s_live_q = xQueueCreate(16, sizeof(char *)))) return false;
-    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 9];
+    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 12];
     int n = 0;
     ids[n++] = s_name_ent;
     if (s_board[0]) {
@@ -1969,6 +1997,9 @@ static bool live_start(void)
         ids[n++] = s_ent.dash;
         ids[n++] = s_ent.view;
         ids[n++] = s_ent.page;
+        ids[n++] = s_ent.night;
+        ids[n++] = s_ent.night_bri;
+        ids[n++] = s_ent.scr_to;
     }
     for (int pg = 0; pg < s_layout.count; pg++)
         for (int i = 0; i < s_layout.pages[pg].count; i++) {
@@ -2031,6 +2062,11 @@ static void live_dispatch(const char *id, const char *json)
         if (!strcmp(id, s_ent.pres)) s_lp_on = !strcmp(st, "on") ? 1 : !strcmp(st, "off") ? 0 : s_lp_on;
         else if (json_num(json, "\"state\":\"", &secs)) s_lp_secs = (int)secs;
         if (s_lp_on >= 0 && s_pres_cb) s_pres_cb(s_lp_on, s_lp_secs);
+    } else if (!strcmp(id, s_ent.night) || !strcmp(id, s_ent.night_bri) || !strcmp(id, s_ent.scr_to)) {
+        float v;
+        if (!strcmp(id, s_ent.night)) s_ln_night = !strcmp(st, "on") ? 1 : !strcmp(st, "off") ? 0 : s_ln_night;
+        else if (json_num(json, "\"state\":\"", &v) && v >= 0) *(!strcmp(id, s_ent.night_bri) ? &s_ln_pct : &s_ln_to) = (int)(v + 0.5f);
+        if (s_night_cb) s_night_cb(s_ln_night, s_ln_pct, s_ln_to);
     } else if (!strcmp(id, s_ent.dash)) {
         s_nav_dash_ok = nav_text(json, s_nav_dash, sizeof(s_nav_dash));
         nav_report();
@@ -2102,11 +2138,12 @@ static bool do_user(EventBits_t b)
     snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", s_ent.theme);
     bool ok = true;
     if (!s_board[0]) {                    /* no name: no helpers to write */
-        b &= ~(SETBRI_BIT | PRES_BIT | NAV_BIT | ORIENT_BIT | TOGGLE_BIT);
+        b &= ~(SETBRI_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | ORIENT_BIT | TOGGLE_BIT);
         s_nav_writing = false;
     }
     if (!has(H_BRI)) b &= ~SETBRI_BIT;    /* missing helpers: the board keeps the setting */
     if (!has(H_PRES) && !has(H_PRES_INT)) b &= ~PRES_BIT;
+    if (!has(H_NIGHT) && !has(H_NIGHT_BRI) && !has(H_SCR_TO)) b &= ~NIGHT_BIT;
     if (!has(H_DASH) && !has(H_VIEW) && !has(H_PAGE)) { b &= ~NAV_BIT; s_nav_writing = false; }
     if (!has(H_LAND)) b &= ~ORIENT_BIT;
     if (!has(H_THEME)) b &= ~TOGGLE_BIT;
@@ -2126,6 +2163,19 @@ static bool do_user(EventBits_t b)
         ok &= st >= 200 && st < 300;
         st = has(H_PRES) ? ha_service(on ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off",
                                       pb) : 200;
+        ok &= st >= 200 && st < 300;
+    }
+    if (b & NIGHT_BIT) {
+        char sb[160];
+        int st;
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\"}", s_ent.night);
+        st = has(H_NIGHT) ? ha_service(s_set_night ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off", sb) : 200;
+        ok &= st >= 200 && st < 300;
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%d}", s_ent.night_bri, s_set_night_pct);
+        st = has(H_NIGHT_BRI) ? ha_service("/api/services/input_number/set_value", sb) : 200;
+        ok &= st >= 200 && st < 300;
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%d}", s_ent.scr_to, s_set_scr_to);
+        st = has(H_SCR_TO) ? ha_service("/api/services/input_number/set_value", sb) : 200;
         ok &= st >= 200 && st < 300;
     }
     if (b & NAV_BIT) {
@@ -2227,7 +2277,7 @@ static void ha_task(void *arg)
             if (b & USER_BITS && !(b & ~USER_BITS)) {   /* taps only: over the websocket */
                 /* no busy indicator: the HA dot stays steady green while live */
                 bool ok = do_user(b);
-                bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRES_BIT);
+                bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRES_BIT | NIGHT_BIT);
                 if (updated && s_done_cb) s_done_cb(ok, false);
                 if (s_err_cb) s_err_cb(s_err);
                 continue;
@@ -2249,7 +2299,7 @@ static void ha_task(void *arg)
         }
         round_at = xTaskGetTickCount();
         if (s_busy_cb && !quiet) s_busy_cb(true);
-        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT);
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | PRES_BIT | NIGHT_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
         if (refresh || (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)))) {
@@ -2257,7 +2307,7 @@ static void ha_task(void *arg)
             layout_at = xTaskGetTickCount();
             layout_read = true;
         }
-        bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT);
+        bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT | NIGHT_BIT);
         bool ok = true;
         ok &= do_user(b);
         if (updated) {
@@ -2374,6 +2424,14 @@ void ha_client_set_presentation(bool on, int secs)
     s_set_pres_on = on;
     s_set_pres_secs = secs;
     if (s_events) xEventGroupSetBits(s_events, PRES_BIT);
+}
+
+void ha_client_set_night(bool night, int night_pct, int timeout_min)
+{
+    s_set_night = night;
+    s_set_night_pct = night_pct;
+    s_set_scr_to = timeout_min;
+    if (s_events) xEventGroupSetBits(s_events, NIGHT_BIT);
 }
 
 void ha_client_set_brightness(float value)

@@ -52,6 +52,9 @@ it exists and isn't empty, overrides it. The name prefixes the board's own helpe
 | `input_boolean.kitchen_landscape`           | on = landscape, off = portrait                |
 | `input_boolean.kitchen_presentation`        | presentation mode on/off                      |
 | `input_number.kitchen_presentation_interval`| seconds per page                              |
+| `input_boolean.kitchen_night`              | night mode: backlight at the night brightness |
+| `input_number.kitchen_night_brightness`    | backlight % at night, 0 = off                 |
+| `input_number.kitchen_screen_timeout`      | screen off after N min without touch, 0 = never |
 | `input_number.kitchen_brightness`           | backlight (uses the entity's min/max)         |
 | `input_text.kitchen_dashboard`              | dashboard url_path (empty = ask on the board) |
 | `input_text.kitchen_view`                   | view path (empty = the first view)            |
