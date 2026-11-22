@@ -12,7 +12,9 @@
 #define LAYOUT_MAX_CALS      4      /* calendar cards */
 #define LAYOUT_CALS_LEN      192    /* a calendar card's calendar.* ids, comma-separated */
 
-typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER, LAYOUT_GAUGE, LAYOUT_GLANCE, LAYOUT_CALENDAR } layout_kind_t;
+typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER, LAYOUT_GAUGE, LAYOUT_GLANCE, LAYOUT_CALENDAR,
+               LAYOUT_ENTITIES /* entities card: one item (row) per entity */,
+               LAYOUT_THERMOSTAT, LAYOUT_MEDIA, LAYOUT_LIGHT } layout_kind_t;
 
 /* clock card options (layout_item_t.flags) */
 #define LAYOUT_CLOCK_SECONDS 0x01

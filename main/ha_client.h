@@ -115,6 +115,27 @@ typedef struct { int64_t t; char cond[16]; char hi[8]; char lo[8]; } ha_forecast
 typedef void (*ha_forecast_cb_t)(int page, int row, const ha_forecast_t *f, int n, bool hourly);
 void ha_client_set_forecast_cb(ha_forecast_cb_t cb);  /* call before ha_client_start */
 
+/* Thermostat card (climate entity), values as HA sends them ("" when missing): mode = the
+ * state (heat, off, ...), action = hvac_action (heating, idle, ...), step = target_temp_step */
+typedef struct { char mode[16], action[16], cur[12], target[12], min[12], max[12], step[8]; } ha_climate_t;
+typedef void (*ha_climate_cb_t)(int page, int row, const ha_climate_t *c, const char *name);
+void ha_client_set_climate_cb(ha_climate_cb_t cb);  /* call before ha_client_start */
+/* New target temperature for thermostat `row` on `page` (climate.set_temperature) */
+void ha_client_set_target(int page, int row, float target);
+
+/* Media control card: state (playing, paused, idle, off, ...), media_title, media_artist */
+typedef void (*ha_media_cb_t)(int page, int row, const char *state, const char *title, const char *artist, const char *name);
+void ha_client_set_media_cb(ha_media_cb_t cb);  /* call before ha_client_start */
+typedef enum { HA_MEDIA_PLAY_PAUSE, HA_MEDIA_NEXT } ha_media_cmd_t;
+void ha_client_media(int page, int row, ha_media_cmd_t cmd);
+
+/* Light card: state (on, off, unavailable, ...), brightness 0-100 % (-1 = none, e.g. off
+ * or a light without dimming) */
+typedef void (*ha_light_cb_t)(int page, int row, const char *state, int pct, const char *name);
+void ha_client_set_light_cb(ha_light_cb_t cb);  /* call before ha_client_start */
+/* pct 1-100: light.turn_on at that brightness; 0: turn off; -1: toggle */
+void ha_client_light(int page, int row, int pct);
+
 /* Calendar card: up to CAL_MAX_EVENTS events of its calendars (calendar.get_events), earliest
  * first: today's (day view), the next 7 days' (list view) or the month's (month view: also
  * mask, bit d-1 = an event on day d of the month starting at month, local midnight UTC s). */

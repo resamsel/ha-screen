@@ -77,8 +77,27 @@ static void test_bad_input(void)
     live_free(l);
 }
 
+/* climate attributes for the thermostat card */
+static void test_climate(void)
+{
+    const char *ids[] = { "climate.x" };
+    live_t *l = live_new(ids, 1);
+    int ch[4];
+    assert(live_apply(l, "{\"event\":{\"a\":{\"climate.x\":{\"s\":\"heat\",\"a\":{\"current_temperature\":20.7,"
+                         "\"temperature\":21.5,\"min_temp\":15,\"max_temp\":28,\"target_temp_step\":0.5,\"hvac_action\":\"heating\"}}}}}", ch, 4) == 1);
+    char j[512];
+    assert(live_json(l, 0, j, sizeof(j)));
+    assert(strstr(j, "\"current_temperature\":20.7") && strstr(j, "\"temperature\":21.5") && strstr(j, "\"min_temp\":15"));
+    assert(strstr(j, "\"max_temp\":28") && strstr(j, "\"target_temp_step\":0.5") && strstr(j, "\"hvac_action\":\"heating\""));
+    assert(live_apply(l, "{\"event\":{\"c\":{\"climate.x\":{\"+\":{\"a\":{\"media_title\":\"Song \\\"A\\\"\",\"media_artist\":\"Band\",\"brightness\":153}}}}}}", ch, 4) == 1);
+    assert(live_json(l, 0, j, sizeof(j)));
+    assert(strstr(j, "\"media_title\":\"Song 'A'\"") && strstr(j, "\"media_artist\":\"Band\"") && strstr(j, "\"brightness\":153"));
+    live_free(l);
+}
+
 int main(void)
 {
+    test_climate();
     test_initial_states();
     test_changes();
     test_numbers_and_limits();

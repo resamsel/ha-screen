@@ -370,6 +370,26 @@ static void test_new_cards(void)
 
 static bool keep_none(const char *entity, layout_kind_t kind, void *ctx) { (void)entity; (void)kind; (void)ctx; return false; }
 
+/* entities card: one row per entity, other row types skipped, title as section heading */
+static void test_entities(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"entities\",\"title\":\"Living\",\"entities\":[\"light.a\","
+                                  "{\"type\":\"divider\"},{\"entity\":\"sensor.b\",\"name\":\"Bee\",\"icon\":\"mdi:bee\"}]}") "]", &l) == 1);
+    assert(l.pages[0].count == 2 && l.pages[0].kind == LAYOUT_ENTITIES && l.pages[0].items[1].kind == LAYOUT_ENTITIES);
+    assert(!strcmp(l.pages[0].title, "Living") && !strcmp(l.pages[0].items[0].entity, "light.a"));
+    assert(!strcmp(l.pages[0].items[1].name, "Bee") && !strcmp(l.pages[0].items[1].icon, "mdi:bee"));
+    assert(layout_sanitize(&l) && l.pages[0].items[1].kind == LAYOUT_ENTITIES);
+    assert(parse_sections("[" SEC("{\"type\":\"entities\",\"entities\":[{\"type\":\"section\"}]}") "]", &l) == 0);
+    assert(parse_sections("[" SEC("{\"type\":\"thermostat\",\"entity\":\"climate.x\",\"name\":\"Bad\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].kind == LAYOUT_THERMOSTAT && !strcmp(l.pages[0].items[0].name, "Bad"));
+    assert(layout_sanitize(&l) && l.pages[0].items[0].kind == LAYOUT_THERMOSTAT);
+    assert(parse_sections("[" SEC("{\"type\":\"media-control\",\"entity\":\"media_player.x\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].kind == LAYOUT_MEDIA && layout_sanitize(&l) && l.pages[0].items[0].kind == LAYOUT_MEDIA);
+    assert(parse_sections("[" SEC("{\"type\":\"light\",\"entity\":\"light.x\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].kind == LAYOUT_LIGHT && layout_sanitize(&l) && l.pages[0].items[0].kind == LAYOUT_LIGHT);
+}
+
 /* picture-glance: an image URL without entity, named by its title (issue #3) */
 static void test_picture_glance(void)
 {
@@ -452,6 +472,7 @@ int main(void)
     test_picture();
     test_weather();
     test_picture_glance();
+    test_entities();
     test_icons();
     test_heading_icon();
     test_new_cards();

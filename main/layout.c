@@ -148,6 +148,32 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             }
             continue;
         }
+        if (ct && !strcmp(ct, "entities")) {   /* one row per entity; dividers, buttons etc. skipped */
+            const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
+            const char *title = str(card, "title");
+            if (title && !pg->title[0]) {
+                copy(pg->title, sizeof(pg->title), title);
+                const char *ti = str(card, "icon");
+                if (ti && strlen(ti) < sizeof(pg->title_icon)) copy(pg->title_icon, sizeof(pg->title_icon), ti);
+            }
+            cJSON_ArrayForEach(e, ents) {
+                const char *ent = cJSON_IsString(e) ? e->valuestring : cJSON_IsObject(e) ? str(e, "entity") : NULL;
+                if (!ent) {
+                    const char *rt = cJSON_IsObject(e) ? str(e, "type") : NULL;
+                    LOGW("section %d: entities row '%s' not supported, skipped", idx, rt ? rt : "?");
+                    continue;
+                }
+                if (pg->count == LAYOUT_MAX_ROWS) { LOGW("section %d: more than %d cards, extra skipped", idx, LAYOUT_MAX_ROWS); break; }
+                layout_item_t *it = &pg->items[pg->count++];
+                it->kind = LAYOUT_ENTITIES;
+                if (pg->count == 1) pg->kind = it->kind;
+                if (cJSON_IsObject(e)) set_item(it, e);   /* entity, name */
+                else copy(it->entity, sizeof(it->entity), ent);
+                const char *ic = cJSON_IsObject(e) ? str(e, "icon") : NULL;
+                if (ic && strlen(ic) < sizeof(it->icon)) copy(it->icon, sizeof(it->icon), ic);
+            }
+            continue;
+        }
         if (ct && !strcmp(ct, "calendar")) {   /* upcoming events of its calendars, one block */
             const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
             char ids[LAYOUT_CALS_LEN] = "";
@@ -181,8 +207,11 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
         bool clock = ct && !strcmp(ct, "clock");
         bool gauge = ct && !strcmp(ct, "gauge");
         bool weather = ct && !strcmp(ct, "weather-forecast");   /* current weather + forecast */
+        bool thermo = ct && !strcmp(ct, "thermostat");
+        bool media = ct && !strcmp(ct, "media-control");
+        bool light = ct && !strcmp(ct, "light");
         bool graph = is_graph(card), tile = is_tile(card), button = is_button(card), picture = is_picture(card);
-        if (!clock && !graph && !tile && !button && !picture && !weather && !gauge) {
+        if (!clock && !graph && !tile && !button && !picture && !weather && !gauge && !thermo && !media && !light) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
             continue;
         }
@@ -196,7 +225,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             continue;
         }
         layout_item_t *it = &pg->items[pg->count++];
-        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : gauge ? LAYOUT_GAUGE : LAYOUT_VALUES;
+        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : gauge ? LAYOUT_GAUGE : thermo ? LAYOUT_THERMOSTAT : media ? LAYOUT_MEDIA : light ? LAYOUT_LIGHT : LAYOUT_VALUES;
         if (pg->count == 1) pg->kind = it->kind;
         if (clock) {
             const char *tf = str(card, "time_format"), *sz = str(card, "clock_size"), *tz = str(card, "time_zone");
@@ -410,7 +439,7 @@ bool layout_sanitize(ha_layout_t *l)
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
         for (int i = 0; i < pg->count; i++)
-            if (pg->items[i].kind > LAYOUT_CALENDAR) pg->items[i].kind = LAYOUT_VALUES;
+            if (pg->items[i].kind > LAYOUT_LIGHT) pg->items[i].kind = LAYOUT_VALUES;
         pg->kind = pg->items[0].kind;   /* kind of the first card */
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {

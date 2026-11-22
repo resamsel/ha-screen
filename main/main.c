@@ -91,6 +91,9 @@ static void ha_button_pressed(int page, int row, bool ok);
 static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, int zoom, const char *name);
 static void ha_forecast_changed(int page, int row, const ha_forecast_t *f, int n, bool hourly);
 static void ha_calendar_changed(int page, int row, const cal_event_t *ev, int n, uint32_t mask, int64_t month);
+static void ha_climate_changed(int page, int row, const ha_climate_t *c, const char *name);
+static void ha_light_changed(int page, int row, const char *state, int pct, const char *name);
+static void ha_media_changed(int page, int row, const char *state, const char *title, const char *artist, const char *name);
 static void ha_weather_changed(int page, int row, const char *cond, const char *temp, const char *unit,
                                const char *hum, const char *name);
 static void apply_panel_theme(bool light);
@@ -291,6 +294,9 @@ void app_main(void)
     ha_client_set_weather_cb(ha_weather_changed);
     ha_client_set_forecast_cb(ha_forecast_changed);
     ha_client_set_calendar_cb(ha_calendar_changed);
+    ha_client_set_climate_cb(ha_climate_changed);
+    ha_client_set_media_cb(ha_media_changed);
+    ha_client_set_light_cb(ha_light_changed);
     ha_client_set_icon_cb(ha_icon_changed);
     ha_client_set_views_cb(ha_views_changed);
     ha_client_set_dashboards_cb(ha_dashes_changed);
@@ -456,7 +462,7 @@ static char s_icon_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][48];   /* kept across
 static bool icon_slot(int pg, int i)
 {
     uint8_t k = KIND(pg, i);
-    return (k == LAYOUT_VALUES || k == LAYOUT_GRAPH || k == LAYOUT_BUTTONS || k == LAYOUT_GLANCE) &&
+    return (k == LAYOUT_VALUES || k == LAYOUT_GRAPH || k == LAYOUT_BUTTONS || k == LAYOUT_GLANCE || k == LAYOUT_ENTITIES) &&
            s_layout.pages[pg].items[i].icon[0] != '-';
 }
 /* portrait tiles: icon on the left of the value, which moves right by this much */
@@ -1747,6 +1753,447 @@ static void glance_update(int pg, int i, const char *value, const char *unit, co
     if (s_gl_name[pg][i] && !s_layout.pages[pg].items[i].name[0] && name) lv_label_set_text(s_gl_name[pg][i], name);
 }
 
+/* ---- Entities cards: one row per entity, icon and name on the left, state on the right.
+ * Landscape blocks are columns: those rows are drawn like glance cells. Same labels as glance. */
+static void create_entity_row(lv_obj_t *page, int pg, int i)
+{
+    if (s_landscape) { create_glance(page, pg, i); return; }
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    int w = lv_area_get_width(&blk), h = lv_area_get_height(&blk);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    const lv_font_t *f = &lv_font_latin_16;
+    lv_coord_t x = blk.x1 + 10, cy = blk.y1 + h / 2;
+    if (icon_slot(pg, i)) {
+        lv_obj_t *o = icon_create(page, pg, i, icon_color(), ICON_SIZE);
+        lv_obj_set_pos(o, x, cy - ICON_SIZE / 2);
+        x += ICON_SIZE + 8;
+    }
+    lv_coord_t sw = (w - 10) * 2 / 5;     /* state column, right-aligned */
+    lv_obj_t *st = lv_label_create(page);
+    lv_obj_set_style_text_font(st, f, 0);
+    lv_obj_set_style_text_color(st, COL_MAIN(s_light), 0);
+    lv_label_set_long_mode(st, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(st, sw, f->line_height);
+    lv_obj_set_style_text_align(st, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(st, blk.x2 - 10 - sw, cy - f->line_height / 2);
+    lv_label_set_text(st, "--");
+    lv_obj_t *nm = lv_label_create(page);
+    lv_obj_set_style_text_font(nm, f, 0);
+    lv_obj_set_style_text_color(nm, COL_SEC(s_light), 0);
+    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(nm, LV_MAX(blk.x2 - 10 - sw - 6 - x, 10), f->line_height);
+    lv_obj_set_pos(nm, x, cy - f->line_height / 2);
+    lv_label_set_text(nm, it->name[0] ? it->name : it->entity);
+    s_gl_name[pg][i] = nm;
+    s_gl_state[pg][i] = st;
+}
+
+/* ---- Thermostat cards: target temperature between - and +, mode/action and current below.
+ * Taps change the target here at once; it is sent 1 s after the last tap, and HA's (older)
+ * target is ignored until a few seconds after that. ---- */
+#define TH_BTN 44                         /* round - / + buttons */
+#define TH_SEND_MS 1000
+#define TH_HOLD_MS 4000
+typedef struct {
+    lv_obj_t *name, *tgt, *info, *btn[2];
+    float val, min, max, step;
+    bool has_val, pending;
+    uint32_t sent_at;                     /* lv_tick of the last set_temperature, 0 = none */
+    lv_timer_t *timer;
+} th_t;
+static th_t s_th[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+
+static void th_show(int pg, int i)
+{
+    th_t *t = &s_th[pg][i];
+    if (!t->tgt) return;
+    char b[16] = "--°";
+    if (t->has_val) snprintf(b, sizeof(b), "%.*f°", t->step < 1 ? 1 : 0, t->val);   /* LVGL's printf: no floats */
+    lv_label_set_text(t->tgt, b);
+}
+
+static void th_paint(int pg, int i)
+{
+    th_t *t = &s_th[pg][i];
+    if (!t->tgt) return;
+    lv_obj_set_style_text_color(t->name, COL_SEC(s_light), 0);
+    lv_obj_set_style_text_color(t->info, COL_SEC(s_light), 0);
+    lv_obj_set_style_text_color(t->tgt, COL_MAIN(s_light), 0);
+    for (int k = 0; k < 2; k++) {
+        lv_obj_set_style_bg_color(t->btn[k], lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+        lv_obj_set_style_text_color(lv_obj_get_child(t->btn[k], 0), COL_MAIN(s_light), 0);
+    }
+}
+
+static void create_thermostat(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    int w = lv_area_get_width(&blk), h = lv_area_get_height(&blk);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    th_t *t = &s_th[pg][i];
+    const lv_font_t *tf = w >= 3 * TH_BTN + 100 && h >= 110 ? &lv_font_clock_36 : &lv_font_clock_28;   /* digits; ° from latin_22 */
+    const lv_font_t *sf = &lv_font_latin_14;
+    lv_coord_t total = sf->line_height + 4 + LV_MAX(tf->line_height, TH_BTN) + 4 + sf->line_height;
+    lv_coord_t y = blk.y1 + LV_MAX((h - total) / 2, 0), cx = blk.x1 + w / 2;
+    t->name = lv_label_create(page);
+    lv_obj_set_style_text_font(t->name, sf, 0);
+    lv_label_set_long_mode(t->name, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(t->name, w - 16, sf->line_height);
+    lv_obj_set_style_text_align(t->name, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(t->name, blk.x1 + 8, y);
+    lv_label_set_text(t->name, it->name[0] ? it->name : it->entity);
+    y += sf->line_height + 4;
+    lv_coord_t mid = y + LV_MAX(tf->line_height, TH_BTN) / 2;
+    t->tgt = lv_label_create(page);
+    lv_obj_set_style_text_font(t->tgt, tf, 0);
+    lv_obj_set_style_text_align(t->tgt, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(t->tgt, w - 2 * TH_BTN - 24);
+    lv_obj_set_pos(t->tgt, cx - (w - 2 * TH_BTN - 24) / 2, mid - tf->line_height / 2);
+    for (int k = 0; k < 2; k++) {
+        lv_obj_t *b = lv_obj_create(page);
+        lv_obj_remove_style_all(b);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);   /* taps: thermostat_tap */
+        lv_obj_set_size(b, TH_BTN, TH_BTN);
+        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
+        lv_obj_set_pos(b, k ? blk.x2 - 8 - TH_BTN : blk.x1 + 8, mid - TH_BTN / 2);
+        lv_obj_t *l = lv_label_create(b);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+        lv_label_set_text(l, k ? LV_SYMBOL_PLUS : LV_SYMBOL_MINUS);
+        lv_obj_center(l);
+        t->btn[k] = b;
+    }
+    y += LV_MAX(tf->line_height, TH_BTN) + 4;
+    t->info = lv_label_create(page);
+    lv_obj_set_style_text_font(t->info, sf, 0);
+    lv_label_set_long_mode(t->info, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(t->info, w - 16, sf->line_height);
+    lv_obj_set_style_text_align(t->info, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(t->info, blk.x1 + 8, y);
+    lv_label_set_text(t->info, "");
+    th_show(pg, i);
+    th_paint(pg, i);
+}
+
+static void th_send_cb(lv_timer_t *tm)
+{
+    int idx = (int)(intptr_t)tm->user_data, pg = idx / LAYOUT_MAX_ROWS, i = idx % LAYOUT_MAX_ROWS;
+    th_t *t = &s_th[pg][i];
+    t->timer = NULL;
+    lv_timer_del(tm);
+    if (!t->pending || pg >= PAGE_COUNT || i >= ROWS(pg) || KIND(pg, i) != LAYOUT_THERMOSTAT) return;
+    t->pending = false;
+    t->sent_at = lv_tick_get() | 1;
+    ha_client_set_target(pg, i, t->val);
+}
+
+/* A tap on a thermostat's - or + (with some slack around them) */
+static bool thermostat_tap(lv_point_t p)
+{
+    int pg = s_page;
+    if (pg >= PAGE_COUNT) return false;
+    for (int i = 0; i < ROWS(pg); i++) {
+        th_t *t = &s_th[pg][i];
+        if (KIND(pg, i) != LAYOUT_THERMOSTAT || !t->tgt) continue;
+        for (int k = 0; k < 2; k++) {
+            lv_area_t a;
+            lv_obj_get_coords(t->btn[k], &a);
+            if (p.x < a.x1 - 10 || p.x > a.x2 + 10 || p.y < a.y1 - 10 || p.y > a.y2 + 10) continue;
+            if (!t->has_val) return true;
+            float v = t->val + (k ? t->step : -t->step);
+            if (v < t->min) v = t->min;
+            if (v > t->max) v = t->max;
+            t->val = roundf(v / t->step) * t->step;
+            t->pending = true;
+            th_show(pg, i);
+            if (t->timer) lv_timer_reset(t->timer);
+            else t->timer = lv_timer_create(th_send_cb, TH_SEND_MS, (void *)(intptr_t)(pg * LAYOUT_MAX_ROWS + i));
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ha_climate_changed(int page, int row, const ha_climate_t *c, const char *name)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page < 0 || page >= PAGE_COUNT || row < 0 || row >= ROWS(page) || KIND(page, row) != LAYOUT_THERMOSTAT || !s_th[page][row].tgt) {
+        lvgl_port_unlock();
+        return;
+    }
+    th_t *t = &s_th[page][row];
+    char *e;
+    float v;
+    t->min = (v = strtof(c->min, &e), e != c->min) ? v : 7;
+    t->max = (v = strtof(c->max, &e), e != c->max && v > t->min) ? v : 35;
+    t->step = (v = strtof(c->step, &e), e != c->step && v > 0) ? v : 0.5f;
+    bool hold = t->pending || (t->sent_at && lv_tick_elaps(t->sent_at) < TH_HOLD_MS);
+    if (!hold) {
+        v = strtof(c->target, &e);
+        t->has_val = e != c->target;
+        if (t->has_val) t->val = v;
+        th_show(page, row);
+    }
+    if (name && !s_layout.pages[page].items[row].name[0]) lv_label_set_text(t->name, name);
+    static const struct { const char *k, *v; } TXT[] = {
+        {"heating", "Heating"}, {"cooling", "Cooling"}, {"idle", "Idle"}, {"drying", "Drying"},
+        {"fan", "Fan"}, {"preheating", "Preheating"}, {"off", "Off"},
+        {"heat", "Heat"}, {"cool", "Cool"}, {"heat_cool", "Heat/Cool"}, {"auto", "Auto"}, {"dry", "Dry"},
+        {"fan_only", "Fan"}, {"unavailable", "Unavailable"},
+    };
+    const char *st = !strcmp(c->mode, "off") || !c->action[0] ? c->mode : c->action, *txt = st;
+    for (size_t k = 0; k < sizeof(TXT) / sizeof(TXT[0]); k++) if (!strcmp(st, TXT[k].k)) txt = TXT[k].v;
+    if (c->cur[0]) lv_label_set_text_fmt(t->info, "%s%s%s°", txt, txt[0] ? " · " : "", c->cur);
+    else lv_label_set_text(t->info, txt);
+    lvgl_port_unlock();
+}
+
+/* ---- Media control cards: name, title and artist, play/pause and next buttons. A tap
+ * flips the play/pause symbol at once; HA's next state confirms it. ---- */
+typedef struct {
+    lv_obj_t *name, *title, *artist, *btn[2];
+    char state[16];
+} med_t;
+static med_t s_med[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+
+static void med_paint(int pg, int i)
+{
+    med_t *m = &s_med[pg][i];
+    if (!m->title) return;
+    lv_obj_set_style_text_color(m->name, COL_SEC(s_light), 0);
+    lv_obj_set_style_text_color(m->artist, COL_SEC(s_light), 0);
+    lv_obj_set_style_text_color(m->title, COL_MAIN(s_light), 0);
+    for (int k = 0; k < 2; k++) {
+        lv_obj_set_style_bg_color(m->btn[k], lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+        lv_obj_set_style_text_color(lv_obj_get_child(m->btn[k], 0), COL_MAIN(s_light), 0);
+    }
+    lv_label_set_text(lv_obj_get_child(m->btn[0], 0), !strcmp(m->state, "playing") ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+}
+
+static void create_media(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    int w = lv_area_get_width(&blk), h = lv_area_get_height(&blk);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    med_t *m = &s_med[pg][i];
+    const lv_font_t *sf = &lv_font_latin_14, *tf = &lv_font_latin_16;
+    lv_coord_t text = sf->line_height + 2 + tf->line_height + 2 + sf->line_height;
+    bool side = w >= 220;                 /* buttons right of the text, else below it */
+    lv_coord_t bw = 2 * TH_BTN + 8, tw = side ? w - 16 - bw - 8 : w - 16;
+    lv_coord_t total = side ? LV_MAX(text, TH_BTN) : text + 6 + TH_BTN;
+    lv_coord_t y = blk.y1 + LV_MAX((h - total) / 2, 0), ty = side ? y + (total - text) / 2 : y;
+    lv_obj_t **ls[3] = { &m->name, &m->title, &m->artist };
+    for (int k = 0; k < 3; k++) {
+        const lv_font_t *f = k == 1 ? tf : sf;
+        lv_obj_t *l = lv_label_create(page);
+        lv_obj_set_style_text_font(l, f, 0);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_set_size(l, tw, f->line_height);
+        lv_obj_set_style_text_align(l, side ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(l, blk.x1 + 8, ty);
+        lv_label_set_text(l, k == 0 ? (it->name[0] ? it->name : it->entity) : k == 1 ? "--" : "");
+        ty += f->line_height + 2;
+        *ls[k] = l;
+    }
+    lv_coord_t bx = side ? blk.x2 - 8 - bw + 1 : blk.x1 + (w - bw) / 2, by = side ? y + (total - TH_BTN) / 2 : y + text + 6;
+    for (int k = 0; k < 2; k++) {
+        lv_obj_t *b = lv_obj_create(page);
+        lv_obj_remove_style_all(b);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);   /* taps: media_tap */
+        lv_obj_set_size(b, TH_BTN, TH_BTN);
+        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
+        lv_obj_set_pos(b, bx + k * (TH_BTN + 8), by);
+        lv_obj_t *l = lv_label_create(b);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+        lv_label_set_text(l, k ? LV_SYMBOL_NEXT : LV_SYMBOL_PLAY);
+        lv_obj_center(l);
+        m->btn[k] = b;
+    }
+    med_paint(pg, i);
+}
+
+static bool media_tap(lv_point_t p)
+{
+    int pg = s_page;
+    if (pg >= PAGE_COUNT) return false;
+    for (int i = 0; i < ROWS(pg); i++) {
+        med_t *m = &s_med[pg][i];
+        if (KIND(pg, i) != LAYOUT_MEDIA || !m->title) continue;
+        for (int k = 0; k < 2; k++) {
+            lv_area_t a;
+            lv_obj_get_coords(m->btn[k], &a);
+            if (p.x < a.x1 - 6 || p.x > a.x2 + 6 || p.y < a.y1 - 10 || p.y > a.y2 + 10) continue;
+            if (!strcmp(m->state, "unavailable") || !m->state[0]) return true;
+            if (!k) {                     /* optimistic */
+                snprintf(m->state, sizeof(m->state), "%s", strcmp(m->state, "playing") ? "playing" : "paused");
+                med_paint(pg, i);
+            }
+            ha_client_media(pg, i, k ? HA_MEDIA_NEXT : HA_MEDIA_PLAY_PAUSE);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ha_media_changed(int page, int row, const char *state, const char *title, const char *artist, const char *name)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_MEDIA && s_med[page][row].title) {
+        med_t *m = &s_med[page][row];
+        snprintf(m->state, sizeof(m->state), "%s", state);
+        static const struct { const char *k, *v; } TXT[] = {
+            {"off", "Off"}, {"idle", "Idle"}, {"standby", "Standby"}, {"on", "On"}, {"paused", "Paused"},
+            {"playing", "Playing"}, {"buffering", "Buffering"}, {"unavailable", "Unavailable"}, {"", "--"},
+        };
+        const char *txt = state;
+        for (size_t k = 0; k < sizeof(TXT) / sizeof(TXT[0]); k++) if (!strcmp(state, TXT[k].k)) txt = TXT[k].v;
+        lv_label_set_text(m->title, title[0] ? title : txt);   /* nothing playing: the state */
+        lv_label_set_text(m->artist, artist);
+        if (name && !s_layout.pages[page].items[row].name[0]) lv_label_set_text(m->name, name);
+        med_paint(page, row);
+    }
+    lvgl_port_unlock();
+}
+
+/* ---- Light cards: name and brightness, an on/off button and a brightness bar. A tap on
+ * the bar sets the brightness there (a drag would fight the page swipe); it is sent 0.6 s
+ * after the last tap, and HA's older state is ignored until a few seconds after that. ---- */
+#define LT_BAR_H 14
+typedef struct {
+    lv_obj_t *name, *pct, *btn, *bar;
+    char state[16];
+    int val;                              /* brightness %, -1 = none */
+    bool pending;
+    uint32_t sent_at;
+    lv_timer_t *timer;
+} lt_t;
+static lt_t s_lt[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+
+static void lt_paint(int pg, int i)
+{
+    lt_t *t = &s_lt[pg][i];
+    if (!t->bar) return;
+    bool on = !strcmp(t->state, "on");
+    lv_obj_set_style_text_color(t->name, COL_SEC(s_light), 0);
+    lv_obj_set_style_text_color(t->pct, COL_MAIN(s_light), 0);
+    lv_obj_set_style_bg_color(t->btn, on ? lv_color_hex(BTN_ON_COLOR) : lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(t->btn, 0), on ? lv_color_hex(0x1C1C1E) : COL_MAIN(s_light), 0);
+    lv_obj_set_style_bg_color(t->bar, lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(t->bar, on ? lv_color_hex(BTN_ON_COLOR) : COL_SEC(s_light), LV_PART_INDICATOR);
+    lv_bar_set_value(t->bar, on && t->val > 0 ? t->val : 0, LV_ANIM_OFF);
+    const char *txt = !strcmp(t->state, "off") ? "Off" : !strcmp(t->state, "unavailable") || !t->state[0] ? "--" : NULL;
+    if (txt) lv_label_set_text(t->pct, txt);
+    else if (t->val >= 0) lv_label_set_text_fmt(t->pct, "%d %%", t->val);
+    else lv_label_set_text(t->pct, "On");
+}
+
+static void create_light(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    int h = lv_area_get_height(&blk);
+    const layout_item_t *it = &s_layout.pages[pg].items[i];
+    lt_t *t = &s_lt[pg][i];
+    const lv_font_t *sf = &lv_font_latin_14, *vf = &lv_font_latin_16;
+    lv_coord_t total = vf->line_height + 6 + TH_BTN;
+    lv_coord_t y = blk.y1 + LV_MAX((h - total) / 2, 0), x = blk.x1 + 10, r = blk.x2 - 10;
+    t->pct = lv_label_create(page);
+    lv_obj_set_style_text_font(t->pct, vf, 0);
+    lv_obj_set_style_text_align(t->pct, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_size(t->pct, 60, vf->line_height);
+    lv_obj_set_pos(t->pct, r - 60, y);
+    t->name = lv_label_create(page);
+    lv_obj_set_style_text_font(t->name, sf, 0);
+    lv_label_set_long_mode(t->name, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(t->name, LV_MAX(r - 66 - x, 10), sf->line_height);
+    lv_obj_set_pos(t->name, x, y + vf->line_height - sf->line_height);
+    lv_label_set_text(t->name, it->name[0] ? it->name : it->entity);
+    y += vf->line_height + 6;
+    t->btn = lv_obj_create(page);
+    lv_obj_remove_style_all(t->btn);
+    lv_obj_clear_flag(t->btn, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);   /* taps: light_tap */
+    lv_obj_set_size(t->btn, TH_BTN, TH_BTN);
+    lv_obj_set_style_radius(t->btn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(t->btn, BTN_OPA, 0);
+    lv_obj_set_pos(t->btn, x, y);
+    lv_obj_t *l = lv_label_create(t->btn);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+    lv_label_set_text(l, LV_SYMBOL_POWER);
+    lv_obj_center(l);
+    t->bar = lv_bar_create(page);
+    lv_obj_clear_flag(t->bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(t->bar, LV_MAX(r - (x + TH_BTN + 12), 20), LT_BAR_H);
+    lv_obj_set_pos(t->bar, x + TH_BTN + 12, y + (TH_BTN - LT_BAR_H) / 2);
+    lv_bar_set_range(t->bar, 0, 100);
+    lv_obj_set_style_radius(t->bar, LT_BAR_H / 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(t->bar, LT_BAR_H / 2, LV_PART_INDICATOR);
+    t->val = -1;
+    lt_paint(pg, i);
+}
+
+static void lt_send_cb(lv_timer_t *tm)
+{
+    int idx = (int)(intptr_t)tm->user_data, pg = idx / LAYOUT_MAX_ROWS, i = idx % LAYOUT_MAX_ROWS;
+    lt_t *t = &s_lt[pg][i];
+    t->timer = NULL;
+    lv_timer_del(tm);
+    if (!t->pending || pg >= PAGE_COUNT || i >= ROWS(pg) || KIND(pg, i) != LAYOUT_LIGHT) return;
+    t->pending = false;
+    t->sent_at = lv_tick_get() | 1;
+    ha_client_light(pg, i, t->val);
+}
+
+static bool light_tap(lv_point_t p)
+{
+    int pg = s_page;
+    if (pg >= PAGE_COUNT) return false;
+    for (int i = 0; i < ROWS(pg); i++) {
+        lt_t *t = &s_lt[pg][i];
+        if (KIND(pg, i) != LAYOUT_LIGHT || !t->bar) continue;
+        if (!strcmp(t->state, "unavailable") || !t->state[0]) continue;
+        lv_area_t a;
+        lv_obj_get_coords(t->btn, &a);
+        if (p.x >= a.x1 - 8 && p.x <= a.x2 + 8 && p.y >= a.y1 - 8 && p.y <= a.y2 + 8) {
+            snprintf(t->state, sizeof(t->state), "%s", strcmp(t->state, "on") ? "on" : "off");   /* optimistic */
+            t->sent_at = lv_tick_get() | 1;
+            lt_paint(pg, i);
+            ha_client_light(pg, i, -1);
+            return true;
+        }
+        lv_obj_get_coords(t->bar, &a);
+        if (p.x >= a.x1 - 4 && p.x <= a.x2 + 4 && p.y >= a.y1 - 16 && p.y <= a.y2 + 16) {
+            int v = (p.x - a.x1) * 100 / LV_MAX(a.x2 - a.x1, 1);
+            t->val = v < 1 ? 1 : v > 100 ? 100 : v;
+            snprintf(t->state, sizeof(t->state), "on");
+            t->pending = true;
+            lt_paint(pg, i);
+            if (t->timer) lv_timer_reset(t->timer);
+            else t->timer = lv_timer_create(lt_send_cb, 600, (void *)(intptr_t)(pg * LAYOUT_MAX_ROWS + i));
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ha_light_changed(int page, int row, const char *state, int pct, const char *name)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_LIGHT && s_lt[page][row].bar) {
+        lt_t *t = &s_lt[page][row];
+        if (!t->pending && !(t->sent_at && lv_tick_elaps(t->sent_at) < TH_HOLD_MS)) {
+            snprintf(t->state, sizeof(t->state), "%s", state);
+            t->val = pct;
+        }
+        if (name && !s_layout.pages[page].items[row].name[0]) lv_label_set_text(t->name, name);
+        lt_paint(page, row);
+    }
+    lvgl_port_unlock();
+}
+
 /* ---- Clock pages: the board's time (set from HA's responses), updated every second ---- */
 /* one set per block, indexed GI(page, row) */
 static lv_obj_t *s_clk_time[GRAPHS], *s_clk_small[GRAPHS];   /* no date, like HA's card */
@@ -1968,7 +2415,10 @@ static void apply_temp_theme(bool light)
                 lv_obj_set_style_text_color(s_gz_name[pg][i], sub, 0);
                 lv_obj_set_style_arc_color(s_gz_arc[pg][i], sub, LV_PART_MAIN);
             }
-            if (KIND(pg, i) == LAYOUT_GLANCE) {
+            if (KIND(pg, i) == LAYOUT_THERMOSTAT) th_paint(pg, i);
+            if (KIND(pg, i) == LAYOUT_MEDIA) med_paint(pg, i);
+            if (KIND(pg, i) == LAYOUT_LIGHT) lt_paint(pg, i);
+            if (KIND(pg, i) == LAYOUT_GLANCE || KIND(pg, i) == LAYOUT_ENTITIES) {
                 if (s_gl_name[pg][i]) lv_obj_set_style_text_color(s_gl_name[pg][i], sub, 0);
                 if (s_gl_state[pg][i]) lv_obj_set_style_text_color(s_gl_state[pg][i], val, 0);
             }
@@ -2045,7 +2495,7 @@ static void ha_sensor_changed(int page, int row, const char *value, const char *
     if (!lvgl_port_lock(0)) return;
     if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_GAUGE && s_gz_val[page][row])
         gauge_update(page, row, value, unit, name);
-    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_GLANCE)
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && (KIND(page, row) == LAYOUT_GLANCE || KIND(page, row) == LAYOUT_ENTITIES))
         glance_update(page, row, value, unit, name);
     if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_VALUES && s_val[page][row]) {
         lv_label_set_text(s_val[page][row], value);
@@ -2393,6 +2843,10 @@ static void create_pages(lv_obj_t *scr)
             if (it->kind == LAYOUT_WEATHER) { create_weather(page, pg, i); continue; }
             if (it->kind == LAYOUT_GAUGE) { create_gauge(page, pg, i); continue; }
             if (it->kind == LAYOUT_GLANCE) { create_glance(page, pg, i); continue; }
+            if (it->kind == LAYOUT_ENTITIES) { create_entity_row(page, pg, i); continue; }
+            if (it->kind == LAYOUT_THERMOSTAT) { create_thermostat(page, pg, i); continue; }
+            if (it->kind == LAYOUT_MEDIA) { create_media(page, pg, i); continue; }
+            if (it->kind == LAYOUT_LIGHT) { create_light(page, pg, i); continue; }
             if (it->kind == LAYOUT_CALENDAR) { create_calendar(page, pg, i); cal_draw(pg, i); continue; }
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
@@ -2708,7 +3162,7 @@ static void value_tap(lv_point_t p);
 /* A tap on the main screen: select the value under the finger, or none */
 static void value_tap(lv_point_t p)
 {
-    if (button_tap(p)) return;
+    if (button_tap(p) || thermostat_tap(p) || media_tap(p) || light_tap(p)) return;
     for (int g = 0; g < GROUPS; g++) {
         if (group_page(g) != s_page) continue;
         lv_obj_t *o[3];
@@ -2746,6 +3200,8 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colo
 
 static lv_obj_t *s_cfg = NULL;
 static lv_obj_t *s_cfg_title = NULL;
+static lv_obj_t *s_cfg_board = NULL;   /* the board's name (screen_abc) on the settings page */
+static char s_board_name[32];          /* from ha_setup, "" until known */
 static lv_obj_t *s_bri_caption = NULL;
 #define CFG_PAGES    4    /* settings (refresh, view), display, presentation, night */
 #define CFG_PRES_PAGE 2
@@ -3170,6 +3626,14 @@ static void create_ui(void)
     memset(s_gz_val, 0, sizeof(s_gz_val));
     memset(s_gl_name, 0, sizeof(s_gl_name));
     memset(s_gl_state, 0, sizeof(s_gl_state));
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)    /* objects are gone; pending taps are dropped */
+        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) {
+            if (s_th[p][r].timer) lv_timer_del(s_th[p][r].timer);
+            memset(&s_th[p][r], 0, sizeof(th_t));
+            memset(&s_med[p][r], 0, sizeof(med_t));
+            if (s_lt[p][r].timer) lv_timer_del(s_lt[p][r].timer);
+            memset(&s_lt[p][r], 0, sizeof(lt_t));
+        }
     icons_free();
     memset(s_unit, 0, sizeof(s_unit));
     memset(s_name, 0, sizeof(s_name));
@@ -3196,7 +3660,7 @@ static void create_ui(void)
     s_view_btn = s_view_caption = s_view_menu = NULL;
     s_pres_btn = s_pres_int_btn = s_pres_caption = NULL;
     s_night_btn = s_night_sl = s_scr_to_btn = NULL;
-    s_dash_btn = s_dash_caption = NULL;
+    s_dash_btn = s_dash_caption = s_cfg_board = NULL;
     memset(s_cfg_dot, 0, sizeof(s_cfg_dot));
     set_screen_bg(scr, s_light);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -3337,6 +3801,16 @@ static void create_ui(void)
     lv_obj_align(s_refresh_btn, LV_ALIGN_TOP_MID, 0, s_landscape ? 106 : 196);
     lv_obj_add_event_cb(s_refresh_btn, refresh_cb, LV_EVENT_CLICKED, NULL);
 
+    /* The board's name: below refresh (portrait), bottom left beside the dots (landscape) */
+    s_cfg_board = lv_label_create(cp[0]);
+    lv_obj_set_style_text_font(s_cfg_board, &lv_font_latin_14, 0);
+    lv_obj_set_style_text_color(s_cfg_board, COL_SEC(s_light), 0);
+    lv_label_set_long_mode(s_cfg_board, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_cfg_board, s_landscape ? SCR_W / 2 - 40 : 148);
+    lv_obj_set_style_text_align(s_cfg_board, s_landscape ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_cfg_board, s_board_name);
+    if (s_landscape) lv_obj_align(s_cfg_board, LV_ALIGN_BOTTOM_LEFT, 10, -(DOTS_H - lv_font_latin_14.line_height) / 2);
+    else lv_obj_align_to(s_cfg_board, s_refresh_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
 }
 
 /* Panel colours for the current theme. Must be called with the LVGL lock held. */
@@ -3350,6 +3824,7 @@ static void apply_panel_theme(bool light)
     if (s_view_caption) lv_obj_set_style_text_color(s_view_caption, text, 0);
     if (s_pres_caption) lv_obj_set_style_text_color(s_pres_caption, text, 0);
     if (s_dash_caption) lv_obj_set_style_text_color(s_dash_caption, text, 0);
+    if (s_cfg_board) lv_obj_set_style_text_color(s_cfg_board, COL_SEC(light), 0);
     for (int i = 0; i < CFG_PAGES; i++) {
         if (!s_cfg_dot[i]) continue;
         lv_obj_set_style_bg_color(s_cfg_dot[i], i == s_cfg_page ? text : lv_color_hex(light ? 0xAEB4BE : 0x4A5058), 0);
@@ -3519,6 +3994,10 @@ static void setup_note(const char *text)   /* NULL hides it; call with the LVGL 
 static void ha_setup(const char *name_entity, const char *name)
 {
     if (!lvgl_port_lock(0)) return;
+    if (name && strcmp(name, s_board_name)) {
+        snprintf(s_board_name, sizeof(s_board_name), "%s", name);
+        if (s_cfg_board) lv_label_set_text(s_cfg_board, s_board_name);
+    }
     if (!name_entity) setup_note(NULL);
     else {
         const char *id = strchr(name_entity, '.');

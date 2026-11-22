@@ -14,6 +14,9 @@ typedef struct {
     char icon[48];
     char temp[12], hum[12], tunit[8];   /* weather */
     char min[12], max[12];              /* input_number */
+    char cur[12], tmin[12], tmax[12], tstep[8], action[16];   /* climate */
+    char mtitle[40], martist[32];       /* media_player */
+    char bri[8];                        /* light, 0-255 */
 } ent_t;
 
 struct live {
@@ -72,6 +75,9 @@ static const struct { const char *key; size_t off, size; } ATTRS[] = {
     ATTR(name, friendly_name), ATTR(unit, unit_of_measurement), ATTR(icon, icon),
     ATTR(temp, temperature), ATTR(hum, humidity), ATTR(tunit, temperature_unit),
     ATTR(min, min), ATTR(max, max),
+    ATTR(cur, current_temperature), ATTR(tmin, min_temp), ATTR(tmax, max_temp),
+    ATTR(tstep, target_temp_step), ATTR(action, hvac_action),
+    ATTR(mtitle, media_title), ATTR(martist, media_artist), ATTR(bri, brightness),
 };
 #define NATTRS (int)(sizeof(ATTRS) / sizeof(ATTRS[0]))
 
@@ -150,7 +156,9 @@ bool live_json(const live_t *l, int i, char *out, size_t n)
         const char *f = (const char *)e + ATTRS[k].off;
         if (!f[0]) continue;
         bool num = !strcmp(ATTRS[k].key, "temperature") || !strcmp(ATTRS[k].key, "humidity") ||
-                   !strcmp(ATTRS[k].key, "min") || !strcmp(ATTRS[k].key, "max");
+                   !strcmp(ATTRS[k].key, "min") || !strcmp(ATTRS[k].key, "max") ||
+                   (ATTRS[k].off >= offsetof(ent_t, cur) && ATTRS[k].off < offsetof(ent_t, action)) ||
+                   !strcmp(ATTRS[k].key, "brightness");   /* climate numbers */
         w += snprintf(out + w, n - w, num ? "%s\"%s\":%s" : "%s\"%s\":\"%s\"", first ? "" : ",", ATTRS[k].key, f);
         first = false;
     }
