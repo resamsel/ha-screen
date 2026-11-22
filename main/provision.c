@@ -251,6 +251,7 @@ static esp_err_t form_post(httpd_req_t *req)
     if (nvs_open("board", NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_str(h, "name", name);
         nvs_set_u8(h, "push", 1);           /* ha_client.c writes it to the HA name helper */
+        nvs_set_u8(h, "mkhelp", 1);         /* ...and creates the missing helpers (admin token) */
         nvs_commit(h);
         nvs_close(h);
     }

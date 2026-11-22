@@ -426,6 +426,9 @@ static char s_name_ent[48];             /* input_text.screen_a1b2c3 */
 static char s_board[32];                /* the name ("" = not set) */
 static char s_board_raw[32];            /* the name as typed in the setup portal */
 static bool s_name_push;                /* portal saved a name: write it to the HA helper */
+static bool s_mkhelp;                   /* portal saved: create the missing helpers once */
+static ha_local_cb_t s_local_cb;
+void ha_client_set_local_cb(ha_local_cb_t cb) { s_local_cb = cb; }
 static volatile bool s_name_changed;    /* live event: the name entity changed */
 static struct {
     char theme[80], land[80], pres[80], pres_int[80], bri[80], dash[80], view[80], page[80];
@@ -478,6 +481,8 @@ static bool board_set(const char *name)
     ESP_LOGI(TAG, "board name: '%s' -> '%s'", s_board, name);
     snprintf(s_board, sizeof(s_board), "%s", name);
     ent_build();
+    for (int h = 0; h < H_COUNT; h++) s_has[h] = -1;   /* new prefix: ask HA again */
+    s_mkhelp = true;                      /* and create the new name's missing helpers */
     nvs_handle_t h;
     if (nvs_open("board", NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_str(h, "name", s_board);
@@ -506,6 +511,12 @@ static void board_init(void)
         nvs_close(h);
     }
     s_name_push = push;
+    uint8_t mk = 0;
+    if (nvs_open("board", NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "mkhelp", &mk);
+        nvs_close(h);
+    }
+    s_mkhelp = mk;
     snprintf(s_board_raw, sizeof(s_board_raw), "%s", s_board);   /* the portal stores it as typed */
     board_slug(s_board_raw, s_board, sizeof(s_board));
     if (!s_board[0]) snprintf(s_board, sizeof(s_board), "%s", s_board_id);   /* never named */
@@ -940,6 +951,64 @@ static void name_push_done(void)
         nvs_erase_key(h, "push");
         nvs_commit(h);
         nvs_close(h);
+    }
+}
+
+/* After setup: create the board's missing helpers over the websocket API, starting with the
+ * board's own values, so the board hands those settings to HA. Only with an admin token
+ * (creating helpers needs one); otherwise skipped. Runs once (retried if HA didn't answer). */
+static void create_helpers(void)
+{
+    bool any = false;
+    for (int h = 0; h < H_COUNT; h++) any |= s_has[h] == 0;
+    if (!any || !s_board[0]) { s_mkhelp = false; goto done; }
+    ha_local_t L = { .dark = true, .pres_secs = 10, .bri_pct = 100 };
+    if (s_local_cb) s_local_cb(&L);
+    if (s_http) {                         /* two TLS sessions at once don't fit in RAM */
+        esp_http_client_cleanup(s_http);
+        s_http = NULL;
+    }
+    dash_ws_t *d = dash_ws_open();
+    if (!d) return;                       /* HA didn't answer: next round */
+    s_mkhelp = false;
+    char *u = dash_ws_call(d, "\"type\":\"auth/current_user\"");
+    bool admin = u && strstr(u, "\"is_admin\":true");
+    free(u);
+    if (!admin) {
+        ESP_LOGI(TAG, "helpers: the token's user isn't an HA admin, not creating them");
+        dash_ws_close(d);
+        goto done;
+    }
+    const char *b = s_board;
+    char body[320];
+    for (int h = 0; h < H_COUNT; h++) {
+        if (s_has[h] != 0) continue;
+        switch (h) {
+        case H_THEME: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s theme\",\"icon\":\"mdi:theme-light-dark\",\"initial\":%s", b, L.dark ? "true" : "false"); break;
+        case H_LAND: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s landscape\",\"icon\":\"mdi:phone-rotate-landscape\",\"initial\":%s", b, L.landscape ? "true" : "false"); break;
+        case H_PRES: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s presentation\",\"icon\":\"mdi:presentation-play\",\"initial\":%s", b, L.pres_on ? "true" : "false"); break;
+        case H_PRES_INT: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s presentation interval\",\"min\":1,\"max\":600,\"step\":1,\"mode\":\"box\",\"unit_of_measurement\":\"s\",\"initial\":%d", b, L.pres_secs); break;
+        case H_BRI: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s brightness\",\"min\":0,\"max\":100,\"step\":1,\"mode\":\"slider\",\"unit_of_measurement\":\"%%\",\"initial\":%d", b, L.bri_pct); break;
+        case H_PAGE: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s page\",\"min\":1,\"max\":8,\"step\":1,\"mode\":\"box\",\"initial\":%d", b, L.page + 1); break;
+        case H_DASH: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s dashboard\",\"max\":64,\"initial\":\"%s\"", b, L.dash); break;
+        case H_VIEW: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s view\",\"max\":64,\"initial\":\"%s\"", b, L.view); break;
+        }
+        char *res = dash_ws_call(d, body);
+        bool ok = res && strstr(res, "\"success\":true");
+        ESP_LOGI(TAG, "helpers: create %s %s: %s", b, (const char *[]){"theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page"}[h], ok ? "ok" : res ? res : "no answer");
+        if (ok) s_has[h] = 1;
+        free(res);
+    }
+    dash_ws_close(d);
+    s_force_report = true;                /* the new helpers' values on the next round */
+done:
+    {
+        nvs_handle_t nh;
+        if (nvs_open("board", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_erase_key(nh, "mkhelp");
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
     }
 }
 
@@ -2199,6 +2268,7 @@ static void ha_task(void *arg)
         s_name_changed = false;
         if (fetch_name()) s_force_report = true;   /* new helpers: show their values */
         bool fetched = fetch_state();
+        if (s_mkhelp && fetched) create_helpers();
         {   /* card data to flash: a minute after start, then at most every HA_CACHE_INTERVAL_MS */
             static TickType_t saved_at;
             static bool saved;
