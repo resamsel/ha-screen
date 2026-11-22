@@ -3524,6 +3524,7 @@ static void apply_backlight(float value)
     if (pct < 5) pct = 5;
     if (pct > 100) pct = 100;
     bsp_display_set_brightness((uint8_t)pct);
+    s_level = -1;   /* a preview: screen_apply() sets the level in effect again */
 }
 
 static void ha_brightness_changed(float value, float min, float max)
