@@ -103,7 +103,8 @@ Any other trigger works the same way: a time, a bedtime scene, presence, a `sche
 ### Views by time of day
 
 `input_text.<name>_view` switches the board's view, so an automation can show a morning view
-(clock, today's weather) in the morning and the usual one later:
+(clock, today's weather) in the morning and the usual one later. This one also cycles through
+the morning view's pages (presentation mode) and stops at 9:
 
 ```yaml
 alias: "kitchen screen: morning view 6-9, main view after"
@@ -121,6 +122,10 @@ actions:
       entity_id: input_text.kitchen_view
     data:
       value: "{{ trigger.id }}"
+  - action: >-
+      {{ 'input_boolean.turn_on' if trigger.id == 'morning' else 'input_boolean.turn_off' }}
+    target:
+      entity_id: input_boolean.kitchen_presentation
 ```
 
 The trigger IDs are the views' paths (*Edit dashboard → view → Settings → URL*).
