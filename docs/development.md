@@ -44,9 +44,16 @@ fits a slot), the `cache` and `otadata`. NVS stays where it was, so a board keep
   `MDI1` is written last, so an interrupted write leaves the board without icons rather than
   with garbage; *Update* on the same app version then repairs a missing/broken blob. A failed
   icon download still restarts into the new app.
-- **Update**: the panel's Firmware page shows the running version; *Update* fetches
-  `releases/latest/download/ha-screen.bin` (`HA_OTA_URL`), skips it when the version is the
-  same, otherwise writes it to the other slot and restarts. Versions are only compared for
+- **Update**: the panel's Firmware page shows the running version; *Update* pauses the HA
+  client and reads the header of `releases/latest/download/ha-screen.bin` (`HA_OTA_URL`). Same
+  version (and valid icons): "Up to date". Otherwise it restarts into **update mode**: before
+  the UI and the HA client start, `ota_run_pending()` brings up Wi-Fi only, downloads the app
+  into the other slot and the icons, stores the outcome in NVS (shown on the Firmware page)
+  and restarts. Why: with `CONFIG_MBEDTLS_DYNAMIC_BUFFER` the 16 KB TLS record buffer is
+  allocated again for every record; on the running dashboard the largest free block is
+  ~33 KB and other allocations split it within seconds, so a 4.6 MB download fails
+  (`alloc(16749 bytes) failed`). In update mode the largest block is ~139 KB. The flag is
+  erased before the download starts, so a crash there can't loop. Versions are only compared for
   equality, so a board on a dev build always installs the latest release.
 - **Rollback**: a new image is on trial until it has run `HA_OTA_CONFIRM_MS` (60 s); a crash,
   watchdog or reset before that boots the previous image again.
