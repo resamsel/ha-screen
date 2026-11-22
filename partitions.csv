@@ -1,5 +1,10 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 6M,
-cache,    data, 0x40,    0x610000, 0x30000,
+# Name,   Type, SubType, Offset,   Size,     Flags
+# Two OTA app slots (issue #14); the icon blob lives in its own partition so the app fits a slot.
+# Changing to this layout needs one USB flash of everything (idf.py flash).
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+ota_0,    app,  ota_0,   0x10000,  0x2B0000,
+ota_1,    app,  ota_1,   0x2C0000, 0x2B0000,
+icons,    data, 0x41,    0x570000, 0x250000,
+cache,    data, 0x40,    0x7C0000, 0x30000,
+otadata,  data, ota,     0x7F0000, 0x2000,
