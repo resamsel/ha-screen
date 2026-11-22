@@ -7,6 +7,9 @@
 /* Maps the icon blob from its flash partition; call once at boot */
 void icons_init(void);
 
+/* No icons from now on (the OTA update is about to rewrite the partition) */
+void icons_disable(void);
+
 /* The 4 bpp alpha bitmap (ICON_SIZE x ICON_SIZE, LV_IMG_CF_ALPHA_4BIT) of "mdi:name" or
  * "name"; NULL when unknown */
 const uint8_t *icon_bitmap(const char *name);

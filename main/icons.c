@@ -8,7 +8,7 @@
 
 /* The blob, memory-mapped from the "icons" partition (issue #14: not in the app, so the app
  * fits an OTA slot). NULL = no icons (partition missing or not written) */
-static const uint8_t *mdi_start;
+static const uint8_t *volatile mdi_start;
 
 void icons_init(void)
 {
@@ -24,15 +24,18 @@ void icons_init(void)
 #endif
 }
 
+void icons_disable(void) { mdi_start = NULL; }
+
 static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
 const uint8_t *icon_bitmap(const char *name)
 {
-    if (!mdi_start || !name || !name[0] || memcmp(mdi_start, "MDI1", 4) || rd32(mdi_start + 8) != ICON_SIZE) return NULL;
+    const uint8_t *m = mdi_start;   /* one read: icons_disable() may clear it meanwhile */
+    if (!m || !name || !name[0] || memcmp(m, "MDI1", 4) || rd32(m + 8) != ICON_SIZE) return NULL;
     if (!strncmp(name, "mdi:", 4)) name += 4;
     else if (strchr(name, ':')) return NULL;          /* other icon sets (hass:, custom) */
-    uint32_t n = rd32(mdi_start + 4), sz = ICON_SIZE * ICON_SIZE / 2;
-    const uint8_t *offs = mdi_start + 12, *bitmaps = offs + 4 * n, *names = bitmaps + n * sz;
+    uint32_t n = rd32(m + 4), sz = ICON_SIZE * ICON_SIZE / 2;
+    const uint8_t *offs = m + 12, *bitmaps = offs + 4 * n, *names = bitmaps + n * sz;
     uint32_t lo = 0, hi = n;
     while (lo < hi) {                                  /* names are sorted */
         uint32_t mid = (lo + hi) / 2;

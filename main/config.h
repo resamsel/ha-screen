@@ -77,7 +77,7 @@
 #define HA_DIAG_INTERVAL_MS  (5 * 60 * 1000)
 
 /* OTA updates (issue #14): the firmware image the "Update" button on the panel's Firmware page
- * installs. A GitHub release's asset; the release workflow uploads it on each v* tag */
+ * installs, and mdi_icons.bin next to it for the icons partition. A GitHub release's assets; the release workflow uploads it on each v* tag */
 #define HA_OTA_URL           "https://github.com/resamsel/ha-screen/releases/latest/download/ha-screen.bin"
 /* A newly installed image counts as good once it has run this long; a crash or reset before
  * that boots the previous one again */
