@@ -100,6 +100,63 @@ actions:
 
 Any other trigger works the same way: a time, a bedtime scene, presence, a `schedule` helper.
 
+### Views by time of day
+
+`input_text.<name>_view` switches the board's view, so an automation can show a morning view
+(clock, today's weather) in the morning and the usual one later:
+
+```yaml
+alias: "kitchen screen: morning view 6-9, main view after"
+mode: single
+triggers:
+  - trigger: time
+    at: "06:00:00"
+    id: morning        # the view's path
+  - trigger: time
+    at: "09:00:00"
+    id: main
+actions:
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.kitchen_view
+    data:
+      value: "{{ trigger.id }}"
+```
+
+The trigger IDs are the views' paths (*Edit dashboard → view → Settings → URL*).
+
+### Offline alert
+
+The board posts its diagnostics (`sensor.<name>_uptime`, ...) every 5 min. These sensors don't
+turn `unavailable` when the board goes away; they just stop changing. This alerts after 15 min
+without an update and clears the notification when the board is back:
+
+```yaml
+alias: "kitchen screen: offline alert"
+mode: single
+triggers:
+  - trigger: template
+    value_template: >-
+      {% set s = states.sensor.kitchen_uptime %}
+      {{ s is not none and now() - s.last_updated > timedelta(minutes=15) }}
+actions:
+  - action: persistent_notification.create
+    data:
+      notification_id: kitchen_screen_offline
+      title: kitchen screen is offline
+      message: >-
+        No update since {{ as_local(states.sensor.kitchen_uptime.last_updated).strftime('%H:%M') }}.
+        Check its power and Wi-Fi.
+  - wait_for_trigger:
+      - trigger: state
+        entity_id: sensor.kitchen_uptime
+  - action: persistent_notification.dismiss
+    data:
+      notification_id: kitchen_screen_offline
+```
+
+For a push to your phone, add a `notify.mobile_app_<phone>` action next to the notification.
+
 ## Wi-Fi and Home Assistant setup
 
 Wi-Fi name and password, the HA URL and the HA token are kept in flash (NVS) and set on the
