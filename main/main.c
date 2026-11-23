@@ -3904,11 +3904,9 @@ static void cfg_build(void)
     lv_obj_set_flex_align(s_cfg_body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
     if (s_cfg_scr == CS_HOME) {
-        lv_label_set_text(s_cfg_title, s_cfg_titles[CS_HOME]);
-        lv_obj_clear_flag(s_cfg_back, LV_OBJ_FLAG_CLICKABLE);
+        lv_label_set_text_fmt(s_cfg_title, LV_SYMBOL_CLOSE " %s", s_cfg_titles[CS_HOME]);
     } else {
         lv_label_set_text_fmt(s_cfg_title, LV_SYMBOL_LEFT " %s", s_cfg_titles[s_cfg_scr]);
-        lv_obj_add_flag(s_cfg_back, LV_OBJ_FLAG_CLICKABLE);
     }
     lv_obj_set_style_text_color(s_cfg_title, CFG_TEXT, 0);
     /* The status icons show on the list; detail screens give their room to the title.
@@ -3965,7 +3963,15 @@ static void cfg_show(int scr)
 static void cfg_back(void) { cfg_show(s_cfg_parent[s_cfg_scr]); }
 
 static void cfg_nav_cb(lv_event_t *e) { if (!s_swiped) cfg_show((int)(intptr_t)lv_event_get_user_data(e)); }
-static void cfg_back_cb(lv_event_t *e) { (void)e; if (!s_swiped && s_cfg_scr != CS_HOME) cfg_back(); }
+static void cfg_slide_to(bool open);
+/* The header: back on a detail screen, closes the panel on the list */
+static void cfg_back_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_swiped) return;
+    if (s_cfg_scr != CS_HOME) cfg_back();
+    else cfg_slide_to(false);
+}
 
 /* A press on the body: a new touch, not (yet) a swipe. Rows report to the body even while
  * it scrolls and keeps its presses from the panel's swipe handler. */
@@ -4172,10 +4178,11 @@ static void create_ui(void)
     lv_obj_clear_flag(s_cfg, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_cfg, edge_swipe_cb, LV_EVENT_ALL, NULL);
 
-    /* Header: the title, with a back arrow on every screen but the list */
+    /* Header: the title after a close (list) or back (detail screens) arrow; tap it */
     s_cfg_back = cfg_box(s_cfg);
     lv_obj_set_size(s_cfg_back, LV_SIZE_CONTENT, CFG_HDR_H);
     lv_obj_set_style_pad_hor(s_cfg_back, 10, 0);
+    lv_obj_add_flag(s_cfg_back, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_cfg_back, cfg_back_cb, LV_EVENT_CLICKED, NULL);
     s_cfg_title = lv_label_create(s_cfg_back);
     lv_obj_set_style_text_font(s_cfg_title, &lv_font_montserrat_20, 0);

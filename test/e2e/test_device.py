@@ -73,6 +73,13 @@ def test_config_screens_distinct(dev):
             assert diff_ratio(shots[i], shots[j]) > SAME, "config screens %d and %d look the same" % (i, j)
 
 
+def test_config_close_button(dev):
+    main = dev.screenshot()
+    dev.cfg(0)
+    dev.tap(30, 18)               # the list header's close button
+    assert_same(dev, main, "the close button did not close the panel")
+
+
 def test_dashboard_screen_opens_and_goes_back(dev):
     dev.cfg(0)
     before = dev.screenshot()
