@@ -2290,7 +2290,7 @@ static bool live_start(void)
 {
     if (s_lws) return true;
     if (!s_live_q && !(s_live_q = xQueueCreate(16, sizeof(char *)))) return false;
-    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 12];
+    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 13];   /* + name and 12 board helpers */
     int n = 0;
     ids[n++] = s_name_ent;
     if (s_board[0]) {
@@ -2409,15 +2409,16 @@ static void live_dispatch(const char *id, const char *json)
 static void live_drain(void)
 {
     static char json[512];
-    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 12];
+    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 13];
     char *m;
     while (s_live_q && xQueueReceive(s_live_q, &m, 0) == pdTRUE) {
         int n = s_live ? live_apply(s_live, m, ch, sizeof(ch) / sizeof(ch[0])) : 0;
         free(m);
         for (int k = 0; k < n; k++) {
             if (s_board[0] && !strcmp(live_id(s_live, ch[k]), s_ent.notify)) {
+                static notify_seen_t seen;   /* kept across resyncs */
                 char text[NOTIFY_MAX];
-                if (notify_text(live_text(s_live, ch[k]), text, sizeof(text)) && s_notify_cb) s_notify_cb(text);
+                if (notify_new(&seen, live_text(s_live, ch[k]), text, sizeof(text)) && s_notify_cb) s_notify_cb(text);
                 continue;
             }
             if (live_json(s_live, ch[k], json, sizeof(json))) live_dispatch(live_id(s_live, ch[k]), json);

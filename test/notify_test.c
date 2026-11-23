@@ -20,6 +20,15 @@ int main(void)
     assert(notify_text("T\xc3\xbcr offen", s6, sizeof(s6)) && !strcmp(s6, "T\xc3\xbcr "));
     char s3[3];   /* "T" + half of ü would be 2 bytes: cut before ü */
     assert(notify_text("T\xc3\xbcr", s3, sizeof(s3)) && !strcmp(s3, "T"));
+    /* resyncs re-deliver the helper's state: show each message once until HA empties it */
+    notify_seen_t seen = {0};
+    assert(notify_new(&seen, "A", o, sizeof(o)) && !strcmp(o, "A"));
+    assert(!notify_new(&seen, "A", o, sizeof(o)));     /* resync snapshot: same message */
+    assert(notify_new(&seen, "B", o, sizeof(o)));      /* a different one shows */
+    assert(!notify_new(&seen, "", o, sizeof(o)));      /* cleared: nothing to show... */
+    assert(notify_new(&seen, "B", o, sizeof(o)));      /* ...and the same text shows again */
+    assert(!notify_new(&seen, "unknown", o, sizeof(o)));
+    assert(!notify_new(&seen, NULL, o, sizeof(o)));
     puts("notify: ok");
     return 0;
 }

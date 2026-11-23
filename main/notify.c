@@ -13,3 +13,15 @@ bool notify_text(const char *state, char *out, size_t n)
     out[len] = 0;
     return true;
 }
+
+bool notify_new(notify_seen_t *seen, const char *state, char *out, size_t n)
+{
+    char t[NOTIFY_MAX];
+    if (!notify_text(state, t, sizeof(t))) {
+        if (state && !state[0]) seen->last[0] = 0;   /* emptied: the same text may come again */
+        return false;
+    }
+    if (!strcmp(t, seen->last)) return false;
+    memcpy(seen->last, t, sizeof(t));
+    return notify_text(state, out, n);
+}
