@@ -30,7 +30,7 @@ static void button_init(void);
 // #include "bsp_wifi.h"
 // #include "bsp_sdcard.h"
 // #include "bsp_battery.h"
-// #include "bsp_qmi8658.h"
+#include "bsp_qmi8658.h"
 
 // #include "iot_button.h"
 // #include "button_gpio.h"
@@ -178,6 +178,11 @@ static void create_status_icons(lv_obj_t *parent, int set)
     s_wifi_icon[set] = wifi;
 }
 static bool s_landscape = false;   /* orientation, kept in NVS */
+static uint8_t s_rot = 0;          /* display rotation (lv_disp_rot_t: 0, 90, 180, 270), kept in NVS */
+static bool s_auto_rot = false;    /* follow the board's physical orientation (IMU), kept in NVS */
+static void auto_rot_cb(lv_event_t *e);
+static void orient_save(void);
+static void imu_init(i2c_master_bus_handle_t bus);
 static void orient_cb(lv_event_t *e);
 static void apply_rotation(void);
 
@@ -269,6 +274,10 @@ void app_main(void)
         uint8_t page = 0;
         if (nvs_open("ui", NVS_READONLY, &nv) == ESP_OK) {
             nvs_get_u8(nv, "landscape", &land);
+            uint8_t rot, ar;
+            s_rot = land ? LV_DISP_ROT_90 : LV_DISP_ROT_NONE;
+            if (nvs_get_u8(nv, "rot", &rot) == ESP_OK && rot <= LV_DISP_ROT_270 && (rot & 1) == (land ? 1 : 0)) s_rot = rot;
+            if (nvs_get_u8(nv, "auto_rot", &ar) == ESP_OK) s_auto_rot = ar;
             if (nvs_get_u8(nv, "page", &page) == ESP_OK) s_boot_page = page;
             size_t vlen = sizeof(s_view_path);
             if (nvs_get_str(nv, "view", s_view_path, &vlen) != ESP_OK) s_view_path[0] = 0;
@@ -291,6 +300,7 @@ void app_main(void)
         apply_rotation();
         create_ui();
         button_init();
+        imu_init(i2c_bus_handle);
         screen_init();   /* sets the backlight */
         lvgl_port_unlock();
     }
@@ -3842,7 +3852,8 @@ static void cfg_build_screen(void)
         cfg_caption("Theme");
         cfg_segmented("Dark", "Light", s_theme_known ? s_light : -1, theme_seg_cb);
         cfg_caption("Orientation");
-        cfg_segmented("Portrait", "Landscape", s_landscape, orient_seg_cb);
+        cfg_segmented("Portrait", "Landscape", s_auto_rot ? -1 : s_landscape, orient_seg_cb);
+        cfg_toggle("Auto-rotate", s_auto_rot, auto_rot_cb);
         break;
     case CS_PRES:
         cfg_toggle("On", s_pres_on, pres_toggle_cb);
@@ -4010,7 +4021,12 @@ static void theme_seg_cb(lv_event_t *e)
 
 static void orient_seg_cb(lv_event_t *e)
 {
-    if (s_swiped || (lv_event_get_user_data(e) != NULL) == s_landscape) return;
+    if (s_swiped || (!s_auto_rot && (lv_event_get_user_data(e) != NULL) == s_landscape)) return;
+    if (s_auto_rot) {   /* a fixed orientation ends auto-rotate */
+        s_auto_rot = false;
+        orient_save();
+        if ((lv_event_get_user_data(e) != NULL) == s_landscape) { cfg_update(); return; }
+    }
     orient_cb(e);
 }
 
@@ -4663,10 +4679,46 @@ static void button_init(void)
 /* ---- Orientation: portrait (172x320) or landscape (320x172), kept in NVS ---------- */
 static void apply_rotation(void)
 {
-    /* the panel's 172 px side sits 34 px into the controller's 240 px RAM */
-    if (s_landscape) esp_lcd_panel_set_gap(panel_handle, 0, 34);
+    /* the panel's 172 px side sits 34 px into the controller's 240 px RAM: centred, so the
+     * same gap holds when mirrored (180/270) */
+    if (s_rot & 1) esp_lcd_panel_set_gap(panel_handle, 0, 34);
     else esp_lcd_panel_set_gap(panel_handle, 34, 0);
-    lv_disp_set_rotation(lvgl_disp, s_landscape ? LV_DISP_ROT_90 : LV_DISP_ROT_NONE);
+    lv_disp_set_rotation(lvgl_disp, (lv_disp_rot_t)s_rot);
+}
+
+static void orient_save(void)
+{
+    nvs_handle_t nv;                        /* boot in the last orientation, before HA answers */
+    if (nvs_open("ui", NVS_READWRITE, &nv) == ESP_OK) {
+        nvs_set_u8(nv, "landscape", s_landscape);
+        nvs_set_u8(nv, "rot", s_rot);
+        nvs_set_u8(nv, "auto_rot", s_auto_rot);
+        nvs_commit(nv);
+        nvs_close(nv);
+    }
+}
+
+/* Turn to rotation rot (0..3): a 180 degree turn only redraws, a turn between portrait and
+ * landscape rebuilds the UI. LVGL task. */
+static void rot_set(uint8_t rot)
+{
+    if (rot == s_rot) return;
+    bool land = rot & 1;
+    s_rot = rot;
+    if (land == s_landscape) {
+        orient_save();
+        apply_rotation();
+        lv_obj_invalidate(lv_scr_act());
+        return;
+    }
+    bool was_open = s_cfg_open;
+    s_landscape = land;
+    orient_save();
+    apply_rotation();
+    create_ui();
+    if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
+    ui_refill();
+    lv_obj_invalidate(lv_scr_act());
 }
 
 /* Rebuild the UI in the orientation HA asked for. Runs in the LVGL task via lv_async_call
@@ -4675,26 +4727,65 @@ static void orient_apply(void *arg)
 {
     bool want = (bool)(intptr_t)arg;
     if (want == s_landscape) return;
-    bool was_open = s_cfg_open;
-    s_landscape = want;
-    nvs_handle_t nv;                        /* boot in the last orientation, before HA answers */
-    if (nvs_open("ui", NVS_READWRITE, &nv) == ESP_OK) {
-        nvs_set_u8(nv, "landscape", s_landscape);
-        nvs_commit(nv);
-        nvs_close(nv);
+    rot_set(want ? LV_DISP_ROT_90 : LV_DISP_ROT_NONE);
+}
+
+/* ---- Auto-rotate: the IMU's gravity vector picks one of the 4 rotations. Lying flat (or
+ * tilted in between) keeps the current one; a new one is taken once it held for a while. */
+#define IMU_POLL_MS    100
+#define IMU_HOLD_MS    1500
+/* Rotation the board is held in, or -1 when flat or ambiguous. Raw values, 4 g range. */
+static int imu_rotation(int ax, int ay, int az)
+{
+    int axa = abs(ax), aya = abs(ay), aza = abs(az);
+    int inplane = axa > aya ? axa : aya;
+    if (inplane < 4096 || aza > inplane) return -1;          /* < 0.5 g upright, or flat-ish */
+    if (axa * 2 < aya * 3 && aya * 2 < axa * 3) return -1;   /* near a diagonal */
+    if (aya > axa) return ay > 0 ? LV_DISP_ROT_NONE : LV_DISP_ROT_180;
+    return ax > 0 ? LV_DISP_ROT_270 : LV_DISP_ROT_90;
+}
+
+static void imu_poll(lv_timer_t *t)
+{
+    static int cand = -1;
+    static uint32_t since;
+    if (!s_auto_rot) { cand = -1; return; }
+    qmi8658_data_t d;
+    if (!bsp_qmi8658_read_data(&d)) return;
+    int r = imu_rotation(d.acc_x, d.acc_y, d.acc_z);
+    if (r != cand) {
+        ESP_LOGD(TAG, "imu %d %d %d -> %d", d.acc_x, d.acc_y, d.acc_z, r);
+        cand = r;
+        since = lv_tick_get();
+        return;
     }
-    apply_rotation();
-    create_ui();
-    if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
-    ui_refill();
-    lv_obj_invalidate(lv_scr_act());
+    if (r < 0 || r == s_rot || lv_tick_elaps(since) < IMU_HOLD_MS) return;
+    ESP_LOGI(TAG, "auto-rotate to %d deg", r * 90);
+    bool land = r & 1;
+    if (land != s_landscape) { s_orient_pending = true; ha_client_set_landscape(land); }
+    rot_set((uint8_t)r);
+}
+
+static void imu_init(i2c_master_bus_handle_t bus)
+{
+    bsp_qmi8658_init(bus);
+    lv_timer_create(imu_poll, IMU_POLL_MS, NULL);
+}
+
+static void auto_rot_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_swiped) return;
+    s_auto_rot = !s_auto_rot;
+    orient_save();
+    cfg_update();
 }
 
 /* Network task: orientation entity state */
 static void ha_landscape_changed(bool landscape)
 {
     if (!lvgl_port_lock(0)) return;
-    if (!s_orient_pending && landscape != s_landscape) lv_async_call(orient_apply, (void *)(intptr_t)landscape);
+    if (!s_auto_rot && !s_orient_pending && landscape != s_landscape) lv_async_call(orient_apply, (void *)(intptr_t)landscape);
     lvgl_port_unlock();
 }
 
