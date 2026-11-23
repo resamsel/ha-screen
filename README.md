@@ -82,14 +82,15 @@ Setting `input_text.<name>_notification` shows its text as a banner at the top o
 (up to 3 lines; longer text ends in "..."). It wakes the screen and goes away after 30 s or
 on a tap; then the board empties the helper, so the same message can be sent again. A new
 message replaces the one shown. Up to 255 characters; the board's font has Latin letters
-only (no emoji). Example automation action:
+only (no emoji). Line breaks: a real one from an automation, or `\n` typed into the helper
+(`\\` for a backslash). Example automation action:
 
 ```yaml
 action: input_text.set_value
 target:
   entity_id: input_text.kitchen_notification
 data:
-  value: Washing machine done
+  value: "Washing machine done\nPlease empty it"
 ```
 
 ### Firmware updates

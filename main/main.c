@@ -3417,20 +3417,22 @@ static void notify_show(void *arg)
         s_notify_lbl = lv_label_create(s_notify);
         lv_obj_set_width(s_notify_lbl, lv_pct(100));
         lv_obj_set_style_text_font(s_notify_lbl, &lv_font_latin_16, 0);
-        lv_label_set_long_mode(s_notify_lbl, LV_LABEL_LONG_DOT);
-        /* at most 3 lines; longer text ends in "..." */
         lv_obj_set_style_text_line_space(s_notify_lbl, 2, 0);
     }
     lv_obj_set_style_bg_color(s_notify, s_light ? lv_color_white() : lv_color_hex(0x2C3440), 0);
     lv_obj_set_style_bg_opa(s_notify, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_notify_lbl, COL_MAIN(s_light), 0);
+    /* measured at its full height first; then at most 3 lines, the rest cut to "..." */
+    lv_label_set_long_mode(s_notify_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(s_notify_lbl, LV_SIZE_CONTENT);
     lv_label_set_text(s_notify_lbl, text);
     free(text);
-    /* short text: no empty lines below it */
-    lv_obj_set_height(s_notify_lbl, LV_SIZE_CONTENT);
     lv_obj_update_layout(s_notify_lbl);
     lv_coord_t max_h = 3 * (lv_font_get_line_height(&lv_font_latin_16) + 2);   /* 3 lines and their spacing */
-    if (lv_obj_get_height(s_notify_lbl) > max_h) lv_obj_set_height(s_notify_lbl, max_h);
+    if (lv_obj_get_height(s_notify_lbl) > max_h) {
+        lv_obj_set_height(s_notify_lbl, max_h);
+        lv_label_set_long_mode(s_notify_lbl, LV_LABEL_LONG_DOT);
+    }
     screen_wake();                        /* lights the screen first: the 30 s count from here */
     screen_apply();
     lv_obj_clear_flag(s_notify, LV_OBJ_FLAG_HIDDEN);

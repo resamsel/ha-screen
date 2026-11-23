@@ -20,6 +20,9 @@ int main(void)
     assert(notify_text("T\xc3\xbcr offen", s6, sizeof(s6)) && !strcmp(s6, "T\xc3\xbcr "));
     char s3[3];   /* "T" + half of ü would be 2 bytes: cut before ü */
     assert(notify_text("T\xc3\xbcr", s3, sizeof(s3)) && !strcmp(s3, "T"));
+    /* line breaks: real ones, and "\n" typed into the helper (HA's text box has no Enter) */
+    assert(notify_text("Line 1\\nLine 2\\n\\nLine 4", o, sizeof(o)) && !strcmp(o, "Line 1\nLine 2\n\nLine 4"));
+    assert(notify_text("a\\\\nb", o, sizeof(o)) && !strcmp(o, "a\\nb"));   /* \\n stays a backslash + n */
     /* resyncs re-deliver the helper's state: show each message once until HA empties it */
     notify_seen_t seen = {0};
     assert(notify_new(&seen, "A", o, sizeof(o)) && !strcmp(o, "A"));

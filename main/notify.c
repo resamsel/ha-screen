@@ -4,12 +4,23 @@
 bool notify_text(const char *state, char *out, size_t n)
 {
     if (!state || !state[0] || !strcmp(state, "unknown") || !strcmp(state, "unavailable") || !n) return false;
-    size_t len = strlen(state);
-    if (len > n - 1) {
-        len = n - 1;
-        while (len > 0 && ((unsigned char)state[len] & 0xC0) == 0x80) len--;   /* not inside a character */
+    /* HA's text box has no Enter: a typed \n is a line break, \\ a backslash */
+    size_t len = 0;
+    for (const char *p = state; *p && len < n - 1; p++) {
+        if (p[0] == '\\' && p[1] == 'n') { out[len++] = '\n'; p++; }
+        else if (p[0] == '\\' && p[1] == '\\') { out[len++] = '\\'; p++; }
+        else out[len++] = *p;
     }
-    memcpy(out, state, len);
+    /* cut short: not inside a UTF-8 character */
+    if (len == n - 1 && ((unsigned char)out[len - 1] & 0x80)) {
+        size_t k = len;
+        while (k > 0 && ((unsigned char)out[k - 1] & 0xC0) == 0x80) k--;   /* start of the last char */
+        if (k > 0) {
+            unsigned char c = out[k - 1];
+            size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+            if (len - (k - 1) < need) len = k - 1;
+        }
+    }
     out[len] = 0;
     return true;
 }
