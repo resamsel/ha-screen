@@ -57,7 +57,10 @@ static const char *TAG = "ha";
 #define TARGET_BIT  BIT12 /* a thermostat's target temperature was changed */
 #define MEDIA_BIT   BIT13 /* play/pause or next on a media card */
 #define LIGHT_BIT   BIT14 /* a light card was switched or dimmed */
-#define NOTIFY_BIT  BIT15 /* a notification was dismissed: clear the helper */
+#define PAUSE_BIT   BIT15 /* close all HA connections until RESUME_BIT (OTA update) */
+#define PAUSED_BIT  BIT16 /* set by ha_task: paused, no TLS session open */
+#define RESUME_BIT  BIT17
+#define NOTIFY_BIT  BIT18 /* a notification was dismissed: clear the helper */
 #define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | NOTIFY_BIT)
 
 static volatile float s_set_value;
@@ -2617,8 +2620,19 @@ static void ha_task(void *arg)
             if (has_pictures() && pic_at + pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS) < due) due = pic_at + pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS);
             wait = (int32_t)(due - now) > 0 ? due - now : 0;
         }
-        const EventBits_t waited = USER_BITS | WAKE_BIT | REFRESH_BIT | PIC_BIT | LIVE_BIT;
+        const EventBits_t waited = USER_BITS | WAKE_BIT | REFRESH_BIT | PIC_BIT | LIVE_BIT | PAUSE_BIT;
         EventBits_t b = xEventGroupWaitBits(s_events, waited, pdTRUE, pdFALSE, wait) & waited;   /* not WIFI_UP_BIT */
+        if (b & PAUSE_BIT) {              /* an OTA download needs the RAM of our TLS session */
+            live_stop();
+            if (s_http) { esp_http_client_cleanup(s_http); s_http = NULL; }
+            ESP_LOGI(TAG, "paused");
+            xEventGroupSetBits(s_events, PAUSED_BIT);
+            xEventGroupWaitBits(s_events, RESUME_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+            xEventGroupClearBits(s_events, PAUSED_BIT);
+            ESP_LOGI(TAG, "resumed");
+            xEventGroupSetBits(s_events, b & ~PAUSE_BIT ? b & ~PAUSE_BIT : WAKE_BIT);   /* redo now */
+            continue;
+        }
         bool timeout = !b;
         if (s_lws && !timeout) {          /* events came in, but a round may be due anyway */
             TickType_t t = xTaskGetTickCount();
@@ -2828,6 +2842,22 @@ void ha_client_set_brightness(float value)
 {
     s_set_value = value;
     if (s_events) xEventGroupSetBits(s_events, SETBRI_BIT);
+}
+
+bool ha_client_pause(int timeout_ms)
+{
+    if (!s_events) return true;
+    xEventGroupClearBits(s_events, RESUME_BIT);
+    xEventGroupSetBits(s_events, PAUSE_BIT);
+    /* the task finishes its current round first */
+    return xEventGroupWaitBits(s_events, PAUSED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(timeout_ms)) & PAUSED_BIT;
+}
+
+void ha_client_resume(void)
+{
+    if (!s_events) return;
+    xEventGroupClearBits(s_events, PAUSE_BIT);
+    xEventGroupSetBits(s_events, RESUME_BIT);
 }
 
 void ha_client_refresh(void)

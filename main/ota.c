@@ -1,6 +1,13 @@
 #include "ota.h"
 #include "config.h"
 #include "icons.h"
+#include "ha_client.h"
+#include "provision.h"
+#include "nvs.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "freertos/event_groups.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_https_ota.h"
@@ -10,6 +17,7 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_partition.h"
 #include "esp_http_client.h"
 #include <stdlib.h>
@@ -151,9 +159,9 @@ static bool icons_update(bool only_if_broken, bool *failed)
     return true;
 }
 
-static void ota_task(void *arg)
+static esp_err_t ota_begin(esp_http_client_config_t *http, esp_https_ota_handle_t *h)
 {
-    esp_http_client_config_t http = {
+    *http = (esp_http_client_config_t){
         .url = s_url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 15000,
@@ -161,27 +169,140 @@ static void ota_task(void *arg)
         .buffer_size = 4096,       /* GitHub's redirect carries long headers */
         .buffer_size_tx = 2048,
     };
-    esp_https_ota_config_t cfg = { .http_config = &http };
+    esp_https_ota_config_t cfg = { .http_config = http };
+    return esp_https_ota_begin(&cfg, h);
+}
+
+static void heap_log(const char *when)
+{
+    ESP_LOGI(TAG, "%s: heap free %u, largest block %u", when, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+/* ---- Update mode ----
+ * A download streams ~4.6 MB through TLS, whose 16 KB record buffer is freed and allocated
+ * again for every record (CONFIG_MBEDTLS_DYNAMIC_BUFFER). On the running dashboard other
+ * allocations (Wi-Fi buffers, the UI) soon split that block and the download dies. So the
+ * check runs in normal mode, and the download after a restart into "update mode": no UI
+ * pages, no HA client, just Wi-Fi - a clean heap. */
+#define NVS_NS "ota"
+
+static void nvs_put(const char *key, const char *val)
+{
+    nvs_handle_t nv;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &nv) != ESP_OK) return;
+    if (val) nvs_set_str(nv, key, val); else nvs_erase_key(nv, key);
+    nvs_commit(nv);
+    nvs_close(nv);
+}
+
+static bool nvs_take(const char *key, char *out, size_t len)   /* read and erase */
+{
+    nvs_handle_t nv;
+    bool ok = false;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &nv) != ESP_OK) return false;
+    if (nvs_get_str(nv, key, out, &len) == ESP_OK) {
+        ok = true;
+        nvs_erase_key(nv, key);
+        nvs_commit(nv);
+    }
+    nvs_close(nv);
+    return ok;
+}
+
+static void restart_into_update(const char *why)
+{
+    nvs_put("url", s_url);
+    report(OTA_REBOOTING, 0, why);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+}
+
+/* Normal mode: is there anything to do? Then restart into update mode */
+static void check_task(void *arg)
+{
+    esp_http_client_config_t http;
     esp_https_ota_handle_t h = NULL;
+    esp_app_desc_t desc;
     char msg[64];
     report(OTA_CHECKING, 0, "Checking...");
-    esp_err_t err = esp_https_ota_begin(&cfg, &h);
-    if (err != ESP_OK) { snprintf(msg, sizeof msg, "Download failed"); goto fail; }
-
-    esp_app_desc_t desc;
-    if (esp_https_ota_get_img_desc(h, &desc) != ESP_OK) { snprintf(msg, sizeof msg, "Bad image"); goto abort; }
-    if (!strcmp(desc.version, ota_version())) {
-        esp_https_ota_abort(h);
-        bool failed;
-        if (icons_update(true, &failed)) {    /* same app; repair a missing/broken icon blob */
-            report(OTA_REBOOTING, 100, "Restarting (icons)");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            esp_restart();
+    /* HA's TLS session and GitHub's don't both fit in RAM (16 KB record buffer each) */
+    if (!ha_client_pause(30000)) ESP_LOGW(TAG, "HA client still busy; trying anyway");
+    heap_log("check");
+    esp_err_t err = ota_begin(&http, &h);
+    if (err != ESP_OK) snprintf(msg, sizeof msg, "Download failed");
+    else if ((err = esp_https_ota_get_img_desc(h, &desc)) != ESP_OK) snprintf(msg, sizeof msg, "Bad image");
+    if (h) esp_https_ota_abort(h);
+    if (err == ESP_OK) {
+        const esp_partition_t *ip = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x41, "icons");
+        if (strcmp(desc.version, ota_version())) {
+            snprintf(msg, sizeof msg, "Updating to %.20s", desc.version);
+            restart_into_update(msg);
         }
-        if (failed) snprintf(msg, sizeof msg, "Icons failed");
-        else snprintf(msg, sizeof msg, "Up to date (%.20s)", desc.version);
-        report(failed ? OTA_FAILED : OTA_UP_TO_DATE, 100, msg);
-        goto done;
+        if (ip && !icons_valid(ip)) restart_into_update("Repairing icons");
+        snprintf(msg, sizeof msg, "Up to date (%.20s)", desc.version);
+    } else ESP_LOGW(TAG, "check failed: %s", esp_err_to_name(err));
+    report(err == ESP_OK ? OTA_UP_TO_DATE : OTA_FAILED, 100, msg);
+    ha_client_resume();
+    s_busy = false;
+    vTaskDelete(NULL);
+}
+
+bool ota_start(const char *url, ota_cb_t cb)
+{
+    if (s_busy) return false;
+    s_busy = true;
+    snprintf(s_url, sizeof s_url, "%s", url);
+    s_cb = cb;
+    if (xTaskCreate(check_task, "ota", 8192, NULL, 4, NULL) != pdPASS) { s_busy = false; return false; }
+    return true;
+}
+
+static EventGroupHandle_t s_wifi_ev;
+
+static void wifi_ev(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) esp_wifi_connect();
+    else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) xEventGroupSetBits(s_wifi_ev, BIT0);
+}
+
+static bool wifi_up(void)
+{
+    s_wifi_ev = xEventGroupCreate();
+    if (esp_netif_init() != ESP_OK || esp_event_loop_create_default() != ESP_OK) return false;
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+    if (esp_wifi_init(&init) != ESP_OK) return false;
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_ev, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_ev, NULL);
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, prov_ssid(), sizeof(wc.sta.ssid));
+    strncpy((char *)wc.sta.password, prov_pass(), sizeof(wc.sta.password));
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    if (esp_wifi_start() != ESP_OK) return false;
+    return xEventGroupWaitBits(s_wifi_ev, BIT0, pdFALSE, pdTRUE, pdMS_TO_TICKS(60000)) & BIT0;
+}
+
+/* Update mode: download app and icons, store the outcome for the Firmware page, restart */
+static void update(void)
+{
+    esp_http_client_config_t http;
+    esp_https_ota_handle_t h = NULL;
+    esp_app_desc_t desc = {0};
+    char msg[64];
+    bool icons_failed;
+    esp_err_t err = ESP_FAIL;
+    report(OTA_CHECKING, 0, "Connecting...");
+    if (!wifi_up()) { snprintf(msg, sizeof msg, "Update failed: no Wi-Fi"); goto out; }
+    heap_log("update");
+    if ((err = ota_begin(&http, &h)) != ESP_OK) { snprintf(msg, sizeof msg, "Download failed"); goto out; }
+    if ((err = esp_https_ota_get_img_desc(h, &desc)) != ESP_OK) { snprintf(msg, sizeof msg, "Bad image"); goto abort; }
+    if (!strcmp(desc.version, ota_version())) {         /* only the icons (repair) */
+        esp_https_ota_abort(h);
+        icons_update(false, &icons_failed);
+        snprintf(msg, sizeof msg, icons_failed ? "Icons failed" : "Icons updated");
+        goto out;
     }
     int total = esp_https_ota_get_image_size(h), last = -1;
     while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
@@ -193,34 +314,34 @@ static void ota_task(void *arg)
             report(OTA_DOWNLOADING, pct, msg);
         }
     }
-    if (err != ESP_OK || !esp_https_ota_is_complete_data_received(h)) { snprintf(msg, sizeof msg, "Download failed"); goto abort; }
-    if (esp_https_ota_finish(h) != ESP_OK) { snprintf(msg, sizeof msg, "Image invalid"); h = NULL; goto fail; }
-    /* The new app boots on the next restart; bring its icons along first. A failure here
-     * still restarts into the new app (it runs without icons; the next Update retries) */
-    bool icons_failed;
+    if (err != ESP_OK || !esp_https_ota_is_complete_data_received(h)) {
+        heap_log("failed");
+        snprintf(msg, sizeof msg, "Download failed");
+        goto abort;
+    }
+    if ((err = esp_https_ota_finish(h)) != ESP_OK) { snprintf(msg, sizeof msg, "Image invalid"); goto out; }
+    /* The new app boots on the restart; bring its icons along. A failure here still
+     * restarts into the new app (no icons until the next Update repairs them) */
     icons_update(false, &icons_failed);
-    if (icons_failed) ESP_LOGW(TAG, "icons not updated");
-    snprintf(msg, sizeof msg, "Restarting (%.20s)", desc.version);
-    report(OTA_REBOOTING, 100, msg);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
-
+    snprintf(msg, sizeof msg, icons_failed ? "Updated to %.20s, icons failed" : "Updated to %.20s", desc.version);
+    goto out;
 abort:
     esp_https_ota_abort(h);
-fail:
-    ESP_LOGW(TAG, "update failed: %s", esp_err_to_name(err));
-    report(OTA_FAILED, 0, msg);
-done:
-    s_busy = false;
-    vTaskDelete(NULL);
+out:
+    if (err != ESP_OK) ESP_LOGW(TAG, "update failed: %s", esp_err_to_name(err));
+    report(err == ESP_OK ? OTA_REBOOTING : OTA_FAILED, 100, msg);
+    nvs_put("msg", msg);
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
 }
 
-bool ota_start(const char *url, ota_cb_t cb)
+void ota_run_pending(ota_cb_t cb)
 {
-    if (s_busy) return false;
-    s_busy = true;
-    snprintf(s_url, sizeof s_url, "%s", url);
+    if (!nvs_take("url", s_url, sizeof s_url)) return;   /* erased first: a crash can't loop */
     s_cb = cb;
-    if (xTaskCreate(ota_task, "ota", 8192, NULL, 4, NULL) != pdPASS) { s_busy = false; return false; }
-    return true;
+    prov_load();
+    ESP_LOGI(TAG, "update mode: %s", s_url);
+    update();                                            /* restarts */
 }
+
+bool ota_last_result(char *out, size_t len) { return nvs_take("msg", out, len); }

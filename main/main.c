@@ -216,6 +216,37 @@ static void ha_nav_changed(const char *dash, const char *view, int page);
 static lv_obj_t *s_ha_btn = NULL;
 
 
+/* Update mode (main/ota.c): a bare screen with the progress, nothing else running */
+static char s_fw_msg[64];          /* last OTA status, kept across rebuilds */
+static void update_mode_progress(ota_state_t st, int pct, const char *msg)
+{
+    static lv_obj_t *label, *bar;
+    static char text[64];
+    if (!lvgl_port_lock(0)) return;
+    if (!label) {
+        lv_obj_t *scr = lv_scr_act();
+        lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+        lv_obj_t *t = lv_label_create(scr);
+        lv_label_set_text(t, "Firmware update");
+        lv_obj_set_style_text_color(t, lv_color_white(), 0);
+        lv_obj_align(t, LV_ALIGN_CENTER, 0, -40);
+        label = lv_label_create(scr);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xB4BBC2), 0);
+        lv_obj_set_width(label, 150);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+        bar = lv_bar_create(scr);
+        lv_obj_set_size(bar, 132, 8);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0x18BCF2), LV_PART_INDICATOR);
+        lv_obj_align(bar, LV_ALIGN_CENTER, 0, 40);
+    }
+    snprintf(text, sizeof text, "%s", msg);
+    lv_label_set_text_static(label, text);
+    lv_bar_set_value(bar, pct, LV_ANIM_OFF);
+    lvgl_port_unlock();
+}
+
 void app_main(void)
 {
     i2c_master_bus_handle_t i2c_bus_handle;
@@ -241,6 +272,8 @@ void app_main(void)
 
     bsp_display_brightness_init();
     bsp_display_set_brightness(100);   /* the stored brightness follows once NVS is read */
+    ota_run_pending(update_mode_progress);   /* update mode: never returns */
+    ota_last_result(s_fw_msg, sizeof s_fw_msg);
 
     if (lvgl_port_lock(0))
     {
@@ -3562,12 +3595,15 @@ static void ha_night_changed(int night, int pct, int timeout_min)
 
 /* ---- Firmware page: version and OTA update (issue #14) ---- */
 static lv_obj_t *s_fw_btn, *s_fw_status, *s_fw_caption, *s_fw_ver;
-static char s_fw_msg[64];          /* last OTA status, kept across rebuilds */
 static bool s_fw_busy;
+
+static lv_timer_t *s_fw_timer;
+static volatile bool s_fw_dirty;
 
 static void fw_labels(void)
 {
-    if (s_fw_status) lv_label_set_text(s_fw_status, s_fw_msg);
+    s_fw_dirty = false;
+    if (s_fw_status) lv_label_set_text_static(s_fw_status, s_fw_msg);   /* no copy: no heap */
     if (s_fw_btn) {
         lv_label_set_text(lv_obj_get_child(s_fw_btn, 0), s_fw_busy ? "Updating..." : "Update");
         if (s_fw_busy) lv_obj_add_state(s_fw_btn, LV_STATE_DISABLED);
@@ -3575,7 +3611,10 @@ static void fw_labels(void)
     }
 }
 
-static void fw_apply(void *arg) { fw_labels(); }
+/* LVGL timer: shows the OTA task's progress. Polled rather than lv_async_call'ed: during
+ * a download the heap must not churn, or the TLS record buffer (16 KB, re-allocated for
+ * every record) no longer finds a block */
+static void fw_poll(lv_timer_t *t) { if (s_fw_dirty) fw_labels(); }
 
 /* OTA task: progress */
 static void fw_progress(ota_state_t st, int pct, const char *msg)
@@ -3583,7 +3622,7 @@ static void fw_progress(ota_state_t st, int pct, const char *msg)
     if (!lvgl_port_lock(0)) return;
     snprintf(s_fw_msg, sizeof s_fw_msg, "%s", msg);
     s_fw_busy = st == OTA_CHECKING || st == OTA_DOWNLOADING || st == OTA_REBOOTING;
-    lv_async_call(fw_apply, NULL);
+    s_fw_dirty = true;
     lvgl_port_unlock();
 }
 
@@ -3619,6 +3658,7 @@ static void create_fw_page(lv_obj_t *pg)
     lv_obj_set_style_text_align(s_fw_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align_to(s_fw_status, s_fw_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
     fw_labels();
+    if (!s_fw_timer) s_fw_timer = lv_timer_create(fw_poll, 250, NULL);
 }
 
 static lv_obj_t *s_cfg_strip = NULL, *s_cfg_dot[CFG_PAGES];

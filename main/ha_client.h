@@ -160,6 +160,11 @@ void ha_client_set_theme(bool dark);   /* theme entity on = dark */
  * UI rebuild). Any task; the callbacks take the LVGL lock themselves. */
 void ha_client_replay(void);
 void ha_client_set_brightness(float value);
+/* Closes all HA connections (live websocket, HTTP) and holds the client until
+ * ha_client_resume(), e.g. for an OTA download: two TLS sessions don't fit in RAM.
+ * Waits up to timeout_ms for the current round to end; false if it didn't */
+bool ha_client_pause(int timeout_ms);
+void ha_client_resume(void);
 void ha_client_refresh(void);  /* re-read all entities now; ends with the done callback */
 
 /* Dashboard views, after every dashboard read: n views, current = index of the one shown
