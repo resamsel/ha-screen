@@ -89,6 +89,13 @@ typedef void (*ha_night_cb_t)(int night, int night_pct, int timeout_min);
 void ha_client_set_night_cb(ha_night_cb_t cb);  /* call before ha_client_start */
 void ha_client_set_night(bool night, int night_pct, int timeout_min);
 
+/* Notifications (issue #19): the board's "<board> notification" input_text. The callback runs
+ * on the HA task with each new non-empty message; ha_client_notify_clear() empties the helper
+ * once the message is dismissed. */
+typedef void (*ha_notify_cb_t)(const char *text);
+void ha_client_set_notify_cb(ha_notify_cb_t cb);
+void ha_client_notify_clear(void);
+
 /* Picture card (picture-entity): pixels = w*h RGB565 in LVGL's byte order (LV_COLOR_16_SWAP),
  * the whole image scaled to fit w x h of the requested size; name = card name or friendly_name.
  * zoom 2: decoded at half size for lack of memory, show it zoomed 2x.

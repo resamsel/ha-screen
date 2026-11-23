@@ -38,6 +38,7 @@ static void add_error(const char *fmt, ...);
 #include "config.h"
 
 #include "provision.h"
+#include "notify.h"
 
 static const char *TAG = "ha";
 
@@ -56,7 +57,8 @@ static const char *TAG = "ha";
 #define TARGET_BIT  BIT12 /* a thermostat's target temperature was changed */
 #define MEDIA_BIT   BIT13 /* play/pause or next on a media card */
 #define LIGHT_BIT   BIT14 /* a light card was switched or dimmed */
-#define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT)
+#define NOTIFY_BIT  BIT15 /* a notification was dismissed: clear the helper */
+#define USER_BITS   (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | NOTIFY_BIT)
 
 static volatile float s_set_value;
 static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
@@ -124,6 +126,8 @@ void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb) { s_dashes_cb = cb; }
 /* Dashboard / view / page entities: the last values read (valid flags), and the values to write */
 static ha_nav_cb_t s_nav_cb;
 void ha_client_set_nav_cb(ha_nav_cb_t cb) { s_nav_cb = cb; }
+static ha_notify_cb_t s_notify_cb;
+void ha_client_set_notify_cb(ha_notify_cb_t cb) { s_notify_cb = cb; }
 static char s_nav_dash[32], s_nav_view[32];
 static bool s_nav_dash_ok, s_nav_view_ok;
 static int s_nav_page = -1;
@@ -453,20 +457,20 @@ static char s_board[32];                /* the name ("" = not set) */
 static char s_board_raw[32];            /* the name as typed in the setup portal */
 static bool s_name_push;                /* portal saved a name: write it to the HA helper */
 /* Bump when a firmware adds board helpers: boards set up before then create the new ones
- * once (2: night, night brightness, screen timeout, issue #17) */
-#define HELPERS_VERSION 2
+ * once (2: night, night brightness, screen timeout, issue #17; 3: notification, issue #19) */
+#define HELPERS_VERSION 3
 static bool s_mkhelp;                   /* portal saved: create the missing helpers once */
 static ha_local_cb_t s_local_cb;
 void ha_client_set_local_cb(ha_local_cb_t cb) { s_local_cb = cb; }
 static volatile bool s_name_changed;    /* live event: the name entity changed */
 static struct {
     char theme[80], land[80], pres[80], pres_int[80], bri[80], dash[80], view[80], page[80];
-    char night[80], night_bri[80], scr_to[80];
+    char night[80], night_bri[80], scr_to[80], notify[80];
 } s_ent;
 /* Which board helpers HA has: 1 yes, 0 no (404), -1 not asked yet. Every helper is optional:
  * without one the board keeps that setting itself, and writes to a missing one are skipped. */
-enum { H_THEME, H_LAND, H_PRES, H_PRES_INT, H_BRI, H_DASH, H_VIEW, H_PAGE, H_NIGHT, H_NIGHT_BRI, H_SCR_TO, H_COUNT };
-static int8_t s_has[H_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+enum { H_THEME, H_LAND, H_PRES, H_PRES_INT, H_BRI, H_DASH, H_VIEW, H_PAGE, H_NIGHT, H_NIGHT_BRI, H_SCR_TO, H_NOTIFY, H_COUNT };
+static int8_t s_has[H_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static bool has(int h) { return s_has[h] != 0; }
 static ha_setup_cb_t s_setup_cb;
 void ha_client_set_setup_cb(ha_setup_cb_t cb) { s_setup_cb = cb; }
@@ -487,6 +491,7 @@ static void ent_build(void)
     snprintf(s_ent.night, 80, "input_boolean.%s_night", b);
     snprintf(s_ent.night_bri, 80, "input_number.%s_night_brightness", b);
     snprintf(s_ent.scr_to, 80, "input_number.%s_screen_timeout", b);
+    snprintf(s_ent.notify, 80, "input_text.%s_notification", b);
 }
 
 /* Like HA's object IDs: lowercase, runs of anything else become one '_', no '_' at the ends */
@@ -1112,10 +1117,11 @@ static void create_helpers(void)
         case H_NIGHT: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s night\",\"icon\":\"mdi:weather-night\",\"initial\":%s", b, L.night ? "true" : "false"); break;
         case H_NIGHT_BRI: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s night brightness\",\"min\":0,\"max\":100,\"step\":1,\"mode\":\"slider\",\"unit_of_measurement\":\"%%\",\"initial\":%d", b, L.night_pct); break;
         case H_SCR_TO: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s screen timeout\",\"min\":0,\"max\":240,\"step\":1,\"mode\":\"box\",\"unit_of_measurement\":\"min\",\"icon\":\"mdi:timer-off-outline\",\"initial\":%d", b, L.timeout_min); break;
+        case H_NOTIFY: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s notification\",\"max\":255,\"icon\":\"mdi:message-alert\",\"initial\":\"\"", b); break;
         }
         char *res = dash_ws_call(d, body);
         bool ok = res && strstr(res, "\"success\":true");
-        ESP_LOGI(TAG, "helpers: create %s %s: %s", b, (const char *[]){"theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page", "night", "night brightness", "screen timeout"}[h], ok ? "ok" : res ? res : "no answer");
+        ESP_LOGI(TAG, "helpers: create %s %s: %s", b, (const char *[]){"theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page", "night", "night brightness", "screen timeout", "notification"}[h], ok ? "ok" : res ? res : "no answer");
         if (ok) s_has[h] = 1;
         free(res);
     }
@@ -1220,6 +1226,8 @@ static bool fetch_state(void)
         if (to < 0) s_ln_to = -1;
         if (s_night_cb) s_night_cb(s_ln_night, s_ln_pct, s_ln_to);
     }
+
+    if (s_has[H_NOTIFY] < 0) helper_get(s_ent.notify, r, H_NOTIFY);   /* only whether it's there: messages come live */
 
     /* Brightness: input_number state like "42.0" plus its min/max attributes */
     if (helper_get(s_ent.bri, r, H_BRI) == 200) parse_brightness(r->buf);
@@ -2297,6 +2305,7 @@ static bool live_start(void)
         ids[n++] = s_ent.night;
         ids[n++] = s_ent.night_bri;
         ids[n++] = s_ent.scr_to;
+        ids[n++] = s_ent.notify;
     }
     for (int pg = 0; pg < s_layout.count; pg++)
         for (int i = 0; i < s_layout.pages[pg].count; i++) {
@@ -2400,13 +2409,19 @@ static void live_dispatch(const char *id, const char *json)
 static void live_drain(void)
 {
     static char json[512];
-    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 9];
+    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 12];
     char *m;
     while (s_live_q && xQueueReceive(s_live_q, &m, 0) == pdTRUE) {
         int n = s_live ? live_apply(s_live, m, ch, sizeof(ch) / sizeof(ch[0])) : 0;
         free(m);
-        for (int k = 0; k < n; k++)
+        for (int k = 0; k < n; k++) {
+            if (s_board[0] && !strcmp(live_id(s_live, ch[k]), s_ent.notify)) {
+                char text[NOTIFY_MAX];
+                if (notify_text(live_text(s_live, ch[k]), text, sizeof(text)) && s_notify_cb) s_notify_cb(text);
+                continue;
+            }
             if (live_json(s_live, ch[k], json, sizeof(json))) live_dispatch(live_id(s_live, ch[k]), json);
+        }
     }
 }
 
@@ -2447,6 +2462,7 @@ static bool do_user(EventBits_t b)
     if (!has(H_DASH) && !has(H_VIEW) && !has(H_PAGE)) { b &= ~NAV_BIT; s_nav_writing = false; }
     if (!has(H_LAND)) b &= ~ORIENT_BIT;
     if (!has(H_THEME)) b &= ~TOGGLE_BIT;
+    if (!s_board[0] || !has(H_NOTIFY)) b &= ~NOTIFY_BIT;
     if (b & SETBRI_BIT) {
         char sb[160];
         snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%.1f}", s_ent.bri, (double)s_set_value);
@@ -2476,6 +2492,12 @@ static bool do_user(EventBits_t b)
         ok &= st >= 200 && st < 300;
         snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":%d}", s_ent.scr_to, s_set_scr_to);
         st = has(H_SCR_TO) ? ha_service("/api/services/input_number/set_value", sb) : 200;
+        ok &= st >= 200 && st < 300;
+    }
+    if (b & NOTIFY_BIT) {                 /* empty again: the same text later shows again */
+        char sb[128];
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\",\"value\":\"\"}", s_ent.notify);
+        int st = ha_service("/api/services/input_text/set_value", sb);
         ok &= st >= 200 && st < 300;
     }
     if (b & NAV_BIT) {
@@ -2786,6 +2808,11 @@ void ha_client_set_presentation(bool on, int secs)
     s_set_pres_on = on;
     s_set_pres_secs = secs;
     if (s_events) xEventGroupSetBits(s_events, PRES_BIT);
+}
+
+void ha_client_notify_clear(void)
+{
+    if (s_events) xEventGroupSetBits(s_events, NOTIFY_BIT);
 }
 
 void ha_client_set_night(bool night, int night_pct, int timeout_min)
