@@ -76,6 +76,14 @@ flash. Dashboard, view and page are synced both ways (the last change wins): set
 HA switches the board, swiping or picking a view on the board writes them. The page isn't
 written while presentation mode is on. Diagnostics go to `sensor.<name>_*`.
 
+### Auto-rotate
+
+Config panel > Display > Auto-rotate turns the screen with the board (all 4 directions,
+upside-down too), read from the built-in IMU. Lying flat keeps the current rotation; a new one
+is taken once the board was held that way for 1.5 s. While it's on, the board writes portrait /
+landscape to `input_boolean.<name>_landscape` and ignores changes to it from HA; picking
+Portrait or Landscape turns auto-rotate off. The setting is kept on the board.
+
 ### Notifications
 
 Setting `input_text.<name>_notification` shows its text as a banner at the top of the screen
