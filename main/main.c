@@ -3592,7 +3592,7 @@ static lv_obj_t *cfg_row(const char *label, lv_event_cb_t cb, void *ud, bool ena
     lv_obj_t *l = lv_label_create(r);
     lv_label_set_text(l, label);
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_max_width(l, CFG_W - 20 - 56, 0);
+    lv_obj_set_style_max_width(l, CFG_W - 20, 0);   /* cfg_value() narrows it */
     lv_obj_set_style_text_font(l, &lv_font_latin_16, 0);
     lv_obj_set_style_text_color(l, enabled ? CFG_TEXT : COL_SEC(s_light), 0);
     lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
@@ -3609,7 +3609,9 @@ static void cfg_value(lv_obj_t *row, const char *text, bool chevron)
     lv_point_t ls;
     lv_obj_t *l = lv_obj_get_child(row, 0);
     lv_txt_get_size(&ls, lv_label_get_text(l), &lv_font_latin_16, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    lv_obj_set_style_max_width(v, CFG_W - 20 - LV_MIN(ls.x, CFG_W - 20 - 56) - (chevron ? 16 : 0) - 12, 0);
+    lv_coord_t lw = LV_MIN(ls.x, CFG_W - 20 - 40);     /* the value keeps at least 40 px */
+    lv_obj_set_style_max_width(l, lw, 0);
+    lv_obj_set_style_max_width(v, CFG_W - 20 - lw - (chevron ? 16 : 0) - 6, 0);
     lv_obj_set_style_text_font(v, &lv_font_latin_14, 0);
     lv_obj_set_style_text_color(v, COL_SEC(s_light), 0);
     lv_obj_align(v, LV_ALIGN_RIGHT_MID, chevron ? -16 : 0, 0);
@@ -3693,9 +3695,10 @@ static lv_obj_t *cfg_center_label(lv_obj_t *parent, const char *text, const lv_f
 /* Two choices side by side, the current one (sel, -1 for none) raised; cb gets 0 or 1 */
 static void cfg_segmented(const char *a, const char *b, int sel, lv_event_cb_t cb)
 {
-    lv_obj_t *s = cfg_fill_box(s_cfg_body, CFG_INNER_W, CFG_ROW_H, false);
-    lv_obj_set_style_pad_all(s, 3, 0);
-    lv_obj_set_style_pad_column(s, 3, 0);
+    /* a bit wider than the other blocks, so "Landscape" fits a half in portrait */
+    lv_obj_t *s = cfg_fill_box(s_cfg_body, CFG_W - 12, CFG_ROW_H, false);
+    lv_obj_set_style_pad_all(s, 2, 0);
+    lv_obj_set_style_pad_column(s, 2, 0);
     lv_obj_set_flex_flow(s, LV_FLEX_FLOW_ROW);
     for (int i = 0; i < 2; i++) {
         lv_obj_t *o = cfg_fill_box(s, 10, lv_pct(100), i == sel);
@@ -3718,7 +3721,7 @@ static void cfg_stepper(int pct, lv_event_cb_t cb)
     lv_obj_set_flex_flow(s, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     for (int i = 0; i < 2; i++) {
-        lv_obj_t *b = cfg_fill_box(s, CFG_ROW_H + 8, CFG_ROW_H, false);
+        lv_obj_t *b = cfg_fill_box(s, CFG_ROW_H, CFG_ROW_H, false);
         cfg_tappable(b, cb, (void *)(intptr_t)(i ? 1 : -1));
         cfg_center_label(b, i ? LV_SYMBOL_PLUS : LV_SYMBOL_MINUS, &lv_font_latin_16);
         if (i) break;
@@ -3842,7 +3845,7 @@ static void cfg_build_screen(void)
         cfg_segmented("Portrait", "Landscape", s_landscape, orient_seg_cb);
         break;
     case CS_PRES:
-        cfg_toggle("Presentation", s_pres_on, pres_toggle_cb);
+        cfg_toggle("On", s_pres_on, pres_toggle_cb);
         cfg_caption("Next page after");
         for (int i = 0; i < (int)(sizeof(PRES_SECS) / sizeof(PRES_SECS[0])); i++) {
             secs_text(b, sizeof(b), PRES_SECS[i]);
@@ -3908,6 +3911,17 @@ static void cfg_build(void)
         lv_obj_add_flag(s_cfg_back, LV_OBJ_FLAG_CLICKABLE);
     }
     lv_obj_set_style_text_color(s_cfg_title, CFG_TEXT, 0);
+    /* The status icons show on the list; detail screens give their room to the title.
+     * A title still too long gets a smaller font. */
+    bool home = s_cfg_scr == CS_HOME;
+    lv_obj_t *icons[] = {s_wifi_icon[1], s_ha_icon[1]};
+    for (int i = 0; i < 2; i++)
+        if (icons[i]) { if (home) lv_obj_clear_flag(icons[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(icons[i], LV_OBJ_FLAG_HIDDEN); }
+    const lv_coord_t room = CFG_W - 20 - (home ? 44 : 0);
+    lv_point_t ts;
+    lv_txt_get_size(&ts, lv_label_get_text(s_cfg_title), &lv_font_montserrat_20, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const lv_font_t *tf = ts.x > room ? &lv_font_montserrat_16 : &lv_font_montserrat_20;
+    lv_obj_set_style_text_font(s_cfg_title, tf, 0);
 
     cfg_build_screen();
 
