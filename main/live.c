@@ -17,6 +17,7 @@ typedef struct {
     char cur[12], tmin[12], tmax[12], tstep[8], action[16];   /* climate */
     char mtitle[40], martist[32];       /* media_player */
     char bri[8];                        /* light, 0-255 */
+    char *text;                         /* input_text: the whole state, unescaped (heap) */
 } ent_t;
 
 struct live {
@@ -33,7 +34,27 @@ live_t *live_new(const char *const *ids, int n)
     return l;
 }
 
-void live_free(live_t *l) { free(l); }
+void live_free(live_t *l)
+{
+    for (int i = 0; l && i < l->n; i++) free(l->e[i].text);
+    free(l);
+}
+
+const char *live_text(const live_t *l, int i) { return l && i >= 0 && i < l->n ? l->e[i].text : NULL; }
+
+/* input_text states are free text up to 255 chars: keep them whole, quotes and all */
+static bool set_text(ent_t *e, const cJSON *s)
+{
+    if (strncmp(e->id, "input_text.", 11) || !cJSON_IsString(s) || !s->valuestring) return false;
+    if (e->text && !strcmp(e->text, s->valuestring)) return false;
+    size_t n = strlen(s->valuestring) + 1;
+    char *t = malloc(n);
+    if (!t) return false;
+    memcpy(t, s->valuestring, n);
+    free(e->text);
+    e->text = t;
+    return true;
+}
 int live_count(const live_t *l) { return l ? l->n : 0; }
 const char *live_id(const live_t *l, int i) { return l && i >= 0 && i < l->n ? l->e[i].id : NULL; }
 
@@ -85,6 +106,7 @@ static const struct { const char *key; size_t off, size; } ATTRS[] = {
 static bool update(ent_t *e, const cJSON *s, const cJSON *a, bool full)
 {
     bool ch = false;
+    if (s) ch |= set_text(e, s);
     if (s) ch |= set(e->state, sizeof(e->state), s);
     for (int k = 0; k < NATTRS; k++) {
         char *f = (char *)e + ATTRS[k].off;

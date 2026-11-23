@@ -41,6 +41,7 @@ static void button_init(void);
 LV_FONT_DECLARE(lv_font_latin_12)
 LV_FONT_DECLARE(lv_font_latin_14)
 LV_FONT_DECLARE(lv_font_latin_16)
+LV_FONT_DECLARE(lv_font_emoji_16)   /* the banner: emoji, then lv_font_latin_16 */
 LV_FONT_DECLARE(lv_font_latin_22)
 LV_FONT_DECLARE(lv_font_clock_24)
 LV_FONT_DECLARE(lv_font_clock_28)
@@ -206,6 +207,7 @@ static void set_screen_bg(lv_obj_t *scr, bool light)
 static void ha_landscape_changed(bool landscape);
 static void ha_pres_changed(bool on, int secs);
 static void ha_night_changed(int night, int pct, int timeout_min);
+static void ha_notify(const char *text);
 static void screen_apply(void);
 static void screen_init(void);
 static void ui_save_u8(const char *key, uint8_t v);
@@ -323,6 +325,7 @@ void app_main(void)
     ha_client_set_landscape_cb(ha_landscape_changed);
     ha_client_set_pres_cb(ha_pres_changed);
     ha_client_set_night_cb(ha_night_changed);
+    ha_client_set_notify_cb(ha_notify);
     ha_client_set_layout_cb(ha_layout_changed);
     ha_client_set_busy_cb(ha_busy);
     ha_client_set_button_cb(ha_button_changed);
@@ -3412,6 +3415,82 @@ static void screen_init(void)
     screen_apply();
 }
 
+/* Notifications from HA (issue #19): a banner on the top layer, gone after a tap or
+ * NOTIFY_SHOW_MS; dismissing empties the HA helper so the same text can come again. */
+#define NOTIFY_SHOW_MS 30000
+static lv_obj_t *s_notify, *s_notify_lbl;
+static lv_timer_t *s_notify_tmr;
+
+/* LVGL task */
+static void notify_dismiss(void)
+{
+    if (s_notify_tmr) { lv_timer_del(s_notify_tmr); s_notify_tmr = NULL; }
+    if (!s_notify || lv_obj_has_flag(s_notify, LV_OBJ_FLAG_HIDDEN)) return;
+    lv_obj_add_flag(s_notify, LV_OBJ_FLAG_HIDDEN);
+    ha_client_notify_clear();
+}
+
+static void notify_tap_cb(lv_event_t *e) { (void)e; notify_dismiss(); }
+static void notify_tmr_cb(lv_timer_t *t) { (void)t; s_notify_tmr = NULL; notify_dismiss(); }
+
+static void notify_show(void *arg)
+{
+    char *text = arg;
+    if (!s_notify) {
+        s_notify = lv_obj_create(lv_layer_top());
+        lv_obj_set_width(s_notify, lv_pct(94));
+        lv_obj_set_height(s_notify, LV_SIZE_CONTENT);
+        lv_obj_align(s_notify, LV_ALIGN_TOP_MID, 0, 6);
+        lv_obj_set_style_radius(s_notify, 12, 0);
+        lv_obj_set_style_border_width(s_notify, 2, 0);
+        lv_obj_set_style_border_color(s_notify, lv_color_hex(0x03A9F4), 0);   /* HA's primary */
+        lv_obj_set_style_pad_all(s_notify, 10, 0);
+        lv_obj_add_flag(s_notify, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(s_notify, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_event_cb(s_notify, notify_tap_cb, LV_EVENT_CLICKED, NULL);
+        s_notify_lbl = lv_label_create(s_notify);
+        lv_obj_set_width(s_notify_lbl, lv_pct(100));
+        lv_obj_set_style_text_font(s_notify_lbl, &lv_font_emoji_16, 0);
+        lv_obj_set_style_text_line_space(s_notify_lbl, 2, 0);
+    }
+    lv_obj_set_style_bg_color(s_notify, s_light ? lv_color_white() : lv_color_hex(0x2C3440), 0);
+    lv_obj_set_style_bg_opa(s_notify, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_notify_lbl, COL_MAIN(s_light), 0);
+    /* measured at its full height first; then at most 3 lines, the rest cut to "..." */
+    lv_label_set_long_mode(s_notify_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(s_notify_lbl, LV_SIZE_CONTENT);
+    lv_label_set_text(s_notify_lbl, text);
+    free(text);
+    lv_obj_update_layout(s_notify_lbl);
+    lv_coord_t max_h = 3 * (lv_font_get_line_height(&lv_font_emoji_16) + 2);   /* 3 lines and their spacing */
+    if (lv_obj_get_height(s_notify_lbl) > max_h) {
+        lv_obj_set_height(s_notify_lbl, max_h);
+        lv_label_set_long_mode(s_notify_lbl, LV_LABEL_LONG_DOT);
+    }
+    screen_wake();                        /* lights the screen first: the 30 s count from here */
+    screen_apply();
+    lv_obj_clear_flag(s_notify, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_notify);
+    if (s_notify_tmr) lv_timer_reset(s_notify_tmr);
+    else {
+        s_notify_tmr = lv_timer_create(notify_tmr_cb, NOTIFY_SHOW_MS, NULL);
+        lv_timer_set_repeat_count(s_notify_tmr, 1);
+    }
+}
+
+/* HA task: a new message */
+static void ha_notify(const char *text)
+{
+    size_t n = strlen(text) + 1;
+    char *t = malloc(n);
+    if (!t) return;
+    memcpy(t, text, n);
+    if (lvgl_port_lock(0)) {
+        lv_async_call(notify_show, t);
+        lvgl_port_unlock();
+    } else free(t);
+}
+
 static void night_labels(void)
 {
     if (s_night_btn) lv_label_set_text(lv_obj_get_child(s_night_btn, 0), s_night ? "Night: on" : "Night: off");
@@ -4813,6 +4892,11 @@ static void ha_layout_changed(const ha_layout_t *layout)
 static void test_tap(int x, int y)
 {
     ESP_LOGI(TAG, "test tap %d,%d", x, y);
+    if (s_notify && !lv_obj_has_flag(s_notify, LV_OBJ_FLAG_HIDDEN)) {   /* top layer first, like a touch */
+        lv_area_t a;
+        lv_obj_get_coords(s_notify, &a);
+        if (x >= a.x1 && x <= a.x2 && y >= a.y1 && y <= a.y2) { lv_event_send(s_notify, LV_EVENT_CLICKED, NULL); return; }
+    }
     if (s_cfg_open) {                     /* config panel: click the object under the point */
         lv_point_t p = { x, y };
         lv_obj_t *o = lv_indev_search_obj(s_cfg, &p);

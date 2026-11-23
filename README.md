@@ -69,11 +69,30 @@ it exists and isn't empty, overrides it. The name prefixes the board's own helpe
 | `input_text.kitchen_dashboard`              | dashboard url_path (empty = ask on the board) |
 | `input_text.kitchen_view`                   | view path (empty = the first view)            |
 | `input_number.kitchen_page`                 | page, from 1 (min 1, max 8, step 1)           |
+| `input_text.kitchen_notification`           | a message to show (see Notifications)         |
 
 Renaming the board in HA switches it to the new helpers right away; the last name is kept in
 flash. Dashboard, view and page are synced both ways (the last change wins): setting them in
 HA switches the board, swiping or picking a view on the board writes them. The page isn't
 written while presentation mode is on. Diagnostics go to `sensor.<name>_*`.
+
+### Notifications
+
+Setting `input_text.<name>_notification` shows its text as a banner at the top of the screen
+(up to 3 lines; longer text ends in "..."). It wakes the screen and goes away after 30 s or
+on a tap; then the board empties the helper, so the same message can be sent again. A new
+message replaces the one shown. Up to 255 characters: Latin letters, common punctuation
+(– “ ” … € →) and about 270 common emoji (🧺 ⚠️ 🚪 🔥 ✅ ...), in the text colour; other emoji
+show as a box (the list is `EMOJI` in `tools/make_fonts.py`). Line breaks: a real one from an automation, or `\n` typed into the helper
+(`\\` for a backslash). Example automation action:
+
+```yaml
+action: input_text.set_value
+target:
+  entity_id: input_text.kitchen_notification
+data:
+  value: "Washing machine done\nPlease empty it"
+```
 
 ### Firmware updates
 
