@@ -3,7 +3,7 @@
   s / S        screenshot (S: as if the screen was just touched)
   0..9         show main page n
   V<n>         show dashboard view n
-  C<n>         open config panel page n, C9 closes it
+  C<n>         open config panel screen n (0 list .. 7), C9 closes it
   T<x>,<y>\\n   tap at x,y
 
 Everything else the board prints (its log) is kept in Device.log, so tests can check

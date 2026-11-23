@@ -63,26 +63,26 @@ def test_config_panel_opens_and_closes(dev):
     assert_same(dev, main, "the panel did not close")
 
 
-def test_config_pages_distinct(dev):
+def test_config_screens_distinct(dev):
     shots = []
-    for n in range(4):            # settings, display, presentation, errors
+    for n in range(5):            # list, display, presentation, night, firmware
         dev.cfg(n)
         shots.append(dev.screenshot())
     for i in range(len(shots)):
         for j in range(i + 1, len(shots)):
-            assert diff_ratio(shots[i], shots[j]) > SAME, "config pages %d and %d look the same" % (i, j)
+            assert diff_ratio(shots[i], shots[j]) > SAME, "config screens %d and %d look the same" % (i, j)
 
 
-def test_dashboard_menu_opens_and_closes(dev):
+def test_dashboard_screen_opens_and_goes_back(dev):
     dev.cfg(0)
     before = dev.screenshot()
-    # the Dashboard button: top left in landscape, top of the column in portrait
-    x, y = (80, 79) if landscape(before) else (86, 83)
-    dev.tap(x, y)
-    menu = dev.screenshot()
-    assert diff_ratio(before, menu) > 0.01, "the dashboard list did not open"
-    dev.tap(menu.size[0] - 8, 8)  # beside the list: closes it without picking
-    assert_same(dev, before, "the dashboard list did not close")
+    # the Dashboard row, second in the list below the 36 px header
+    row_h = 34 if landscape(before) else 40
+    dev.tap(before.size[0] // 2, 36 + row_h + row_h // 2)
+    picker = dev.screenshot()
+    assert diff_ratio(before, picker) > 0.01, "the dashboard screen did not open"
+    dev.tap(30, 18)               # the header's back arrow
+    assert_same(dev, before, "back did not return to the list")
 
 
 def test_touch_shows_status(dev):
