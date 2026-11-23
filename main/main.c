@@ -41,6 +41,7 @@ static void button_init(void);
 LV_FONT_DECLARE(lv_font_latin_12)
 LV_FONT_DECLARE(lv_font_latin_14)
 LV_FONT_DECLARE(lv_font_latin_16)
+LV_FONT_DECLARE(lv_font_emoji_16)   /* the banner: emoji, then lv_font_latin_16 */
 LV_FONT_DECLARE(lv_font_latin_22)
 LV_FONT_DECLARE(lv_font_clock_24)
 LV_FONT_DECLARE(lv_font_clock_28)
@@ -3416,7 +3417,7 @@ static void notify_show(void *arg)
         lv_obj_add_event_cb(s_notify, notify_tap_cb, LV_EVENT_CLICKED, NULL);
         s_notify_lbl = lv_label_create(s_notify);
         lv_obj_set_width(s_notify_lbl, lv_pct(100));
-        lv_obj_set_style_text_font(s_notify_lbl, &lv_font_latin_16, 0);
+        lv_obj_set_style_text_font(s_notify_lbl, &lv_font_emoji_16, 0);
         lv_obj_set_style_text_line_space(s_notify_lbl, 2, 0);
     }
     lv_obj_set_style_bg_color(s_notify, s_light ? lv_color_white() : lv_color_hex(0x2C3440), 0);
@@ -3428,7 +3429,7 @@ static void notify_show(void *arg)
     lv_label_set_text(s_notify_lbl, text);
     free(text);
     lv_obj_update_layout(s_notify_lbl);
-    lv_coord_t max_h = 3 * (lv_font_get_line_height(&lv_font_latin_16) + 2);   /* 3 lines and their spacing */
+    lv_coord_t max_h = 3 * (lv_font_get_line_height(&lv_font_emoji_16) + 2);   /* 3 lines and their spacing */
     if (lv_obj_get_height(s_notify_lbl) > max_h) {
         lv_obj_set_height(s_notify_lbl, max_h);
         lv_label_set_long_mode(s_notify_lbl, LV_LABEL_LONG_DOT);

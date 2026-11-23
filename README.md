@@ -81,8 +81,9 @@ written while presentation mode is on. Diagnostics go to `sensor.<name>_*`.
 Setting `input_text.<name>_notification` shows its text as a banner at the top of the screen
 (up to 3 lines; longer text ends in "..."). It wakes the screen and goes away after 30 s or
 on a tap; then the board empties the helper, so the same message can be sent again. A new
-message replaces the one shown. Up to 255 characters; the board's font has Latin letters
-only (no emoji). Line breaks: a real one from an automation, or `\n` typed into the helper
+message replaces the one shown. Up to 255 characters: Latin letters, common punctuation
+(– “ ” … € →) and about 270 common emoji (🧺 ⚠️ 🚪 🔥 ✅ ...), in the text colour; other emoji
+show as a box (the list is `EMOJI` in `tools/make_fonts.py`). Line breaks: a real one from an automation, or `\n` typed into the helper
 (`\\` for a backslash). Example automation action:
 
 ```yaml
