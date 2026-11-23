@@ -4337,7 +4337,7 @@ static void setup_note(const char *text)   /* NULL hides it; call with the LVGL 
             s_setup = lv_obj_create(lv_layer_top());
             lv_obj_remove_style_all(s_setup);
             lv_obj_set_size(s_setup, LV_PCT(100), LV_PCT(100));
-            lv_obj_set_style_bg_color(s_setup, lv_color_black(), 0);
+            set_screen_bg(s_setup, false);   /* the dark theme's background, whatever the theme */
             lv_obj_set_style_bg_opa(s_setup, LV_OPA_COVER, 0);
             lv_obj_set_style_pad_all(s_setup, 4, 0);   /* "screen_a1b2c3" fits 172 px */
             lv_obj_clear_flag(s_setup, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
