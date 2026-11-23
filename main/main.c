@@ -4741,7 +4741,7 @@ static int imu_rotation(int ax, int ay, int az)
     int inplane = axa > aya ? axa : aya;
     if (inplane < 4096 || aza > inplane) return -1;          /* < 0.5 g upright, or flat-ish */
     if (axa * 2 < aya * 3 && aya * 2 < axa * 3) return -1;   /* near a diagonal */
-    if (aya > axa) return ay > 0 ? LV_DISP_ROT_NONE : LV_DISP_ROT_180;
+    if (aya > axa) return ay < 0 ? LV_DISP_ROT_NONE : LV_DISP_ROT_180;
     return ax > 0 ? LV_DISP_ROT_270 : LV_DISP_ROT_90;
 }
 
