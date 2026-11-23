@@ -536,6 +536,8 @@ static bool board_set(const char *name)
     return true;
 }
 
+const char *ha_client_board_id(void) { return s_board_id; }
+
 static void board_init(void)
 {
     uint8_t mac[6] = {0};

@@ -3868,7 +3868,8 @@ static void cfg_build_screen(void)
         break;
     case CS_FW:
         cfg_value(cfg_row("Version", NULL, NULL, true), ota_version(), false);
-        cfg_value(cfg_row("Board", NULL, NULL, true), s_board_name[0] ? s_board_name : "-", false);
+        cfg_value(cfg_row("Name", NULL, NULL, true), s_board_name[0] ? s_board_name : "-", false);
+        cfg_value(cfg_row("ID", NULL, NULL, true), ha_client_board_id()[0] ? ha_client_board_id() : "-", false);
         cfg_button(s_fw_busy ? "Updating..." : LV_SYMBOL_DOWNLOAD " Update", fw_update_cb, !s_fw_busy);
         s_fw_status = lv_label_create(s_cfg_body);
         lv_obj_set_width(s_fw_status, CFG_INNER_W);

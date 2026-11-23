@@ -153,6 +153,9 @@ void ha_client_set_calendar_cb(ha_calendar_cb_t cb);  /* call before ha_client_s
  * Its pictures are fetched at once, then every HA_PICTURE_INTERVAL_MS while it stays shown. */
 void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint16_t h[LAYOUT_MAX_ROWS]);
 
+/* The board's id (screen_a1b2c3, from its MAC), "" before ha_client_start() */
+const char *ha_client_board_id(void);
+
 void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb, ha_sensor_cb_t scb,
                      ha_graph_cb_t gcb);
 void ha_client_set_theme(bool dark);   /* theme entity on = dark */
