@@ -22,4 +22,6 @@ int live_apply(live_t *l, const char *msg, int *changed, int max);
 /* Entity i as a /api/states-like JSON object ("state", "attributes" with friendly_name,
  * unit_of_measurement, icon, temperature, humidity, temperature_unit, min, max), so the
  * REST parsers can read it. Missing values are left out. False if i is unknown. */
+/* An input_text entity's whole state (unescaped, up to 255 chars); NULL for other entities or before the first state */
+const char *live_text(const live_t *l, int i);
 bool live_json(const live_t *l, int i, char *out, size_t n);

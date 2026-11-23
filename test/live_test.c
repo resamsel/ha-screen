@@ -95,8 +95,31 @@ static void test_climate(void)
     live_free(l);
 }
 
+static void test_full_text(void)
+{
+    static const char *ids[] = { "input_text.b_notification", "sensor.temp" };
+    live_t *l = live_new(ids, 2);
+    int ch[4];
+    assert(live_text(l, 0) == NULL);                      /* nothing received yet */
+    char msg[600], big[301];
+    memset(big, 'y', 300); big[300] = 0;
+    snprintf(msg, sizeof(msg), "{\"type\":\"event\",\"event\":{\"a\":{\"input_text.b_notification\":{\"s\":\"%s\",\"a\":{}}}}}", big);
+    assert(live_apply(l, msg, ch, 4) == 1);
+    assert(live_text(l, 0) && !strcmp(live_text(l, 0), big));   /* not cut to 48 */
+    /* differs only after char 48: still a change */
+    big[200] = 'z';
+    snprintf(msg, sizeof(msg), "{\"type\":\"event\",\"event\":{\"c\":{\"input_text.b_notification\":{\"+\":{\"s\":\"%s\"}}}}}", big);
+    assert(live_apply(l, msg, ch, 4) == 1 && live_text(l, 0)[200] == 'z');
+    assert(live_apply(l, "{\"type\":\"event\",\"event\":{\"c\":{\"input_text.b_notification\":{\"+\":{\"s\":\"Say \\\"hi\\\"\"}}}}}", ch, 4) == 1);
+    assert(!strcmp(live_text(l, 0), "Say \"hi\""));       /* quotes kept */
+    live_apply(l, "{\"type\":\"event\",\"event\":{\"a\":{\"sensor.temp\":{\"s\":\"1\",\"a\":{}}}}}", ch, 4);
+    assert(live_text(l, 1) == NULL);                      /* only input_text keeps it */
+    live_free(l);
+}
+
 int main(void)
 {
+    test_full_text();
     test_climate();
     test_initial_states();
     test_changes();
