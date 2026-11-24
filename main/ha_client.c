@@ -141,6 +141,7 @@ static int s_nav_page = -1;
 static char s_wnav_dash[32], s_wnav_view[32];   /* under s_view_lock */
 static int s_wnav_page = -1;
 static volatile bool s_nav_writing;           /* a write is queued: HA's old values are ignored */
+static volatile TickType_t s_nav_wrote = (TickType_t)0 - pdMS_TO_TICKS(HA_ECHO_HOLD_MS);      /* when the last write finished: echoes until HA_ECHO_HOLD_MS */
 
 static bool json_str(const char *json, const char *key, char *out, size_t n);
 static bool json_num(const char *json, const char *key, float *out);
@@ -165,7 +166,7 @@ static int nav_page(const char *json)
 
 static void nav_report(void)
 {
-    if (s_nav_cb && !s_nav_writing)
+    if (s_nav_cb && !s_nav_writing && xTaskGetTickCount() - s_nav_wrote >= pdMS_TO_TICKS(HA_ECHO_HOLD_MS))
         s_nav_cb(s_nav_dash_ok ? s_nav_dash : NULL, s_nav_view_ok ? s_nav_view : NULL, s_nav_page);
 }
 
@@ -2547,6 +2548,7 @@ static bool do_user(EventBits_t b)
             if (st >= 200 && st < 300) s_nav_page = pg;
         }
         /* missing helpers (optional) give errors: not a failure of the user's action */
+        s_nav_wrote = xTaskGetTickCount();
         if (!(xEventGroupGetBits(s_events) & NAV_BIT)) s_nav_writing = false;
     }
     if (b & ORIENT_BIT) {

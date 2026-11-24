@@ -182,6 +182,7 @@ static uint8_t s_rot = 0;          /* display rotation (lv_disp_rot_t: 0, 90, 18
 static bool s_auto_rot = false;    /* follow the board's physical orientation (IMU), kept in NVS */
 static bool s_autorot_pending;     /* switched here, not yet confirmed by HA */
 static void ha_autorot_changed(bool on);
+static void settle_poll(lv_timer_t *t);
 static void auto_rot_cb(lv_event_t *e);
 static void orient_save(void);
 static void imu_init(i2c_master_bus_handle_t bus);
@@ -303,6 +304,7 @@ void app_main(void)
         create_ui();
         button_init();
         imu_init(i2c_bus_handle);
+        lv_timer_create(settle_poll, 200, NULL);
         screen_init();   /* sets the backlight */
         lvgl_port_unlock();
     }
@@ -4338,12 +4340,27 @@ static void show_status(ha_state_t state)
     update_dot_pulse();
 }
 
+/* HA echoes each write as a state change, sometimes late: one from an earlier tap that
+ * arrives after the last write finished would undo the newer value (issue #43). So the
+ * pending flags are only cleared once no write finished for HA_ECHO_HOLD_MS. LVGL task. */
+static uint32_t s_settle_at;
+static bool s_settling;
+static void settle_poll(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_settling || lv_tick_elaps(s_settle_at) < HA_ECHO_HOLD_MS) return;
+    s_settling = false;
+    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = s_autorot_pending = false;
+}
+
 /* Network task: the request finished and the state was re-read */
 static void ha_update_done(bool ok, bool refresh)
 {
     if (!lvgl_port_lock(0)) return;
-    /* the local changes reached HA (or failed: the next poll brings HA's values back) */
-    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = s_autorot_pending = false;
+    /* the local changes reached HA (or failed: the next poll brings HA's values back); HA's
+     * values stay ignored a little longer, see settle_poll */
+    s_settle_at = lv_tick_get();
+    s_settling = true;
     if (!refresh) { lvgl_port_unlock(); return; }   /* a refresh still on its way stays busy */
     set_busy(false);
     s_refreshing = false;   /* errors show in the status icon and HA's log */

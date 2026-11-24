@@ -25,6 +25,9 @@
 #define HA_HTTP_TIMEOUT_MS   5000
 #define HA_HTTP_RETRIES      2
 #define HA_HTTP_RETRY_MS     500
+/* After the board wrote a setting or the page to HA, HA's values for it are ignored this long:
+ * the echoes of earlier quick taps arrive late and would undo the newer value (issue #43) */
+#define HA_ECHO_HOLD_MS      2500
 
 /* Board helpers (issue #24): each board's ID comes from its MAC (screen_a1b2c3); its name
  * prefixes the board's helpers; the HA helper input_text.<id> can hold the name. Name kitchen:
