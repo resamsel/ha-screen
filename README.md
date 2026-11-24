@@ -106,7 +106,9 @@ data:
 
 ### Firmware updates
 
-The config panel's last page (*Firmware*) shows the running version. *Update* installs the
+The config panel's *Firmware* page shows the running version and, after a check when the page
+opens (at most every 10 minutes), the latest release's; the list says *Update available* when
+they differ. *Update* installs the
 latest [release](https://github.com/resamsel/ha-screen/releases) (firmware and icons) over
 Wi-Fi and restarts; if
 the new firmware doesn't run for a minute, the board goes back to the previous one. Boards

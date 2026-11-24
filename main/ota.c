@@ -28,6 +28,9 @@ static const char *TAG = "ota";
 static volatile bool s_busy;
 static char s_url[256];
 static ota_cb_t s_cb;
+static bool s_check_only;        /* ota_check: report, never restart */
+static char s_latest[32];
+const char *ota_latest(void) { return s_latest; }
 
 const char *ota_version(void) { return esp_app_get_description()->version; }
 
@@ -235,7 +238,17 @@ static void check_task(void *arg)
     if (h) esp_https_ota_abort(h);
     if (err == ESP_OK) {
         const esp_partition_t *ip = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x41, "icons");
-        if (strcmp(desc.version, ota_version())) {
+        snprintf(s_latest, sizeof s_latest, "%s", desc.version);
+        bool newer = strcmp(desc.version, ota_version()) != 0;
+        if (s_check_only) {
+            if (newer) snprintf(msg, sizeof msg, "%.20s available", desc.version);
+            else snprintf(msg, sizeof msg, "Up to date");
+            report(newer ? OTA_AVAILABLE : OTA_UP_TO_DATE, 100, msg);
+            ha_client_resume();
+            s_busy = false;
+            vTaskDelete(NULL);
+        }
+        if (newer) {
             snprintf(msg, sizeof msg, "Updating to %.20s", desc.version);
             restart_into_update(msg);
         }
@@ -248,15 +261,19 @@ static void check_task(void *arg)
     vTaskDelete(NULL);
 }
 
-bool ota_start(const char *url, ota_cb_t cb)
+static bool start(const char *url, ota_cb_t cb, bool check_only)
 {
     if (s_busy) return false;
     s_busy = true;
+    s_check_only = check_only;
     snprintf(s_url, sizeof s_url, "%s", url);
     s_cb = cb;
     if (xTaskCreate(check_task, "ota", 8192, NULL, 4, NULL) != pdPASS) { s_busy = false; return false; }
     return true;
 }
+
+bool ota_start(const char *url, ota_cb_t cb) { return start(url, cb, false); }
+bool ota_check(const char *url, ota_cb_t cb) { return start(url, cb, true); }
 
 static EventGroupHandle_t s_wifi_ev;
 
