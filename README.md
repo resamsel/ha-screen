@@ -70,6 +70,7 @@ it exists and isn't empty, overrides it. The name prefixes the board's own helpe
 | `input_text.kitchen_view`                   | view path (empty = the first view)            |
 | `input_number.kitchen_page`                 | page, from 1 (min 1, max 8, step 1)           |
 | `input_text.kitchen_notification`           | a message to show (see Notifications)         |
+| `input_boolean.kitchen_auto_rotate`         | turn the screen with the board (see Auto-rotate) |
 
 Renaming the board in HA switches it to the new helpers right away; the last name is kept in
 flash. Dashboard, view and page are synced both ways (the last change wins): setting them in
@@ -82,7 +83,8 @@ Config panel > Display > Auto-rotate turns the screen with the board (all 4 dire
 upside-down too), read from the built-in IMU. Lying flat keeps the current rotation; a new one
 is taken once the board was held that way for 1.5 s. While it's on, the board writes portrait /
 landscape to `input_boolean.<name>_landscape` and ignores changes to it from HA; picking
-Portrait or Landscape turns auto-rotate off. The setting is kept on the board.
+Portrait or Landscape turns auto-rotate off. The setting is synced with
+`input_boolean.<name>_auto_rotate` when that helper exists.
 
 ### Notifications
 

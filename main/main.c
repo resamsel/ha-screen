@@ -180,6 +180,8 @@ static void create_status_icons(lv_obj_t *parent, int set)
 static bool s_landscape = false;   /* orientation, kept in NVS */
 static uint8_t s_rot = 0;          /* display rotation (lv_disp_rot_t: 0, 90, 180, 270), kept in NVS */
 static bool s_auto_rot = false;    /* follow the board's physical orientation (IMU), kept in NVS */
+static bool s_autorot_pending;     /* switched here, not yet confirmed by HA */
+static void ha_autorot_changed(bool on);
 static void auto_rot_cb(lv_event_t *e);
 static void orient_save(void);
 static void imu_init(i2c_master_bus_handle_t bus);
@@ -320,6 +322,7 @@ void app_main(void)
     ha_client_set_landscape_cb(ha_landscape_changed);
     ha_client_set_pres_cb(ha_pres_changed);
     ha_client_set_night_cb(ha_night_changed);
+    ha_client_set_autorot_cb(ha_autorot_changed);
     ha_client_set_notify_cb(ha_notify);
     ha_client_set_layout_cb(ha_layout_changed);
     ha_client_set_busy_cb(ha_busy);
@@ -3773,7 +3776,7 @@ typedef struct {
     uint32_t lists;                        /* hash of the view and dashboard titles */
     uint16_t pres_secs;
     uint8_t bri, night_pct, timeout;
-    bool light, landscape, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
+    bool light, landscape, auto_rot, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
     char board[32];
 } cfg_sig_t;
 static cfg_sig_t s_cfg_sig;
@@ -3794,7 +3797,7 @@ static void cfg_sig(cfg_sig_t *s)
     s->lists = cfg_hash(cfg_hash(2166136261u, s_views, s_nviews), s_dashes, s_ndash);
     s->pres_secs = s_pres_secs;
     s->bri = s_boot_bri; s->night_pct = s_night_pct; s->timeout = s_timeout_min;
-    s->light = s_light; s->landscape = s_landscape; s->theme_known = s_theme_known;
+    s->light = s_light; s->landscape = s_landscape; s->auto_rot = s_auto_rot; s->theme_known = s_theme_known;
     s->busy = s_busy; s->view_pending = s_view_pending; s->refreshing = s_refreshing;
     s->offline = s_offline_state; s->pres_on = s_pres_on; s->night = s_night; s->fw_busy = s_fw_busy;
     snprintf(s->board, sizeof(s->board), "%s", s_board_name);
@@ -4025,6 +4028,8 @@ static void orient_seg_cb(lv_event_t *e)
     if (s_auto_rot) {   /* a fixed orientation ends auto-rotate */
         s_auto_rot = false;
         orient_save();
+        s_autorot_pending = true;
+        ha_client_set_auto_rotate(false);
         if ((lv_event_get_user_data(e) != NULL) == s_landscape) { cfg_update(); return; }
     }
     orient_cb(e);
@@ -4338,7 +4343,7 @@ static void ha_update_done(bool ok, bool refresh)
 {
     if (!lvgl_port_lock(0)) return;
     /* the local changes reached HA (or failed: the next poll brings HA's values back) */
-    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = false;
+    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = s_autorot_pending = false;
     if (!refresh) { lvgl_port_unlock(); return; }   /* a refresh still on its way stays busy */
     set_busy(false);
     s_refreshing = false;   /* errors show in the status icon and HA's log */
@@ -4475,6 +4480,7 @@ static void local_settings(ha_local_t *o)
     o->pres_secs = s_pres_secs;
     o->bri_pct = s_boot_bri;
     o->night = s_night;
+    o->auto_rot = s_auto_rot;
     o->night_pct = s_night_pct;
     o->timeout_min = s_timeout_min;
     o->page = s_page;
@@ -4778,7 +4784,27 @@ static void auto_rot_cb(lv_event_t *e)
     if (s_swiped) return;
     s_auto_rot = !s_auto_rot;
     orient_save();
+    s_autorot_pending = true;
+    ha_client_set_auto_rotate(s_auto_rot);
     cfg_update();
+}
+
+/* HA's auto-rotate helper (LVGL task) */
+static void autorot_apply(void *arg)
+{
+    bool on = arg != NULL;
+    if (s_autorot_pending || on == s_auto_rot) return;
+    s_auto_rot = on;
+    orient_save();
+    cfg_update();
+}
+
+/* Network task: the auto-rotate helper's state */
+static void ha_autorot_changed(bool on)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (!s_autorot_pending) lv_async_call(autorot_apply, (void *)(intptr_t)on);
+    lvgl_port_unlock();
 }
 
 /* Network task: orientation entity state */

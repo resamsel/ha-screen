@@ -48,7 +48,7 @@ void ha_client_set_setup_cb(ha_setup_cb_t cb);  /* call before ha_client_start *
 typedef struct {
     bool dark, landscape, pres_on;
     int pres_secs, bri_pct, page;      /* page counted from 0 */
-    bool night;
+    bool night, auto_rot;
     int night_pct, timeout_min;        /* night brightness %, screen timeout in minutes */
     char dash[32], view[32];
 } ha_local_t;
@@ -88,6 +88,12 @@ void ha_client_set_presentation(bool on, int secs);
 typedef void (*ha_night_cb_t)(int night, int night_pct, int timeout_min);
 void ha_client_set_night_cb(ha_night_cb_t cb);  /* call before ha_client_start */
 void ha_client_set_night(bool night, int night_pct, int timeout_min);
+
+/* Auto-rotate (issue #42): input_boolean.<name>_auto_rotate. The callback runs with the helper's
+ * state whenever it's read; ha_client_set_auto_rotate writes it. */
+typedef void (*ha_autorot_cb_t)(bool on);
+void ha_client_set_autorot_cb(ha_autorot_cb_t cb);  /* call before ha_client_start */
+void ha_client_set_auto_rotate(bool on);
 
 /* Notifications (issue #19): the board's "<board> notification" input_text. The callback runs
  * on the HA task with each new non-empty message; ha_client_notify_clear() empties the helper
