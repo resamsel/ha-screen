@@ -3523,6 +3523,10 @@ static void ha_night_changed(int night, int pct, int timeout_min)
 /* ---- Firmware page: version and OTA update (issue #14) ---- */
 static lv_obj_t *s_fw_status;
 static bool s_fw_busy;
+static bool s_fw_avail;            /* the last check found another version (issue #45) */
+static bool s_fw_checked;          /* a check ran since boot */
+static uint32_t s_fw_check_at;     /* its tick */
+#define FW_CHECK_EVERY_MS (10 * 60 * 1000)
 
 static lv_timer_t *s_fw_timer;
 static volatile bool s_fw_dirty;
@@ -3546,8 +3550,20 @@ static void fw_progress(ota_state_t st, int pct, const char *msg)
     if (!lvgl_port_lock(0)) return;
     snprintf(s_fw_msg, sizeof s_fw_msg, "%s", msg);
     s_fw_busy = st == OTA_CHECKING || st == OTA_DOWNLOADING || st == OTA_REBOOTING;
+    if (st == OTA_AVAILABLE || st == OTA_UP_TO_DATE) s_fw_avail = st == OTA_AVAILABLE;
     s_fw_dirty = true;
     lvgl_port_unlock();
+}
+
+/* Opening the Firmware screen looks for a new version, at most every FW_CHECK_EVERY_MS */
+static void fw_auto_check(void)
+{
+    if (s_fw_busy || (s_fw_checked && lv_tick_elaps(s_fw_check_at) < FW_CHECK_EVERY_MS)) return;
+    if (!ota_check(HA_OTA_URL, fw_progress)) return;
+    s_fw_checked = true;
+    s_fw_check_at = lv_tick_get();
+    s_fw_busy = true;
+    snprintf(s_fw_msg, sizeof s_fw_msg, "Checking for updates...");
 }
 
 static void fw_update_cb(lv_event_t *e)
@@ -3778,7 +3794,7 @@ typedef struct {
     uint32_t lists;                        /* hash of the view and dashboard titles */
     uint16_t pres_secs;
     uint8_t bri, night_pct, timeout;
-    bool light, landscape, auto_rot, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
+    bool fw_avail, light, landscape, auto_rot, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
     char board[32];
 } cfg_sig_t;
 static cfg_sig_t s_cfg_sig;
@@ -3801,7 +3817,7 @@ static void cfg_sig(cfg_sig_t *s)
     s->bri = s_boot_bri; s->night_pct = s_night_pct; s->timeout = s_timeout_min;
     s->light = s_light; s->landscape = s_landscape; s->auto_rot = s_auto_rot; s->theme_known = s_theme_known;
     s->busy = s_busy; s->view_pending = s_view_pending; s->refreshing = s_refreshing;
-    s->offline = s_offline_state; s->pres_on = s_pres_on; s->night = s_night; s->fw_busy = s_fw_busy;
+    s->offline = s_offline_state; s->pres_on = s_pres_on; s->night = s_night; s->fw_busy = s_fw_busy; s->fw_avail = s_fw_avail;
     snprintf(s->board, sizeof(s->board), "%s", s_board_name);
 }
 
@@ -3841,7 +3857,7 @@ static void cfg_build_home(void)
     if (s_pres_on) secs_text(b, sizeof(b), s_pres_secs);
     cfg_nav("Presentation", s_pres_on ? b : "Off", CS_PRES, true);
     cfg_nav("Night", s_night ? "On" : "Off", CS_NIGHT, true);
-    cfg_nav("Firmware", ota_version(), CS_FW, true);
+    cfg_nav("Firmware", s_fw_avail ? "Update available" : ota_version(), CS_FW, true);
 }
 
 static void cfg_build_screen(void)
@@ -3884,9 +3900,11 @@ static void cfg_build_screen(void)
         break;
     case CS_FW:
         cfg_value(cfg_row("Version", NULL, NULL, true), ota_version(), false);
+        cfg_value(cfg_row("Latest", NULL, NULL, true), ota_latest()[0] ? ota_latest() : "-", false);
         cfg_value(cfg_row("Name", NULL, NULL, true), s_board_name[0] ? s_board_name : "-", false);
         cfg_value(cfg_row("ID", NULL, NULL, true), ha_client_board_id()[0] ? ha_client_board_id() : "-", false);
-        cfg_button(s_fw_busy ? "Updating..." : LV_SYMBOL_DOWNLOAD " Update", fw_update_cb, !s_fw_busy);
+        cfg_button(s_fw_busy ? "Checking..." : s_fw_avail ? LV_SYMBOL_DOWNLOAD " Update" : LV_SYMBOL_REFRESH " Check again",
+                   fw_update_cb, !s_fw_busy);
         s_fw_status = lv_label_create(s_cfg_body);
         lv_obj_set_width(s_fw_status, CFG_INNER_W);
         lv_obj_set_style_pad_top(s_fw_status, 8, 0);
@@ -3979,7 +3997,14 @@ static void cfg_show(int scr)
 
 static void cfg_back(void) { cfg_show(s_cfg_parent[s_cfg_scr]); }
 
-static void cfg_nav_cb(lv_event_t *e) { if (!s_swiped) cfg_show((int)(intptr_t)lv_event_get_user_data(e)); }
+static void fw_auto_check(void);
+static void cfg_nav_cb(lv_event_t *e)
+{
+    if (s_swiped) return;
+    int scr = (int)(intptr_t)lv_event_get_user_data(e);
+    if (scr == CS_FW) fw_auto_check();
+    cfg_show(scr);
+}
 static void cfg_slide_to(bool open);
 /* The header: back on a detail screen, closes the panel on the list */
 static void cfg_back_cb(lv_event_t *e)
