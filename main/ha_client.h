@@ -48,7 +48,7 @@ void ha_client_set_setup_cb(ha_setup_cb_t cb);  /* call before ha_client_start *
 typedef struct {
     bool dark, landscape, pres_on;
     int pres_secs, bri_pct, page;      /* page counted from 0 */
-    bool night, auto_rot, motion;
+    bool night, auto_rot, motion, saver;
     int night_pct, timeout_min;        /* night brightness %, screen timeout in minutes */
     char dash[32], view[32];
 } ha_local_t;
@@ -102,6 +102,10 @@ void ha_client_set_imu(int ax, int ay, int az, int gx, int gy, int gz);
 /* Motion wake (issue #58): input_boolean.<name>_motion_wake, same pattern as auto-rotate */
 void ha_client_set_motion_cb(ha_autorot_cb_t cb);  /* call before ha_client_start */
 void ha_client_set_motion_wake(bool on);
+
+/* Clock screensaver (issue #48): input_boolean.<name>_screensaver, same pattern */
+void ha_client_set_saver_cb(ha_autorot_cb_t cb);  /* call before ha_client_start */
+void ha_client_set_screensaver(bool on);
 
 /* Notifications (issue #19): the board's "<board> notification" input_text. The callback runs
  * on the HA task with each new non-empty message; ha_client_notify_clear() empties the helper

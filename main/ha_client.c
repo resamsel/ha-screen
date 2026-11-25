@@ -64,7 +64,8 @@ static const char *TAG = "ha";
 #define NOTIFY_BIT  BIT18 /* a notification was dismissed: clear the helper */
 #define AUTOROT_BIT BIT19 /* auto-rotate switched on the board */
 #define MOTION_BIT  BIT20 /* motion wake switched on the board */
-#define USER_BITS   (AUTOROT_BIT | MOTION_BIT | TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | NOTIFY_BIT)
+#define SAVER_BIT   BIT21 /* clock screensaver switched on the board */
+#define USER_BITS   (AUTOROT_BIT | MOTION_BIT | SAVER_BIT | TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | NOTIFY_BIT)
 
 static volatile float s_set_value;
 static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
@@ -83,6 +84,9 @@ static volatile bool s_set_autorot;
 static ha_autorot_cb_t s_motion_cb;
 void ha_client_set_motion_cb(ha_autorot_cb_t cb) { s_motion_cb = cb; }
 static volatile bool s_set_motion;
+static ha_autorot_cb_t s_saver_cb;
+void ha_client_set_saver_cb(ha_autorot_cb_t cb) { s_saver_cb = cb; }
+static volatile bool s_set_saver;
 static volatile int s_set_night, s_set_night_pct, s_set_scr_to;
 static volatile bool s_set_pres_on;
 static volatile int s_set_pres_secs;
@@ -471,19 +475,19 @@ static char s_board_raw[32];            /* the name as typed in the setup portal
 static bool s_name_push;                /* portal saved a name: write it to the HA helper */
 /* Bump when a firmware adds board helpers: boards set up before then create the new ones
  * once (2: night, night brightness, screen timeout, issue #17; 3: notification, issue #19; 4: auto-rotate, issue #42) */
-#define HELPERS_VERSION 5
+#define HELPERS_VERSION 6
 static bool s_mkhelp;                   /* portal saved: create the missing helpers once */
 static ha_local_cb_t s_local_cb;
 void ha_client_set_local_cb(ha_local_cb_t cb) { s_local_cb = cb; }
 static volatile bool s_name_changed;    /* live event: the name entity changed */
 static struct {
     char theme[80], land[80], pres[80], pres_int[80], bri[80], dash[80], view[80], page[80];
-    char night[80], night_bri[80], scr_to[80], notify[80], autorot[80], motion[80];
+    char night[80], night_bri[80], scr_to[80], notify[80], autorot[80], motion[80], saver[80];
 } s_ent;
 /* Which board helpers HA has: 1 yes, 0 no (404), -1 not asked yet. Every helper is optional:
  * without one the board keeps that setting itself, and writes to a missing one are skipped. */
-enum { H_THEME, H_LAND, H_PRES, H_PRES_INT, H_BRI, H_DASH, H_VIEW, H_PAGE, H_NIGHT, H_NIGHT_BRI, H_SCR_TO, H_NOTIFY, H_AUTOROT, H_MOTION, H_COUNT };
-static int8_t s_has[H_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+enum { H_THEME, H_LAND, H_PRES, H_PRES_INT, H_BRI, H_DASH, H_VIEW, H_PAGE, H_NIGHT, H_NIGHT_BRI, H_SCR_TO, H_NOTIFY, H_AUTOROT, H_MOTION, H_SAVER, H_COUNT };
+static int8_t s_has[H_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static bool has(int h) { return s_has[h] != 0; }
 static ha_setup_cb_t s_setup_cb;
 void ha_client_set_setup_cb(ha_setup_cb_t cb) { s_setup_cb = cb; }
@@ -507,6 +511,7 @@ static void ent_build(void)
     snprintf(s_ent.notify, 80, "input_text.%s_notification", b);
     snprintf(s_ent.autorot, 80, "input_boolean.%s_auto_rotate", b);
     snprintf(s_ent.motion, 80, "input_boolean.%s_motion_wake", b);
+    snprintf(s_ent.saver, 80, "input_boolean.%s_screensaver", b);
 }
 
 /* Like HA's object IDs: lowercase, runs of anything else become one '_', no '_' at the ends */
@@ -1116,7 +1121,7 @@ static void fetch_button(int pg, int row);
  * stop so it reaches HA at once; they are picked up again on the next poll */
 static bool user_waiting(void)
 {
-    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT);
+    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT | SAVER_BIT);
 }
 
 static void parse_brightness(const char *json)
@@ -1163,7 +1168,7 @@ static void name_push_done(void)
 /* For the log, indexed by H_*: one per helper, or the build fails */
 static const char *const HELPER_NAME[] = {
     "theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page",
-    "night", "night brightness", "screen timeout", "notification", "auto rotate", "motion wake",
+    "night", "night brightness", "screen timeout", "notification", "auto rotate", "motion wake", "screensaver",
 };
 _Static_assert(sizeof(HELPER_NAME) / sizeof(HELPER_NAME[0]) == H_COUNT, "a name for every helper");
 
@@ -1207,6 +1212,7 @@ static void create_helpers(void)
         case H_SCR_TO: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s screen timeout\",\"min\":0,\"max\":240,\"step\":1,\"mode\":\"box\",\"unit_of_measurement\":\"min\",\"icon\":\"mdi:timer-off-outline\",\"initial\":%d", b, L.timeout_min); break;
         case H_AUTOROT: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s auto rotate\",\"icon\":\"mdi:screen-rotation\",\"initial\":%s", b, L.auto_rot ? "true" : "false"); break;
         case H_MOTION: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s motion wake\",\"icon\":\"mdi:gesture-tap-hold\",\"initial\":%s", b, L.motion ? "true" : "false"); break;
+        case H_SAVER: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s screensaver\",\"icon\":\"mdi:clock-outline\",\"initial\":%s", b, L.saver ? "true" : "false"); break;
         case H_NOTIFY: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s notification\",\"max\":255,\"icon\":\"mdi:message-alert\",\"initial\":\"\"", b); break;
         }
         char *res = dash_ws_call(d, body);
@@ -1324,6 +1330,10 @@ static bool fetch_state(void)
     if (helper_get(s_ent.motion, r, H_MOTION) == 200 && s_motion_cb) {
         if (strstr(r->buf, "\"state\":\"on\"")) s_motion_cb(true);
         else if (strstr(r->buf, "\"state\":\"off\"")) s_motion_cb(false);
+    }
+    if (helper_get(s_ent.saver, r, H_SAVER) == 200 && s_saver_cb) {
+        if (strstr(r->buf, "\"state\":\"on\"")) s_saver_cb(true);
+        else if (strstr(r->buf, "\"state\":\"off\"")) s_saver_cb(false);
     }
 
     if (s_has[H_NOTIFY] < 0) helper_get(s_ent.notify, r, H_NOTIFY);   /* only whether it's there: messages come live */
@@ -2407,6 +2417,7 @@ static bool live_start(void)
         ids[n++] = s_ent.notify;
         ids[n++] = s_ent.autorot;
         ids[n++] = s_ent.motion;
+        ids[n++] = s_ent.saver;
     }
     for (int pg = 0; pg < s_layout.count; pg++)
         for (int i = 0; i < s_layout.pages[pg].count; i++) {
@@ -2478,6 +2489,8 @@ static void live_dispatch(const char *id, const char *json)
         if (s_autorot_cb && (!strcmp(st, "on") || !strcmp(st, "off"))) s_autorot_cb(!strcmp(st, "on"));
     } else if (!strcmp(id, s_ent.motion)) {
         if (s_motion_cb && (!strcmp(st, "on") || !strcmp(st, "off"))) s_motion_cb(!strcmp(st, "on"));
+    } else if (!strcmp(id, s_ent.saver)) {
+        if (s_saver_cb && (!strcmp(st, "on") || !strcmp(st, "off"))) s_saver_cb(!strcmp(st, "on"));
     } else if (!strcmp(id, s_ent.dash)) {
         s_nav_dash_ok = nav_text(json, s_nav_dash, sizeof(s_nav_dash));
         nav_report();
@@ -2559,7 +2572,7 @@ static bool do_user(EventBits_t b)
     snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", s_ent.theme);
     bool ok = true;
     if (!s_board[0]) {                    /* no name: no helpers to write */
-        b &= ~(SETBRI_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | ORIENT_BIT | TOGGLE_BIT | AUTOROT_BIT | MOTION_BIT);
+        b &= ~(SETBRI_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | ORIENT_BIT | TOGGLE_BIT | AUTOROT_BIT | MOTION_BIT | SAVER_BIT);
         s_nav_writing = false;
     }
     if (!has(H_BRI)) b &= ~SETBRI_BIT;    /* missing helpers: the board keeps the setting */
@@ -2569,6 +2582,7 @@ static bool do_user(EventBits_t b)
     if (!has(H_LAND)) b &= ~ORIENT_BIT;
     if (!has(H_AUTOROT)) b &= ~AUTOROT_BIT;
     if (!has(H_MOTION)) b &= ~MOTION_BIT;
+    if (!has(H_SAVER)) b &= ~SAVER_BIT;
     if (!has(H_THEME)) b &= ~TOGGLE_BIT;
     if (!s_board[0] || !has(H_NOTIFY)) b &= ~NOTIFY_BIT;
     if (b & SETBRI_BIT) {
@@ -2599,6 +2613,12 @@ static bool do_user(EventBits_t b)
         char sb[128];
         snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\"}", s_ent.motion);
         int st = ha_service(s_set_motion ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off", sb);
+        ok &= st >= 200 && st < 300;
+    }
+    if (b & SAVER_BIT) {
+        char sb[128];
+        snprintf(sb, sizeof(sb), "{\"entity_id\":\"%s\"}", s_ent.saver);
+        int st = ha_service(s_set_saver ? "/api/services/input_boolean/turn_on" : "/api/services/input_boolean/turn_off", sb);
         ok &= st >= 200 && st < 300;
     }
     if (b & NIGHT_BIT) {
@@ -2769,7 +2789,7 @@ static void ha_task(void *arg)
             if (b & USER_BITS && !(b & ~USER_BITS)) {   /* taps only: over the websocket */
                 /* no busy indicator: the HA dot stays steady green while live */
                 bool ok = do_user(b);
-                bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT);
+                bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT | SAVER_BIT);
                 if (updated && s_done_cb) s_done_cb(ok, false);
                 if (s_err_cb) s_err_cb(s_err);
                 continue;
@@ -2791,7 +2811,7 @@ static void ha_task(void *arg)
         }
         round_at = xTaskGetTickCount();
         if (s_busy_cb && !quiet) s_busy_cb(true);
-        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT);
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT | SAVER_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
         if (refresh || (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)))) {
@@ -2799,7 +2819,7 @@ static void ha_task(void *arg)
             layout_at = xTaskGetTickCount();
             layout_read = true;
         }
-        bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT);
+        bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT | MOTION_BIT | SAVER_BIT);
         bool ok = true;
         ok &= do_user(b);
         if (updated) {
@@ -2967,6 +2987,12 @@ void ha_client_set_motion_wake(bool on)
 {
     s_set_motion = on;
     if (s_events) xEventGroupSetBits(s_events, MOTION_BIT);
+}
+
+void ha_client_set_screensaver(bool on)
+{
+    s_set_saver = on;
+    if (s_events) xEventGroupSetBits(s_events, SAVER_BIT);
 }
 
 void ha_client_set_brightness(float value)
