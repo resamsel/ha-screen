@@ -21,3 +21,5 @@ gcc -std=c11 -Wall -Werror -I main main/imu.c test/imu_test.c -lm -o /tmp/imu_te
 /tmp/imu_test
 gcc -std=c11 -Wall -Werror -I main -I $J main/theme.c $J/cJSON.c test/theme_test.c -lm -o /tmp/theme_test
 /tmp/theme_test
+gcc -std=c11 -Wall -Werror -I main main/curve.c test/curve_test.c -lm -o /tmp/curve_test
+/tmp/curve_test
