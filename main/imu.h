@@ -9,5 +9,5 @@
  * "landscape", "landscape_flipped", "flat" (screen up), "face_down", or "tilted" */
 const char *imu_orientation(int ax, int ay, int az);
 
-/* Angle in degrees between the screen's normal and straight up: 0 flat, 90 upright, 180 face down */
+/* Angle in degrees between the screen's normal (-z) and straight up: 0 flat, 90 upright, 180 face down */
 float imu_tilt(int ax, int ay, int az);
