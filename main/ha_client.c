@@ -115,9 +115,9 @@ void ha_client_set_light_cb(ha_light_cb_t cb) { s_light_cb = cb; }
 static ha_todo_cb_t s_todo_cb;
 void ha_client_set_todo_cb(ha_todo_cb_t cb) { s_todo_cb = cb; }
 static portMUX_TYPE s_todo_lock = portMUX_INITIALIZER_UNLOCKED;
-static int s_todo_page = -1, s_todo_row;
-static char s_todo_uid[40];
-static bool s_todo_done;
+typedef struct { int8_t page, row; bool done; char uid[40]; } todo_req_t;
+static todo_req_t s_todo_q[8];     /* taps not yet sent: quick ones must not overwrite each other */
+static int s_todo_n;
 static volatile int s_lt_page = -1, s_lt_row = -1, s_lt_pct;
 static ha_weather_cb_t s_weather_cb;
 void ha_client_set_weather_cb(ha_weather_cb_t cb) { s_weather_cb = cb; }
@@ -2647,22 +2647,26 @@ static bool do_user(EventBits_t b)
         }
     }
     if (b & TODO_BIT) {
-        char uid[40];
-        int pg, row;
-        bool done;
+        static todo_req_t q[8];
         taskENTER_CRITICAL(&s_todo_lock);
-        pg = s_todo_page; row = s_todo_row; done = s_todo_done;
-        memcpy(uid, s_todo_uid, sizeof(uid));
+        int n = s_todo_n;
+        memcpy(q, s_todo_q, n * sizeof(q[0]));
+        s_todo_n = 0;
         taskEXIT_CRITICAL(&s_todo_lock);
-        if (pg >= 0 && pg < s_layout.count && row >= 0 && row < s_layout.pages[pg].count &&
-            s_layout.pages[pg].items[row].kind == LAYOUT_TODO) {
+        uint64_t reread = 0;              /* bit pg * LAYOUT_MAX_ROWS + row: lists to read back */
+        for (int k = 0; k < n; k++) {
+            int pg = q[k].page, row = q[k].row;
+            if (pg < 0 || pg >= s_layout.count || row < 0 || row >= s_layout.pages[pg].count ||
+                s_layout.pages[pg].items[row].kind != LAYOUT_TODO) continue;
             char tb[192];
             snprintf(tb, sizeof(tb), "{\"entity_id\":\"%s\",\"item\":\"%s\",\"status\":\"%s\"}",
-                     s_layout.pages[pg].items[row].entity, uid, done ? "completed" : "needs_action");
+                     s_layout.pages[pg].items[row].entity, q[k].uid, q[k].done ? "completed" : "needs_action");
             int st = ha_service("/api/services/todo/update_item", tb);
             ok &= st >= 200 && st < 300;
-            fetch_todo(pg, row);          /* the list as HA has it now (also undoes a failed tap) */
+            reread |= 1ull << (pg * LAYOUT_MAX_ROWS + row);
         }
+        for (int g = 0; g < LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS; g++)   /* as HA has them now (also undoes a failed tap) */
+            if (reread >> g & 1) fetch_todo(g / LAYOUT_MAX_ROWS, g % LAYOUT_MAX_ROWS);
     }
     if (b & MEDIA_BIT) {
         int pg = s_med_page, row = s_med_row;
@@ -2886,10 +2890,15 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
 void ha_client_todo_set(int page, int row, const char *uid, bool done)
 {
     taskENTER_CRITICAL(&s_todo_lock);
-    s_todo_page = page;
-    s_todo_row = row;
-    snprintf(s_todo_uid, sizeof(s_todo_uid), "%s", uid);
-    s_todo_done = done;
+    int k = 0;                            /* the same item again: its latest state */
+    while (k < s_todo_n && (s_todo_q[k].page != page || s_todo_q[k].row != row || strcmp(s_todo_q[k].uid, uid))) k++;
+    if (k == s_todo_n && s_todo_n < (int)(sizeof(s_todo_q) / sizeof(s_todo_q[0]))) s_todo_n++;
+    if (k < s_todo_n) {
+        s_todo_q[k].page = (int8_t)page;
+        s_todo_q[k].row = (int8_t)row;
+        s_todo_q[k].done = done;
+        snprintf(s_todo_q[k].uid, sizeof(s_todo_q[k].uid), "%s", uid);
+    }
     taskEXIT_CRITICAL(&s_todo_lock);
     if (s_events) xEventGroupSetBits(s_events, TODO_BIT);
 }
