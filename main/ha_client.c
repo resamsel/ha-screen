@@ -39,6 +39,7 @@ static void add_error(const char *fmt, ...);
 
 #include "provision.h"
 #include "notify.h"
+#include "imu.h"
 
 static const char *TAG = "ha";
 
@@ -662,6 +663,69 @@ static void report_errors(void)
     }
 }
 
+/* ---- IMU (issue #39): main.c hands over each reading, the HA task posts them ---- */
+static portMUX_TYPE s_imu_lock = portMUX_INITIALIZER_UNLOCKED;
+static int s_imu[6];
+static bool s_imu_have;
+static const char *s_imu_posted;   /* orientation last posted, NULL = none yet */
+
+void ha_client_set_imu(int ax, int ay, int az, int gx, int gy, int gz)
+{
+    portENTER_CRITICAL(&s_imu_lock);
+    s_imu[0] = ax; s_imu[1] = ay; s_imu[2] = az; s_imu[3] = gx; s_imu[4] = gy; s_imu[5] = gz;
+    s_imu_have = true;
+    portEXIT_CRITICAL(&s_imu_lock);
+}
+
+static bool imu_get(int v[6])
+{
+    portENTER_CRITICAL(&s_imu_lock);
+    bool have = s_imu_have;
+    memcpy(v, s_imu, sizeof(s_imu));
+    portEXIT_CRITICAL(&s_imu_lock);
+    return have;
+}
+
+/* Orientation, posted every round it differs from the last one posted (or with all = always) */
+static void report_orientation(bool all)
+{
+    int v[6];
+    if (!imu_get(v)) return;
+    const char *o = imu_orientation(v[0], v[1], v[2]);
+    if (!all && o == s_imu_posted) return;
+    char body[256];
+    snprintf(body, sizeof(body), "{\"state\":\"%s\",\"attributes\":{\"friendly_name\":\"%s orientation\","
+             "\"device_class\":\"enum\",\"options\":[\"portrait\",\"portrait_flipped\",\"landscape\","
+             "\"landscape_flipped\",\"flat\",\"face_down\",\"tilted\"],\"icon\":\"mdi:phone-rotate-portrait\"}}",
+             o, diag_name());
+    diag_post("orientation", body);
+    s_imu_posted = o;
+}
+
+static void report_imu(void)
+{
+    int v[6];
+    if (!imu_get(v)) return;
+    char body[384];
+    float ax = IMU_ACC_G(v[0]), ay = IMU_ACC_G(v[1]), az = IMU_ACC_G(v[2]);
+    snprintf(body, sizeof(body), "{\"state\":%.2f,\"attributes\":{\"friendly_name\":\"%s acceleration\","
+             "\"unit_of_measurement\":\"g\",\"state_class\":\"measurement\",\"icon\":\"mdi:axis-arrow\","
+             "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
+             sqrtf(ax * ax + ay * ay + az * az), diag_name(), ax, ay, az);
+    diag_post("acceleration", body);
+    float gx = IMU_GYR_DPS(v[3]), gy = IMU_GYR_DPS(v[4]), gz = IMU_GYR_DPS(v[5]);
+    snprintf(body, sizeof(body), "{\"state\":%.1f,\"attributes\":{\"friendly_name\":\"%s gyroscope\","
+             "\"unit_of_measurement\":\"°/s\",\"state_class\":\"measurement\",\"icon\":\"mdi:rotate-3d-variant\","
+             "\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}}",
+             sqrtf(gx * gx + gy * gy + gz * gz), diag_name(), gx, gy, gz);
+    diag_post("gyroscope", body);
+    snprintf(body, sizeof(body), "{\"state\":%.0f,\"attributes\":{\"friendly_name\":\"%s tilt\","
+             "\"unit_of_measurement\":\"°\",\"state_class\":\"measurement\",\"icon\":\"mdi:angle-acute\"}}",
+             imu_tilt(v[0], v[1], v[2]), diag_name());
+    diag_post("tilt", body);
+    report_orientation(true);
+}
+
 static void report_diag(void)
 {
     char body[512];
@@ -692,6 +756,7 @@ static void report_diag(void)
              "\"built\":\"%.15s %.15s\",\"idf\":\"%.31s\",\"reset_reason\":\"%s\"}}",
              app->version, diag_name(), app->date, app->time, app->idf_ver, reset_reason_str(esp_reset_reason()));
     diag_post("firmware", body);
+    report_imu();
 }
 
 /* Find key in JSON text and parse the number right after it */
@@ -2738,6 +2803,8 @@ static void ha_task(void *arg)
                 report_diag();
                 diag_sent = true;
                 diag_at = now;
+            } else if (fetched && diag_sent && !user_waiting()) {
+                report_orientation(false);   /* in between: only when it changed */
             }
         }
         for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++)

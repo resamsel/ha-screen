@@ -17,3 +17,5 @@ gcc -std=c11 -Wall -Werror -I main main/screen.c test/screen_test.c -o /tmp/scre
 /tmp/screen_test
 gcc -std=gnu11 -Wall -Werror -I main main/cal_parse.c test/cal_parse_test.c -o /tmp/cal_parse_test
 TZ=UTC /tmp/cal_parse_test
+gcc -std=c11 -Wall -Werror -I main main/imu.c test/imu_test.c -lm -o /tmp/imu_test
+/tmp/imu_test

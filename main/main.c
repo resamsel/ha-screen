@@ -4797,9 +4797,10 @@ static void imu_poll(lv_timer_t *t)
 {
     static int cand = -1;
     static uint32_t since;
-    if (!s_auto_rot) { cand = -1; return; }
     qmi8658_data_t d;
     if (!bsp_qmi8658_read_data(&d)) return;
+    ha_client_set_imu(d.acc_x, d.acc_y, d.acc_z, d.gyr_x, d.gyr_y, d.gyr_z);   /* HA sensors, #39 */
+    if (!s_auto_rot) { cand = -1; return; }
     int r = imu_rotation(d.acc_x, d.acc_y, d.acc_z);
     if (r != cand) {
         ESP_LOGD(TAG, "imu %d %d %d -> %d", d.acc_x, d.acc_y, d.acc_z, r);

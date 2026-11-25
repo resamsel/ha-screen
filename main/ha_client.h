@@ -95,6 +95,10 @@ typedef void (*ha_autorot_cb_t)(bool on);
 void ha_client_set_autorot_cb(ha_autorot_cb_t cb);  /* call before ha_client_start */
 void ha_client_set_auto_rotate(bool on);
 
+/* Latest raw IMU reading (issue #39), from any task. Posted to HA as sensor.<board>_acceleration,
+ * _gyroscope and _tilt with the diagnostics; _orientation also as soon as it changes. */
+void ha_client_set_imu(int ax, int ay, int az, int gx, int gy, int gz);
+
 /* Notifications (issue #19): the board's "<board> notification" input_text. The callback runs
  * on the HA task with each new non-empty message; ha_client_notify_clear() empties the helper
  * once the message is dismissed. */
