@@ -14,15 +14,15 @@ int main(void)
     EQS(imu_orientation(0, G, 0), "portrait_flipped");
     EQS(imu_orientation(-G, 0, 0), "landscape");
     EQS(imu_orientation(G, 0, 0), "landscape_flipped");
-    EQS(imu_orientation(100, 200, G), "flat");
-    EQS(imu_orientation(100, 200, -G), "face_down");
+    EQS(imu_orientation(100, 200, -G), "flat");   /* screen up: z reads -1 g */
+    EQS(imu_orientation(100, 200, G), "face_down");
     EQS(imu_orientation(G / 2, -G / 2, 0), "tilted");      /* diagonal */
     EQS(imu_orientation(0, -G / 2, G * 3 / 4), "tilted");  /* half way to flat */
     EQS(imu_orientation(0, 0, 0), "tilted");
-    NEAR(imu_tilt(0, 0, G), 0.0f);
+    NEAR(imu_tilt(0, 0, -G), 0.0f);
     NEAR(imu_tilt(0, -G, 0), 90.0f);
-    NEAR(imu_tilt(0, 0, -G), 180.0f);
-    NEAR(imu_tilt(0, -G, G), 45.0f);
+    NEAR(imu_tilt(0, 0, G), 180.0f);
+    NEAR(imu_tilt(0, -G, -G), 45.0f);
     NEAR(IMU_ACC_G(G), 1.0f);
     NEAR(IMU_GYR_DPS(6400), 100.0f);
     {
