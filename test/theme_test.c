@@ -33,6 +33,13 @@ int main(void)
     assert(!theme_parse(j, "Missing", &t) && !t.has[0] && !t.has[1]);
     assert(!theme_parse("{\"result\":{\"themes\":{},\"default_theme\":\"default\"}}", "", &t));
     assert(!theme_parse(NULL, "", &t));
+    /* the wanted theme among others with nested objects, braces in strings and escapes */
+    const char *big = "{\"result\":{\"themes\":{\"A\":{\"x\":\"}{\\\"\",\"modes\":{\"dark\":{\"primary-color\":\"#111111\"}}},"
+                      "\"Ocean Blue\":{\"primary-color\":\"#0077be\"},\"Z\":{\"primary-color\":\"#222222\"}},"
+                      "\"default_theme\":\"default\",\"default_dark_theme\":null}}";
+    assert(theme_parse(big, "Ocean Blue", &t) && t.rgb[0][THEME_PRIMARY] == 0x0077BE && t.rgb[1][THEME_PRIMARY] == 0x0077BE);
+    assert(theme_parse(big, "Z", &t) && t.rgb[1][THEME_PRIMARY] == 0x222222);
+    assert(!theme_parse(big, "Ocean", &t));
     puts("theme_test: ok");
     return 0;
 }
