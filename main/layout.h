@@ -11,6 +11,8 @@
 #define LAYOUT_IMAGE_LEN     128
 #define LAYOUT_MAX_CALS      4      /* calendar cards */
 #define LAYOUT_CALS_LEN      192    /* a calendar card's calendar.* ids, comma-separated */
+#define LAYOUT_MAX_CONDS     12     /* visibility / conditional-card conditions (issue #57) */
+#define LAYOUT_COND_LEN      40     /* a condition's state values, '|'-separated */
 
 typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER, LAYOUT_GAUGE, LAYOUT_GLANCE, LAYOUT_CALENDAR,
                LAYOUT_ENTITIES /* entities card: one item (row) per entity */,
@@ -49,6 +51,16 @@ typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT
 #define LAYOUT_CAL_WEEK       0x02   /* listWeek: the next 7 days' events, by day */
 #define LAYOUT_CAL_FLAGS      0x03
 
+/* One condition atom: a card or page is shown when all atoms in its cond mask hold */
+typedef enum { LAYOUT_COND_STATE, LAYOUT_COND_NOT, LAYOUT_COND_ABOVE, LAYOUT_COND_BELOW } layout_cond_op_t;
+typedef struct {
+    char entity[64];        /* "" = unused slot */
+    uint8_t op;             /* layout_cond_op_t */
+    char value[LAYOUT_COND_LEN];   /* STATE / NOT: one of these states ('|'-separated) */
+    float num;              /* ABOVE / BELOW: the limit */
+} layout_cond_t;
+typedef uint16_t layout_mask_t;   /* bit k = ha_layout_t.conds[k] */
+
 /* what a tap on a button does: toggle/run/activate, or nothing (other tap_action types) */
 typedef enum { LAYOUT_ACT_TOGGLE, LAYOUT_ACT_NONE } layout_action_t;
 
@@ -67,6 +79,7 @@ typedef struct {
     char icon[40];          /* card icon ("mdi:..."); "" = the entity's own; "-" = none (show_icon: false) */
     char name_type[48];     /* card name as HA name parts, '|'-separated: floor, area, device,
                              * entity, text:<text>; resolved by the network task */
+    layout_mask_t cond;     /* shown only while these conditions hold (0 = always) */
 } layout_item_t;
 
 typedef struct {
@@ -74,6 +87,7 @@ typedef struct {
     char title[32];         /* section heading, "" if none */
     char title_icon[40];    /* the heading's icon ("mdi:..."), "" if none */
     int count;
+    layout_mask_t cond;     /* section visibility: the page is shown only while these hold */
     layout_item_t items[LAYOUT_MAX_ROWS];
 } layout_page_t;
 
@@ -84,6 +98,7 @@ typedef struct {
      * absolute or relative to HA */
     char images[LAYOUT_MAX_IMAGES][LAYOUT_IMAGE_LEN];
     char cals[LAYOUT_MAX_CALS][LAYOUT_CALS_LEN];   /* calendar cards' entity lists */
+    layout_cond_t conds[LAYOUT_MAX_CONDS];         /* every condition of the view, deduplicated */
 } ha_layout_t;
 
 /* json: full websocket result message ({"result":{...}}) or the bare dashboard config.
@@ -121,3 +136,12 @@ bool layout_sanitize(ha_layout_t *l);
 /* Removes items whose entity keep() rejects (pictures with their own image source are
  * checked as LAYOUT_VALUES: the entity only has to exist), and pages left empty. Returns the page count. */
 int layout_filter(ha_layout_t *l, bool (*keep)(const char *entity, layout_kind_t kind, void *ctx), void *ctx);
+
+/* Whether condition c holds for the entity state `state` (NULL = not known: like HA, a
+ * state condition then fails and a state_not condition holds). */
+bool layout_cond_true(const layout_cond_t *c, const char *state);
+
+/* Drops the pages and cards whose conditions don't all hold (bit k of true_mask = conds[k]
+ * holds), in place. Never leaves no page: when everything is hidden the first page is kept
+ * with all its cards. Returns the page count. */
+int layout_visible(ha_layout_t *l, layout_mask_t true_mask);

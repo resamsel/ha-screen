@@ -1838,6 +1838,56 @@ static void report_icon(int pg, int row, const char *json)
     emit_icon(pg, row, icon);
 }
 
+/* ---- Conditions (issue #57): which of the layout's conditions hold now. s_layout only has
+ * the cards and pages shown; the whole layout stays in the flash cache. HA task only. */
+static layout_mask_t s_cond_true;
+static bool s_cond_dirty;          /* s_cond_true changed: show the layout again */
+static uint32_t s_full_hash;       /* the whole layout last saved to the cache */
+
+static layout_mask_t cond_bit(const ha_layout_t *l, const char *entity, const char *state)
+{
+    layout_mask_t m = s_cond_true;
+    for (int k = 0; k < LAYOUT_MAX_CONDS; k++) {
+        if (!l->conds[k].entity[0] || strcmp(l->conds[k].entity, entity)) continue;
+        if (layout_cond_true(&l->conds[k], state)) m |= (layout_mask_t)(1u << k);
+        else m &= (layout_mask_t)~(1u << k);
+    }
+    return m;
+}
+
+/* Every condition of l, read over HTTP (a 404 / no answer: the state is not known) */
+static layout_mask_t cond_seed(const ha_layout_t *l)
+{
+    resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
+    char path[96], state[LAYOUT_COND_LEN];
+    s_cond_true = 0;
+    for (int k = 0; k < LAYOUT_MAX_CONDS; k++) {
+        const char *e = l->conds[k].entity;
+        bool seen = false;
+        for (int j = 0; j < k && !seen; j++) seen = !strcmp(l->conds[j].entity, e);
+        if (!e[0] || seen) continue;
+        snprintf(path, sizeof(path), "/api/states/%s", e);
+        r->len = 0;
+        bool ok = ha_request(HTTP_METHOD_GET, path, NULL, r) == 200 && json_str(r->buf, "\"state\":\"", state, sizeof(state));
+        s_cond_true = cond_bit(l, e, ok ? state : NULL);
+    }
+    return s_cond_true;
+}
+
+static void use_layout(const ha_layout_t *l);
+static ha_layout_t s_scratch;
+
+/* The cached whole layout with the cards and pages whose conditions hold now */
+static void cond_apply(void)
+{
+    s_cond_dirty = false;
+    if (!layout_store_load(&s_scratch)) return;
+    layout_visible(&s_scratch, s_cond_true);
+    if (layout_hash(&s_scratch) == s_layout_hash) return;
+    ESP_LOGI(TAG, "conditions changed: %d pages shown", s_scratch.count);
+    use_layout(&s_scratch);
+}
+
 static void use_layout(const ha_layout_t *l)
 {
     rec_lock();
@@ -1854,7 +1904,6 @@ static void use_layout(const ha_layout_t *l)
  * Failures keep the current layout and never reach the error box. */
 /* force: re-check entities and names even if the dashboard itself is unchanged */
 /* one scratch layout for the boot cache and every dashboard re-read (~12 KB of RAM) */
-static ha_layout_t s_scratch;
 
 static void refresh_layout(bool force)
 {
@@ -1891,9 +1940,16 @@ static void refresh_layout(bool force)
     if (n) raw_hash = h;
     s_err[0] = 0;                         /* validation errors are not shown */
     if (!n) { ESP_LOGW(TAG, "dashboard has no usable pages, keeping the current layout"); return; }
+    uint32_t full = layout_hash(&l);
+    if (full != s_full_hash) {            /* the whole layout: shown cards come from it */
+        layout_store_save(&l);
+        s_full_hash = full;
+    }
+    cond_seed(&l);
+    s_cond_dirty = false;
+    n = layout_visible(&l, s_cond_true);
     if (layout_hash(&l) == s_layout_hash) return;
-    ESP_LOGI(TAG, "new layout: %d pages", n);
-    layout_store_save(&l);
+    ESP_LOGI(TAG, "new layout: %d pages shown", n);
     use_layout(&l);
 #undef l
 }
@@ -2307,7 +2363,7 @@ static bool live_start(void)
 {
     if (s_lws) return true;
     if (!s_live_q && !(s_live_q = xQueueCreate(16, sizeof(char *)))) return false;
-    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 14];   /* + name and 13 board helpers */
+    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 1 + H_COUNT + LAYOUT_MAX_CONDS];   /* + name, board helpers, conditions */
     int n = 0;
     ids[n++] = s_name_ent;
     if (s_board[0]) {
@@ -2333,6 +2389,12 @@ static bool live_start(void)
             for (int k = 0; k < n && !dup; k++) dup = !strcmp(ids[k], it->entity);
             if (!dup) ids[n++] = it->entity;
         }
+    for (int k = 0; k < LAYOUT_MAX_CONDS; k++) {   /* hidden cards' conditions too */
+        const char *e = s_layout.conds[k].entity;
+        bool dup = !e[0];
+        for (int j = 0; j < n && !dup; j++) dup = !strcmp(ids[j], e);
+        if (!dup) ids[n++] = e;
+    }
     s_live = live_new(ids, n);
     char *req = malloc(64 + n * 84);
     if (!s_live || !req) { free(req); live_stop(); return false; }
@@ -2362,6 +2424,12 @@ static void live_dispatch(const char *id, const char *json)
 {
     char st[16] = "";
     json_str(json, "\"state\":\"", st, sizeof(st));
+    {   /* a condition's entity (may also be a card's: go on) */
+        char cs[LAYOUT_COND_LEN];
+        bool known = json_str(json, "\"state\":\"", cs, sizeof(cs));
+        layout_mask_t m = cond_bit(&s_layout, id, known ? cs : NULL);
+        if (m != s_cond_true) { s_cond_true = m; s_cond_dirty = true; }
+    }
     if (!strcmp(id, s_name_ent)) {
         char name[32];
         board_parse(json, name, sizeof(name));
@@ -2628,6 +2696,8 @@ static void ha_task(void *arg)
 
     {   /* start with the cached layout, if any */
         if (layout_store_load(&s_scratch)) {
+            s_full_hash = layout_hash(&s_scratch);
+            layout_visible(&s_scratch, 0);   /* conditions not known yet: only unconditional cards */
             use_layout(&s_scratch);
             cache_replay();               /* the last data, until HA answers */
         }
@@ -2682,6 +2752,10 @@ static void ha_task(void *arg)
                 if (s_err_cb) s_err_cb(s_err);
                 continue;
             }
+            if (s_cond_dirty) {           /* other cards shown: an HTTP round resubscribes */
+                b |= WAKE_BIT;
+                timeout = true;
+            }
             if (!b && !timeout) continue;                /* only events */
             /* due: just the pictures, unless a full round is due */
             if (!b && xTaskGetTickCount() - round_at < pdMS_TO_TICKS(HA_LIVE_RESYNC_MS)) b = PIC_BIT;
@@ -2707,6 +2781,7 @@ static void ha_task(void *arg)
             layout_at = xTaskGetTickCount();
             layout_read = true;
         }
+        if (s_cond_dirty) cond_apply();
         bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT);
         bool ok = true;
         ok &= do_user(b);
