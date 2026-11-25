@@ -1168,7 +1168,7 @@ static void name_push_done(void)
 /* For the log, indexed by H_*: one per helper, or the build fails */
 static const char *const HELPER_NAME[] = {
     "theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page",
-    "night", "night brightness", "screen timeout", "notification", "auto rotate", "motion wake",
+    "night", "night brightness", "screen timeout", "notification", "auto rotate", "motion wake", "screensaver",
 };
 _Static_assert(sizeof(HELPER_NAME) / sizeof(HELPER_NAME[0]) == H_COUNT, "a name for every helper");
 
