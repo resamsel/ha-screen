@@ -17,6 +17,7 @@ int main(void)
     s = base(); s.night = true; s.night_pct = 15; assert(screen_level(&s) == 15);  /* night_dim */
     s = base(); s.night = true; s.idle_ms = 600000; assert(screen_level(&s) == 0); /* night_zero_is_off */
     s.presenting = true;                          assert(screen_level(&s) == 0);   /* night_presenting */
+    s = base(); s.face_down = true; s.woken = true; assert(screen_level(&s) == 0);   /* face down */
     s = base(); s.night = true; s.woken = true;   assert(screen_level(&s) == 10);  /* wake_fallback */
     s.idle_ms = 30000;                            assert(screen_level(&s) == 0);   /* expires, never */
     s.timeout_min = 2; s.idle_ms = 60000;         assert(screen_level(&s) == 10);
