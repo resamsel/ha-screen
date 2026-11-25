@@ -14,5 +14,5 @@ const char *imu_orientation(int ax, int ay, int az);
  * previous reading, or it turns faster than ~40 deg/s. Raw values. */
 bool imu_moved(const int prev_acc[3], const int acc[3], const int gyr[3]);
 
-/* Angle in degrees between the screen's normal and straight up: 0 flat, 90 upright, 180 face down */
+/* Angle in degrees between the screen's normal (-z) and straight up: 0 flat, 90 upright, 180 face down */
 float imu_tilt(int ax, int ay, int az);
