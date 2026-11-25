@@ -15,7 +15,7 @@
 
 typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT_PICTURE, LAYOUT_WEATHER, LAYOUT_GAUGE, LAYOUT_GLANCE, LAYOUT_CALENDAR,
                LAYOUT_ENTITIES /* entities card: one item (row) per entity */,
-               LAYOUT_THERMOSTAT, LAYOUT_MEDIA, LAYOUT_LIGHT } layout_kind_t;
+               LAYOUT_THERMOSTAT, LAYOUT_MEDIA, LAYOUT_LIGHT, LAYOUT_TODO } layout_kind_t;
 
 /* clock card options (layout_item_t.flags) */
 #define LAYOUT_CLOCK_SECONDS 0x01

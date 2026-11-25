@@ -97,6 +97,7 @@ static void ha_forecast_changed(int page, int row, const ha_forecast_t *f, int n
 static void ha_calendar_changed(int page, int row, const cal_event_t *ev, int n, uint32_t mask, int64_t month);
 static void ha_climate_changed(int page, int row, const ha_climate_t *c, const char *name);
 static void ha_light_changed(int page, int row, const char *state, int pct, const char *name);
+static void ha_todo_changed(int page, int row, const ha_todo_item_t *items, int n);
 static void ha_media_changed(int page, int row, const char *state, const char *title, const char *artist, const char *name);
 static void ha_weather_changed(int page, int row, const char *cond, const char *temp, const char *unit,
                                const char *hum, const char *name);
@@ -356,6 +357,7 @@ void app_main(void)
     ha_client_set_climate_cb(ha_climate_changed);
     ha_client_set_media_cb(ha_media_changed);
     ha_client_set_light_cb(ha_light_changed);
+    ha_client_set_todo_cb(ha_todo_changed);
     ha_client_set_icon_cb(ha_icon_changed);
     ha_client_set_views_cb(ha_views_changed);
     ha_client_set_dashboards_cb(ha_dashes_changed);
@@ -1631,6 +1633,117 @@ static void ha_calendar_changed(int page, int row, const cal_event_t *ev, int n,
     lvgl_port_unlock();
 }
 
+/* ---- todo-list cards (issue #55): the title (if any), then one row per item, open ones
+ * first, as many as fit. A tap checks / unchecks it at once and tells HA. ---- */
+typedef struct { int n; ha_todo_item_t it[HA_TODO_MAX]; } todo_data_t;
+static lv_obj_t *s_todo_box[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static todo_data_t *s_todo_data[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+#define TODO_ROW_H 30
+
+static void todo_draw(int pg, int i);
+static void todo_draw_async(void *arg);
+
+static void todo_tap_cb(lv_event_t *e)
+{
+    if (s_swiped) return;
+    uint32_t v = (uint32_t)(uintptr_t)lv_event_get_user_data(e);   /* page << 16 | row << 8 | item */
+    int pg = v >> 16, i = (v >> 8) & 0xFF, k = v & 0xFF;
+    todo_data_t *d = s_todo_data[pg][i];
+    if (!d || k >= d->n) return;
+    d->it[k].done = !d->it[k].done;       /* at once; HA's list comes back after the update */
+    ha_client_todo_set(pg, i, d->it[k].uid, d->it[k].done);
+    lv_async_call(todo_draw_async, (void *)(uintptr_t)v);   /* not while in this row's event */
+}
+
+static void create_todo(lv_obj_t *page, int pg, int i)
+{
+    lv_area_t blk;
+    graph_block(GI(pg, i), &blk);
+    lv_obj_t *b = lv_obj_create(page);
+    lv_obj_remove_style_all(b);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(b, lv_area_get_width(&blk) - 2 * CARD_INSET - 2 * CAL_SIDE, lv_area_get_height(&blk) - 2 * CARD_INSET - 2 * CAL_TOP);
+    lv_obj_set_pos(b, blk.x1 + CARD_INSET + CAL_SIDE, blk.y1 + CARD_INSET + CAL_TOP);
+    s_todo_box[pg][i] = b;
+}
+
+static void todo_draw(int pg, int i)
+{
+    lv_obj_t *b = s_todo_box[pg][i];
+    if (!b) return;
+    lv_obj_clean(b);
+    const todo_data_t *d = s_todo_data[pg][i];
+    const layout_item_t *li = &s_layout.pages[pg].items[i];
+    lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light), acc = lv_color_hex(0x03A9F4);
+    int w = lv_obj_get_style_width(b, 0), h = lv_obj_get_style_height(b, 0), y = 0;
+    if (li->name[0]) { cal_label(b, li->name, &lv_font_latin_16, fg, 0, 0, w); y = lv_font_latin_16.line_height + 6; }
+    if (!d) return;
+    if (!d->n) { cal_label(b, "Nothing to do", &lv_font_latin_14, sec, 0, y, w); return; }
+    int fit = (h - y) / TODO_ROW_H;
+    for (int k = 0; k < d->n && k < fit; k++) {
+        const ha_todo_item_t *t = &d->it[k];
+        bool last = k == fit - 1 && d->n > fit;   /* no room for the rest: say how many */
+        if (last) {
+            char more[24];
+            snprintf(more, sizeof(more), "+ %d more", d->n - k);
+            cal_label(b, more, &lv_font_latin_14, sec, 0, y + 6, w);
+            break;
+        }
+        lv_obj_t *row = lv_obj_create(b);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, w, TODO_ROW_H);
+        lv_obj_set_pos(row, 0, y);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(row, todo_tap_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)((uint32_t)pg << 16 | (uint32_t)i << 8 | (uint32_t)k));
+        lv_obj_t *box = lv_obj_create(row);
+        lv_obj_remove_style_all(box);
+        lv_obj_set_size(box, 18, 18);
+        lv_obj_align(box, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_set_style_radius(box, 3, 0);
+        lv_obj_set_style_border_width(box, 2, 0);
+        lv_obj_set_style_border_color(box, t->done ? acc : sec, 0);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+        if (t->done) {
+            lv_obj_set_style_bg_color(box, acc, 0);
+            lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+            lv_obj_t *ok = lv_label_create(box);
+            lv_obj_set_style_text_font(ok, &lv_font_latin_12, 0);
+            lv_obj_set_style_text_color(ok, lv_color_white(), 0);
+            lv_label_set_text(ok, LV_SYMBOL_OK);
+            lv_obj_center(ok);
+        }
+        lv_obj_t *l = cal_label(row, t->summary, &lv_font_latin_16, t->done ? sec : fg, 28, 0, w - 28);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 28, 0);
+        lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
+        if (t->done) lv_obj_set_style_text_decor(l, LV_TEXT_DECOR_STRIKETHROUGH, 0);
+        y += TODO_ROW_H;
+    }
+}
+
+static void todo_draw_async(void *arg)
+{
+    uint32_t v = (uint32_t)(uintptr_t)arg;
+    int pg = v >> 16, i = (v >> 8) & 0xFF;
+    if (pg < PAGE_COUNT && i < ROWS(pg) && KIND(pg, i) == LAYOUT_TODO) todo_draw(pg, i);
+}
+
+/* Network task: the list's items */
+static void ha_todo_changed(int page, int row, const ha_todo_item_t *items, int n)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (page >= 0 && page < PAGE_COUNT && row >= 0 && row < ROWS(page) && KIND(page, row) == LAYOUT_TODO && s_todo_box[page][row]) {
+        todo_data_t *d = s_todo_data[page][row];
+        if (!d) d = s_todo_data[page][row] = malloc(sizeof(*d));
+        if (d) {
+            d->n = LV_MIN(LV_MAX(n, 0), HA_TODO_MAX);
+            memcpy(d->it, items, d->n * sizeof(*items));
+            todo_draw(page, row);
+        }
+    }
+    lvgl_port_unlock();
+}
+
 /* ---- Gauge cards: the value on a half-circle arc, like HA's gauge card ---- */
 static lv_obj_t *s_gz_arc[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_val[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 static lv_obj_t *s_gz_unit[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS], *s_gz_name[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
@@ -2498,6 +2611,7 @@ static void apply_temp_theme(bool light)
     for (int pg = 0; pg < PAGE_COUNT; pg++)   /* calendar cards: redrawn in the new colours */
         for (int i = 0; i < ROWS(pg); i++)
             if (KIND(pg, i) == LAYOUT_CALENDAR) cal_draw(pg, i);
+            else if (KIND(pg, i) == LAYOUT_TODO) todo_draw(pg, i);
     for (int pg = 0; pg < PAGE_COUNT; pg++) {
         if (!s_dot[pg]) continue;
         lv_obj_set_style_bg_color(s_dot[pg], pg == s_page ? fg : lv_color_hex(light ? 0xAEB4BE : 0x4A5058), 0);
@@ -2909,6 +3023,7 @@ static void create_pages(lv_obj_t *scr)
             if (it->kind == LAYOUT_MEDIA) { create_media(page, pg, i); continue; }
             if (it->kind == LAYOUT_LIGHT) { create_light(page, pg, i); continue; }
             if (it->kind == LAYOUT_CALENDAR) { create_calendar(page, pg, i); cal_draw(pg, i); continue; }
+            if (it->kind == LAYOUT_TODO) { create_todo(page, pg, i); todo_draw(pg, i); continue; }
             lv_coord_t cx, y;
             value_pos(pg, i, &cx, &y);
             s_name[pg][i] = lv_label_create(page);
@@ -4337,6 +4452,9 @@ static void create_ui(void)
     for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
         for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_fc_data[p][r]); s_fc_data[p][r] = NULL; }
     memset(s_cal_box, 0, sizeof(s_cal_box));
+    memset(s_todo_box, 0, sizeof(s_todo_box));
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_todo_data[p][r]); s_todo_data[p][r] = NULL; }
     for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
         for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_cal_data[p][r]); s_cal_data[p][r] = NULL; }
     memset(s_full, 0, sizeof(s_full));
