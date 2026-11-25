@@ -49,7 +49,7 @@ typedef struct {
     bool dark, landscape, pres_on;
     int pres_secs, bri_pct, page;      /* page counted from 0 */
     bool night, auto_rot, motion, saver;
-    int night_pct, timeout_min;        /* night brightness %, screen timeout in minutes */
+    int night_pct, timeout_s;          /* night brightness %, screen timeout in seconds */
     char dash[32], view[32];
 } ha_local_t;
 typedef void (*ha_local_cb_t)(ha_local_t *out);
@@ -85,9 +85,9 @@ void ha_client_set_presentation(bool on, int secs);
 /* Night mode (issue #17): input_boolean.<name>_night, input_number.<name>_night_brightness (%),
  * input_number.<name>_screen_timeout (minutes, 0 = never). The callback gets -1 for a value
  * whose helper HA doesn't have (the board keeps its own); ha_client_set_night writes them. */
-typedef void (*ha_night_cb_t)(int night, int night_pct, int timeout_min);
+typedef void (*ha_night_cb_t)(int night, int night_pct, int timeout_s);
 void ha_client_set_night_cb(ha_night_cb_t cb);  /* call before ha_client_start */
-void ha_client_set_night(bool night, int night_pct, int timeout_min);
+void ha_client_set_night(bool night, int night_pct, int timeout_s);
 
 /* Auto-rotate (issue #42): input_boolean.<name>_auto_rotate. The callback runs with the helper's
  * state whenever it's read; ha_client_set_auto_rotate writes it. */
