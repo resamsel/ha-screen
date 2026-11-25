@@ -388,6 +388,9 @@ static void test_entities(void)
     assert(l.pages[0].items[0].kind == LAYOUT_MEDIA && layout_sanitize(&l) && l.pages[0].items[0].kind == LAYOUT_MEDIA);
     assert(parse_sections("[" SEC("{\"type\":\"light\",\"entity\":\"light.x\"}") "]", &l) == 1);
     assert(l.pages[0].items[0].kind == LAYOUT_LIGHT && layout_sanitize(&l) && l.pages[0].items[0].kind == LAYOUT_LIGHT);
+    assert(parse_sections("[" SEC("{\"type\":\"todo-list\",\"entity\":\"todo.shopping_list\",\"title\":\"Shopping\"}") "]", &l) == 1);
+    assert(l.pages[0].items[0].kind == LAYOUT_TODO && !strcmp(l.pages[0].items[0].name, "Shopping"));
+    assert(layout_sanitize(&l) && l.pages[0].items[0].kind == LAYOUT_TODO);
 }
 
 /* picture-glance: an image URL without entity, named by its title (issue #3) */

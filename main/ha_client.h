@@ -149,6 +149,13 @@ void ha_client_set_light_cb(ha_light_cb_t cb);  /* call before ha_client_start *
 /* pct 1-100: light.turn_on at that brightness; 0: turn off; -1: toggle */
 void ha_client_light(int page, int row, int pct);
 
+/* todo-list card (issue #55): the list's items, open ones first. Tap: ha_client_todo_set. */
+#define HA_TODO_MAX 12
+typedef struct { char uid[40]; char summary[48]; bool done; } ha_todo_item_t;
+typedef void (*ha_todo_cb_t)(int page, int row, const ha_todo_item_t *items, int n);
+void ha_client_set_todo_cb(ha_todo_cb_t cb);  /* call before ha_client_start */
+void ha_client_todo_set(int page, int row, const char *uid, bool done);
+
 /* Calendar card: up to CAL_MAX_EVENTS events of its calendars (calendar.get_events), earliest
  * first: today's (day view), the next 7 days' (list view) or the month's (month view: also
  * mask, bit d-1 = an event on day d of the month starting at month, local midnight UTC s). */

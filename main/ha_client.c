@@ -57,12 +57,13 @@ static const char *TAG = "ha";
 #define TARGET_BIT  BIT12 /* a thermostat's target temperature was changed */
 #define MEDIA_BIT   BIT13 /* play/pause or next on a media card */
 #define LIGHT_BIT   BIT14 /* a light card was switched or dimmed */
+#define TODO_BIT    BIT22 /* a todo-list item was checked or unchecked */
 #define PAUSE_BIT   BIT15 /* close all HA connections until RESUME_BIT (OTA update) */
 #define PAUSED_BIT  BIT16 /* set by ha_task: paused, no TLS session open */
 #define RESUME_BIT  BIT17
 #define NOTIFY_BIT  BIT18 /* a notification was dismissed: clear the helper */
 #define AUTOROT_BIT BIT19 /* auto-rotate switched on the board */
-#define USER_BITS   (AUTOROT_BIT | TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | NOTIFY_BIT)
+#define USER_BITS   (AUTOROT_BIT | TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | TODO_BIT | PRES_BIT | NIGHT_BIT | NAV_BIT | NOTIFY_BIT)
 
 static volatile float s_set_value;
 static volatile bool s_set_dark, s_set_landscape;   /* values for TOGGLE_BIT / ORIENT_BIT */
@@ -111,6 +112,12 @@ void ha_client_set_media_cb(ha_media_cb_t cb) { s_media_cb = cb; }
 static volatile int s_med_page = -1, s_med_row = -1, s_med_cmd;
 static ha_light_cb_t s_light_cb;
 void ha_client_set_light_cb(ha_light_cb_t cb) { s_light_cb = cb; }
+static ha_todo_cb_t s_todo_cb;
+void ha_client_set_todo_cb(ha_todo_cb_t cb) { s_todo_cb = cb; }
+static portMUX_TYPE s_todo_lock = portMUX_INITIALIZER_UNLOCKED;
+static int s_todo_page = -1, s_todo_row;
+static char s_todo_uid[40];
+static bool s_todo_done;
 static volatile int s_lt_page = -1, s_lt_row = -1, s_lt_pct;
 static ha_weather_cb_t s_weather_cb;
 void ha_client_set_weather_cb(ha_weather_cb_t cb) { s_weather_cb = cb; }
@@ -1037,6 +1044,8 @@ static void fetch_calendar(int pg, int row);
 static void fetch_climate(int pg, int row);
 static void fetch_media(int pg, int row);
 static void fetch_light(int pg, int row);
+static void fetch_todo(int pg, int row);
+static dash_ws_t *s_lws;          /* the live websocket, NULL when closed */
 static void parse_light(int pg, int row, const char *json);
 static void parse_media(int pg, int row, const char *json);
 static void parse_climate(int pg, int row, const char *json);
@@ -1046,7 +1055,7 @@ static void fetch_button(int pg, int row);
  * stop so it reaches HA at once; they are picked up again on the next poll */
 static bool user_waiting(void)
 {
-    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT);
+    return xEventGroupGetBits(s_events) & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | TODO_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT);
 }
 
 static void parse_brightness(const char *json)
@@ -1266,6 +1275,7 @@ static bool fetch_state(void)
             if (it->kind == LAYOUT_THERMOSTAT) { fetch_climate(pg, i); continue; }
             if (it->kind == LAYOUT_MEDIA) { fetch_media(pg, i); continue; }
             if (it->kind == LAYOUT_LIGHT) { fetch_light(pg, i); continue; }
+            if (it->kind == LAYOUT_TODO) { fetch_todo(pg, i); continue; }
             if (it->kind != LAYOUT_VALUES && it->kind != LAYOUT_GAUGE && it->kind != LAYOUT_GLANCE &&
                 it->kind != LAYOUT_ENTITIES) continue;   /* graphs: fetch_graph; clocks: no data */
             char text[24], unit[8], name[32];
@@ -1384,6 +1394,50 @@ static bool is_domain(const char *entity, const char *domain)
     return !strncmp(entity, domain, n) && entity[n] == '.';
 }
 
+/* todo-list card (issue #55): todo.get_items with its response, over the live websocket when
+ * open, else REST (?return_response). Open items first, then the completed ones. */
+static void fetch_todo(int pg, int row)
+{
+    const char *e = s_layout.pages[pg].items[row].entity;
+    char body[256];
+    char *msg = NULL;
+    if (dash_ws_alive(s_lws)) {
+        snprintf(body, sizeof(body), "\"type\":\"call_service\",\"domain\":\"todo\",\"service\":\"get_items\","
+                 "\"service_data\":{\"entity_id\":\"%s\"},\"return_response\":true", e);
+        msg = dash_ws_call(s_lws, body);
+    } else {
+        resp_t *r = &s_rbuf;   /* shared: all callers run on the HA task, one at a time */
+        snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", e);
+        r->len = 0;
+        if (ha_request(HTTP_METHOD_POST, "/api/services/todo/get_items?return_response", body, r) == 200) msg = strdup(r->buf);
+    }
+    if (!msg) return;                     /* keep what is shown */
+    cJSON *root = cJSON_Parse(msg);
+    free(msg);
+    const cJSON *res = cJSON_GetObjectItemCaseSensitive(root, "service_response");   /* REST */
+    if (!res) res = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "result"), "response");   /* websocket */
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(res, e), "items"), *it;
+    if (!cJSON_IsArray(items)) { cJSON_Delete(root); return; }
+    static ha_todo_item_t out[HA_TODO_MAX];
+    int n = 0;
+    for (int pass = 0; pass < 2; pass++)  /* open, then completed */
+        cJSON_ArrayForEach(it, items) {
+            if (n == HA_TODO_MAX) break;
+            const cJSON *st = cJSON_GetObjectItemCaseSensitive(it, "status"), *uid = cJSON_GetObjectItemCaseSensitive(it, "uid"),
+                        *sum = cJSON_GetObjectItemCaseSensitive(it, "summary");
+            if (!cJSON_IsString(uid) || !cJSON_IsString(sum)) continue;
+            bool done = cJSON_IsString(st) && !strcmp(st->valuestring, "completed");
+            if (done != (pass == 1)) continue;
+            snprintf(out[n].uid, sizeof(out[n].uid), "%s", uid->valuestring);
+            snprintf(out[n].summary, sizeof(out[n].summary), "%s", sum->valuestring);
+            utf8_trim(out[n].summary);
+            out[n].done = done;
+            n++;
+        }
+    cJSON_Delete(root);
+    if (s_todo_cb) s_todo_cb(pg, row, out, n);
+}
+
 /* Button state and display name */
 static void fetch_button(int pg, int row)
 {
@@ -1475,6 +1529,11 @@ static bool entity_usable(const char *entity, layout_kind_t kind, void *ctx)
     if (kind == LAYOUT_THERMOSTAT) {
         if (is_domain(entity, "climate")) return true;
         ESP_LOGW(TAG, "layout: %s is not a climate entity, skipped", entity);
+        return false;
+    }
+    if (kind == LAYOUT_TODO) {
+        if (is_domain(entity, "todo")) return true;
+        ESP_LOGW(TAG, "layout: %s is not a todo list, skipped", entity);
         return false;
     }
     if (kind == LAYOUT_CALENDAR) {
@@ -2269,7 +2328,6 @@ void ha_client_show_page(int page, const uint16_t w[LAYOUT_MAX_ROWS], const uint
  * changes show at once. Only one TLS session fits in RAM: the websocket is closed for the
  * HTTP rounds and opened again after them (the new subscription starts with a full
  * snapshot, so nothing is missed). Service calls go over the websocket while it's open. */
-static dash_ws_t *s_lws;
 static live_t *s_live;
 static QueueHandle_t s_live_q;
 static volatile bool s_live_lost;      /* an event was dropped: resync over HTTP */
@@ -2300,7 +2358,7 @@ static void live_stop(void)
 static bool live_kind(layout_kind_t k)
 {
     return k == LAYOUT_VALUES || k == LAYOUT_GAUGE || k == LAYOUT_GLANCE || k == LAYOUT_ENTITIES || k == LAYOUT_GRAPH ||
-           k == LAYOUT_BUTTONS || k == LAYOUT_WEATHER || k == LAYOUT_THERMOSTAT || k == LAYOUT_MEDIA || k == LAYOUT_LIGHT;
+           k == LAYOUT_BUTTONS || k == LAYOUT_WEATHER || k == LAYOUT_THERMOSTAT || k == LAYOUT_MEDIA || k == LAYOUT_LIGHT || k == LAYOUT_TODO;
 }
 
 static bool live_start(void)
@@ -2414,6 +2472,7 @@ static void live_dispatch(const char *id, const char *json)
             case LAYOUT_THERMOSTAT: parse_climate(pg, i, json); break;
             case LAYOUT_MEDIA: parse_media(pg, i, json); break;
             case LAYOUT_LIGHT: parse_light(pg, i, json); break;
+            case LAYOUT_TODO: fetch_todo(pg, i); break;   /* state = open items: read the list */
             case LAYOUT_GRAPH:
                 parse_entity(pg, i, json, text, unit, name);
                 emit_graph(pg, i, text, unit, name, NULL, 0, 0, it->hours, !strcmp(unit, "%"));
@@ -2587,6 +2646,24 @@ static bool do_user(EventBits_t b)
             ok &= st >= 200 && st < 300;
         }
     }
+    if (b & TODO_BIT) {
+        char uid[40];
+        int pg, row;
+        bool done;
+        taskENTER_CRITICAL(&s_todo_lock);
+        pg = s_todo_page; row = s_todo_row; done = s_todo_done;
+        memcpy(uid, s_todo_uid, sizeof(uid));
+        taskEXIT_CRITICAL(&s_todo_lock);
+        if (pg >= 0 && pg < s_layout.count && row >= 0 && row < s_layout.pages[pg].count &&
+            s_layout.pages[pg].items[row].kind == LAYOUT_TODO) {
+            char tb[192];
+            snprintf(tb, sizeof(tb), "{\"entity_id\":\"%s\",\"item\":\"%s\",\"status\":\"%s\"}",
+                     s_layout.pages[pg].items[row].entity, uid, done ? "completed" : "needs_action");
+            int st = ha_service("/api/services/todo/update_item", tb);
+            ok &= st >= 200 && st < 300;
+            fetch_todo(pg, row);          /* the list as HA has it now (also undoes a failed tap) */
+        }
+    }
     if (b & MEDIA_BIT) {
         int pg = s_med_page, row = s_med_row;
         if (pg >= 0 && pg < s_layout.count && row >= 0 && row < s_layout.pages[pg].count &&
@@ -2699,7 +2776,7 @@ static void ha_task(void *arg)
         }
         round_at = xTaskGetTickCount();
         if (s_busy_cb && !quiet) s_busy_cb(true);
-        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT);
+        bool user = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | PRESS_BIT | TARGET_BIT | MEDIA_BIT | LIGHT_BIT | TODO_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT);
         bool refresh = b & REFRESH_BIT;   /* the refresh button also re-reads the dashboard */
         /* not while a tap waits: the dashboard check can take seconds */
         if (refresh || (!user && (!layout_read || xTaskGetTickCount() - layout_at >= pdMS_TO_TICKS(HA_LAYOUT_INTERVAL_MS)))) {
@@ -2804,6 +2881,17 @@ void ha_client_start(ha_state_cb_t cb, ha_brightness_cb_t bcb, ha_done_cb_t dcb,
         esp_timer_start_once(s_nowifi_timer, (uint64_t)HA_WIFI_PORTAL_S * 1000000);
 
     xTaskCreate(ha_task, "ha", 8192, NULL, 3, NULL);   /* also rebuilds the UI: 8 pages measured ~3.7 KB peak */
+}
+
+void ha_client_todo_set(int page, int row, const char *uid, bool done)
+{
+    taskENTER_CRITICAL(&s_todo_lock);
+    s_todo_page = page;
+    s_todo_row = row;
+    snprintf(s_todo_uid, sizeof(s_todo_uid), "%s", uid);
+    s_todo_done = done;
+    taskEXIT_CRITICAL(&s_todo_lock);
+    if (s_events) xEventGroupSetBits(s_events, TODO_BIT);
 }
 
 void ha_client_light(int page, int row, int pct)
