@@ -183,7 +183,7 @@ static uint8_t s_rot = 0;          /* display rotation (lv_disp_rot_t: 0, 90, 18
 static bool s_auto_rot = false;    /* follow the board's physical orientation (IMU), kept in NVS */
 static bool s_autorot_pending;     /* switched here, not yet confirmed by HA */
 static void ha_autorot_changed(bool on);
-static bool s_motion_wake = false; /* IMU: pick up to wake, face down to sleep (issue #58), NVS "motion"; off until the z sign is checked on a board */
+static bool s_motion_wake = true;  /* IMU: pick up to wake, face down to sleep (issue #58), NVS "motion" */
 static bool s_motion_pending;      /* switched here, not yet confirmed by HA */
 static bool s_face_down;           /* lying face down (held for IMU_HOLD_MS) */
 static void ha_motion_changed(bool on);
