@@ -3572,7 +3572,16 @@ static void saver_update(void)
     bool synced = tm.tm_year >= 120;   /* no SNTP yet: no time to show */
     strftime(b, sizeof(b), "%H:%M", &tm);
     lv_label_set_text(s_sv_time, synced ? b : "--:--");
-    strftime(b, sizeof(b), s_landscape ? "%A, %d %B" : "%a, %d %b", &tm);   /* portrait is 172 px wide */
+    {   /* the longest form that fits the label: "Wednesday, 25 November" doesn't even fit landscape */
+        static const char *const FMT[] = { "%A, %d %B", "%a, %d %B", "%a, %d %b" };
+        lv_coord_t w = lv_obj_get_content_width(s_sv_date);
+        for (int k = 0; k < 3; k++) {
+            strftime(b, sizeof(b), FMT[k], &tm);
+            lv_point_t sz;
+            lv_txt_get_size(&sz, b, &lv_font_latin_22, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            if (sz.x <= w) break;
+        }
+    }
     lv_label_set_text(s_sv_date, synced ? b : "");
     lv_label_set_text(s_sv_wx, s_sv_wx_text);
     b[0] = 0;
