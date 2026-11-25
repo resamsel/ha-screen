@@ -7,6 +7,7 @@
 #define LAYOUT_MAX_ROWS  4
 #define LAYOUT_HOURS_DEFAULT 24
 #define LAYOUT_HOURS_MAX     168
+#define LAYOUT_STATS_HOURS_MAX (31 * 24)   /* statistics-graph: up to a month of long-term statistics */
 #define LAYOUT_MAX_IMAGES    4      /* picture cards with an image:/camera_image: source */
 #define LAYOUT_IMAGE_LEN     128
 #define LAYOUT_MAX_CALS      4      /* calendar cards */
@@ -36,6 +37,21 @@ typedef enum { LAYOUT_VALUES, LAYOUT_GRAPH, LAYOUT_BUTTONS, LAYOUT_CLOCK, LAYOUT
 #define LAYOUT_WX_FORECAST     0x01   /* show_forecast: true (off unless set) */
 #define LAYOUT_WX_HOURLY       0x02   /* forecast_type: hourly (else daily) */
 #define LAYOUT_WX_FLAGS        0x03
+
+/* graph options (layout_item_t.flags): statistics-graph reads long-term statistics (issue #52) */
+#define LAYOUT_GRAPH_STATS     0x01
+#define LAYOUT_GRAPH_PERIOD    0x0E   /* period: */
+#define LAYOUT_GRAPH_HOUR      0x00   /* HA's default */
+#define LAYOUT_GRAPH_5MIN      0x02
+#define LAYOUT_GRAPH_DAY       0x04
+#define LAYOUT_GRAPH_WEEK      0x06
+#define LAYOUT_GRAPH_MONTH     0x08
+#define LAYOUT_GRAPH_TYPE      0x30   /* the statistic drawn: */
+#define LAYOUT_GRAPH_MEAN      0x00
+#define LAYOUT_GRAPH_MIN       0x10
+#define LAYOUT_GRAPH_MAX       0x20
+#define LAYOUT_GRAPH_STATE     0x30   /* total-type sensors (energy, ...) */
+#define LAYOUT_GRAPH_FLAGS     0x3F
 
 /* glance card options (layout_item_t.flags), one item per entity of the card */
 #define LAYOUT_GLANCE_NO_NAME  0x01   /* show_name: false */

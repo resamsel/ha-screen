@@ -467,8 +467,32 @@ static void test_dashboards(void)
     assert(layout_parse_dashboards("{\"result\":{}}", "", d, 8, &cur) == 0);
 }
 
+static void test_history_graphs(void)
+{
+    ha_layout_t l;
+    assert(parse_sections("[" SEC("{\"type\":\"history-graph\",\"title\":\"Temps\",\"hours_to_show\":48,"
+                                  "\"entities\":[\"sensor.a\",{\"entity\":\"sensor.b\",\"name\":\"Bee\"}]}") "]", &l) == 1);
+    assert(l.pages[0].count == 2 && l.pages[0].kind == LAYOUT_GRAPH && !strcmp(l.pages[0].title, "Temps"));
+    assert(l.pages[0].items[0].hours == 48 && l.pages[0].items[0].flags == 0 && isnan(l.pages[0].items[0].min));
+    assert(!strcmp(l.pages[0].items[1].entity, "sensor.b") && !strcmp(l.pages[0].items[1].name, "Bee"));
+    assert(layout_sanitize(&l) && l.pages[0].items[1].hours == 48);
+    assert(parse_sections("[" SEC("{\"type\":\"history-graph\",\"entities\":[\"sensor.a\"],\"hours_to_show\":1000}") "]", &l) == 1);
+    assert(l.pages[0].items[0].hours == LAYOUT_HOURS_MAX);
+
+    assert(parse_sections("[" SEC("{\"type\":\"statistics-graph\",\"entities\":[\"sensor.e\"],\"period\":\"day\",\"stat_types\":[\"max\",\"min\"],\"days_to_show\":14}") "]", &l) == 1);
+    const layout_item_t *it = &l.pages[0].items[0];
+    assert(it->kind == LAYOUT_GRAPH && it->hours == 14 * 24);
+    assert(it->flags == (LAYOUT_GRAPH_STATS | LAYOUT_GRAPH_DAY | LAYOUT_GRAPH_MAX));
+    assert(layout_sanitize(&l) && l.pages[0].items[0].hours == 14 * 24 && l.pages[0].items[0].flags == (LAYOUT_GRAPH_STATS | LAYOUT_GRAPH_DAY | LAYOUT_GRAPH_MAX));
+    assert(parse_sections("[" SEC("{\"type\":\"statistics-graph\",\"entities\":[\"sensor.e\"]}") "]", &l) == 1);
+    assert(l.pages[0].items[0].hours == 30 * 24 && l.pages[0].items[0].flags == (LAYOUT_GRAPH_STATS | LAYOUT_GRAPH_HOUR | LAYOUT_GRAPH_MEAN));
+    assert(parse_sections("[" SEC("{\"type\":\"statistics-graph\",\"entities\":[\"sensor.e\"],\"days_to_show\":365}") "]", &l) == 1);
+    assert(l.pages[0].items[0].hours == LAYOUT_STATS_HOURS_MAX);
+}
+
 int main(void)
 {
+    test_history_graphs();
     test_picture();
     test_weather();
     test_picture_glance();

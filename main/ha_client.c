@@ -277,6 +277,17 @@ static int64_t parse_http_date(const char *t)
     return days_from_civil(Y, (int)(f - mon) / 3 + 1, D) * 86400 + h * 3600 + mi * 60 + sec;
 }
 
+/* Value v at time ts (UTC seconds) into its bucket of the graph being fetched */
+static void hist_add(int64_t ts, float v)
+{
+    int64_t start = s_now - (int64_t)s_hist_hours * 3600;
+    int b = ts <= start ? 0 : (int)((ts - start) * HA_GRAPH_POINTS / ((int64_t)s_hist_hours * 3600));
+    if (b < 0 || b >= HA_GRAPH_POINTS) return;
+    if (!s_hist_has[b] || v > s_hist_bucket[b]) s_hist_bucket[b] = v;  /* keep spikes */
+    s_hist_last[b] = v;                   /* history is in time order: last one wins */
+    s_hist_has[b] = true;
+}
+
 /* One history entry: {"state":"0.0","last_changed":"..."} */
 static void hist_point(const char *obj)
 {
@@ -286,13 +297,7 @@ static void hist_point(const char *obj)
     char *end;
     float v = strtof(st + 9, &end);
     if (end == st + 9) return;            /* "unavailable" etc. */
-    int64_t start = s_now - (int64_t)s_hist_hours * 3600;
-    int64_t ts = parse_iso(lc + 16);
-    int b = ts <= start ? 0 : (int)((ts - start) * HA_GRAPH_POINTS / ((int64_t)s_hist_hours * 3600));
-    if (b < 0 || b >= HA_GRAPH_POINTS) return;
-    if (!s_hist_has[b] || v > s_hist_bucket[b]) s_hist_bucket[b] = v;  /* keep spikes */
-    s_hist_last[b] = v;                   /* history is in time order: last one wins */
-    s_hist_has[b] = true;
+    hist_add(parse_iso(lc + 16), v);
 }
 
 static void hist_feed(const char *data, int n)
@@ -1333,6 +1338,48 @@ static float parse_entity(int pg, int row, const char *json, char text[24], char
 }
 
 /* Graph page: latest value every poll, then the history over the page's span */
+static void graph_emit_buckets(int pg, int row, int hours, bool zero_based);
+
+/* statistics-graph (issue #52): the item's long-term statistics over the websocket
+ * (recorder/statistics_during_period) into the history buckets. False if none came. */
+static bool fetch_stats(const layout_item_t *it)
+{
+    static const char *const PERIOD[] = { "hour", "5minute", "day", "week", "month" };
+    static const char *const TYPE[] = { "mean", "min", "max", "state" };
+    int per = (it->flags & LAYOUT_GRAPH_PERIOD) >> 1, ty = (it->flags & LAYOUT_GRAPH_TYPE) >> 4;
+    if (per > 4) per = 0;
+    char start[32], stop[32], body[320];
+    time_t t0 = (time_t)(s_now - (int64_t)it->hours * 3600), t1 = (time_t)s_now;
+    struct tm g;
+    gmtime_r(&t0, &g);
+    strftime(start, sizeof(start), "%Y-%m-%dT%H:%M:%SZ", &g);
+    gmtime_r(&t1, &g);
+    strftime(stop, sizeof(stop), "%Y-%m-%dT%H:%M:%SZ", &g);
+    snprintf(body, sizeof(body), "\"type\":\"recorder/statistics_during_period\",\"start_time\":\"%s\",\"end_time\":\"%s\","
+             "\"statistic_ids\":[\"%s\"],\"period\":\"%s\",\"types\":[\"%s\"]", start, stop, it->entity, PERIOD[per], TYPE[ty]);
+    if (s_http) {                         /* two TLS sessions at once don't fit in RAM */
+        esp_http_client_cleanup(s_http);
+        s_http = NULL;
+    }
+    dash_ws_t *d = dash_ws_open();
+    char *msg = d ? dash_ws_call(d, body) : NULL;
+    dash_ws_close(d);
+    if (!msg) { ESP_LOGW(TAG, "statistics of %s: no answer", it->entity); return false; }
+    cJSON *root = cJSON_Parse(msg);
+    free(msg);
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "result"), it->entity), *e;
+    int n = 0;
+    cJSON_ArrayForEach(e, list) {          /* {"start": ms, "end": ms, "<type>": value} */
+        const cJSON *st = cJSON_GetObjectItemCaseSensitive(e, "start"), *v = cJSON_GetObjectItemCaseSensitive(e, TYPE[ty]);
+        if (!cJSON_IsNumber(st) || !cJSON_IsNumber(v)) continue;
+        hist_add((int64_t)(st->valuedouble / 1000), (float)v->valuedouble);
+        n++;
+    }
+    cJSON_Delete(root);
+    if (!n) ESP_LOGW(TAG, "statistics of %s: none (not a statistics sensor?)", it->entity);
+    return n > 0;
+}
+
 static void fetch_graph(int pg, int row)
 {
     const layout_item_t *it = &s_layout.pages[pg].items[row];
@@ -1343,6 +1390,13 @@ static void fetch_graph(int pg, int row)
     if (got) emit_graph(pg, row, latest, unit, name, NULL, 0, 0, it->hours, zero_based);
 
     if (!s_now) return;                   /* need the server time to place points */
+    s_hist_hours = it->hours;
+    memset(s_hist_has, 0, sizeof(s_hist_has));
+    if (it->flags & LAYOUT_GRAPH_STATS) {
+        if (!fetch_stats(it)) return;
+        graph_emit_buckets(pg, row, it->hours, zero_based);
+        return;
+    }
 
     /* start time = now - span, as "2026-11-19T13:05:12+00:00" */
     time_t t0 = (time_t)(s_now - (int64_t)it->hours * 3600);
@@ -1353,8 +1407,6 @@ static void fetch_graph(int pg, int row)
     time_t t1 = (time_t)s_now;   /* without end_time HA returns only one day */
     gmtime_r(&t1, &g);
     strftime(stop, sizeof(stop), "%Y-%m-%dT%H:%M:%S%%2B00:00", &g);
-    s_hist_hours = it->hours;
-    memset(s_hist_has, 0, sizeof(s_hist_has));
     s_hist_len = 0;
     s_hist_mode = true;
     snprintf(path, sizeof(path), "/api/history/period/%s?end_time=%s&filter_entity_id=%s&minimal_response&no_attributes",
@@ -1363,6 +1415,12 @@ static void fetch_graph(int pg, int row)
     s_hist_mode = false;
     if (st != 200) return;
 
+    graph_emit_buckets(pg, row, it->hours, zero_based);
+}
+
+/* The filled buckets as the graph's points */
+static void graph_emit_buckets(int pg, int row, int hours, bool zero_based)
+{
     /* a state holds until it changes: carry values forward into empty buckets */
     static float pts[HA_GRAPH_POINTS];
     float carry = NAN;
@@ -1374,8 +1432,8 @@ static void fetch_graph(int pg, int row)
         if (s_hist_has[i]) { pts[i] = s_hist_bucket[i]; carry = s_hist_last[i]; known++; }
         else pts[i] = carry;
     }
-    ESP_LOGD(TAG, "history %dh: %d of %d buckets with data", it->hours, known, HA_GRAPH_POINTS);
-    emit_graph(pg, row, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, it->hours, zero_based);
+    ESP_LOGD(TAG, "history %dh: %d of %d buckets with data", hours, known, HA_GRAPH_POINTS);
+    emit_graph(pg, row, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, hours, zero_based);
 }
 
 static bool is_domain(const char *entity, const char *domain)
