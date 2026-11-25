@@ -148,6 +148,39 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             }
             continue;
         }
+        if (ct && (!strcmp(ct, "history-graph") || !strcmp(ct, "statistics-graph"))) {   /* one graph per entity */
+            bool stats = !strcmp(ct, "statistics-graph");
+            const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
+            const char *title = str(card, "title");
+            if (title && !pg->title[0]) copy(pg->title, sizeof(pg->title), title);
+            int hours = stats ? (int)num(card, "days_to_show", 30) * 24 : (int)num(card, "hours_to_show", LAYOUT_HOURS_DEFAULT);
+            int maxh = stats ? LAYOUT_STATS_HOURS_MAX : LAYOUT_HOURS_MAX;
+            uint8_t fl = 0;
+            if (stats) {
+                const char *per = str(card, "period");
+                fl = LAYOUT_GRAPH_STATS | (!per ? LAYOUT_GRAPH_HOUR : !strcmp(per, "5minute") ? LAYOUT_GRAPH_5MIN : !strcmp(per, "day") ? LAYOUT_GRAPH_DAY
+                     : !strcmp(per, "week") ? LAYOUT_GRAPH_WEEK : !strcmp(per, "month") ? LAYOUT_GRAPH_MONTH : LAYOUT_GRAPH_HOUR);
+                const cJSON *types = cJSON_GetObjectItemCaseSensitive(card, "stat_types");
+                const char *t0 = cJSON_IsArray(types) && cJSON_IsString(cJSON_GetArrayItem(types, 0)) ? cJSON_GetArrayItem(types, 0)->valuestring : NULL;
+                if (cJSON_GetArraySize(types) > 1) LOGW("section %d: statistics-graph shows only its first stat type", idx);
+                fl |= !t0 ? LAYOUT_GRAPH_MEAN : !strcmp(t0, "min") ? LAYOUT_GRAPH_MIN : !strcmp(t0, "max") ? LAYOUT_GRAPH_MAX
+                      : !strcmp(t0, "state") || !strcmp(t0, "sum") || !strcmp(t0, "change") ? LAYOUT_GRAPH_STATE : LAYOUT_GRAPH_MEAN;
+            }
+            cJSON_ArrayForEach(e, ents) {
+                const char *ent = cJSON_IsString(e) ? e->valuestring : cJSON_IsObject(e) ? str(e, "entity") : NULL;
+                if (!ent) continue;
+                if (pg->count == LAYOUT_MAX_ROWS) { LOGW("section %d: more than %d cards, extra skipped", idx, LAYOUT_MAX_ROWS); break; }
+                layout_item_t *it = &pg->items[pg->count++];
+                it->kind = LAYOUT_GRAPH;
+                if (pg->count == 1) pg->kind = it->kind;
+                if (cJSON_IsObject(e)) set_item(it, e);   /* entity, name */
+                else copy(it->entity, sizeof(it->entity), ent);
+                it->hours = hours < 1 ? LAYOUT_HOURS_DEFAULT : hours > maxh ? maxh : hours;
+                it->min = NAN;
+                it->flags = fl;
+            }
+            continue;
+        }
         if (ct && !strcmp(ct, "entities")) {   /* one row per entity; dividers, buttons etc. skipped */
             const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
             const char *title = str(card, "title");
@@ -453,7 +486,8 @@ bool layout_sanitize(ha_layout_t *l)
             pg->items[i].flags &= pg->items[i].kind == LAYOUT_PICTURE ? LAYOUT_PIC_FLAGS : pg->items[i].kind == LAYOUT_CLOCK ? LAYOUT_CLOCK_FLAGS
                                 : pg->items[i].kind == LAYOUT_GLANCE ? LAYOUT_GLANCE_FLAGS
                                 : pg->items[i].kind == LAYOUT_WEATHER ? LAYOUT_WX_FLAGS
-                                : pg->items[i].kind == LAYOUT_CALENDAR ? LAYOUT_CAL_FLAGS : 0;
+                                : pg->items[i].kind == LAYOUT_CALENDAR ? LAYOUT_CAL_FLAGS
+                                : pg->items[i].kind == LAYOUT_GRAPH ? LAYOUT_GRAPH_FLAGS : 0;
             if (pg->items[i].kind == LAYOUT_GAUGE) {   /* a usable range */
                 if (!isfinite(pg->items[i].min)) pg->items[i].min = 0;
                 if (!isfinite(pg->items[i].max) || pg->items[i].max <= pg->items[i].min) pg->items[i].max = pg->items[i].min + 100;
@@ -462,7 +496,8 @@ bool layout_sanitize(ha_layout_t *l)
             uint16_t *h = &pg->items[i].hours;
             if (pg->items[i].kind != LAYOUT_GRAPH) *h = 0;   /* unused; as layout_parse leaves it */
             else if (*h < 1) *h = LAYOUT_HOURS_DEFAULT;
-            else if (*h > LAYOUT_HOURS_MAX) *h = LAYOUT_HOURS_MAX;
+            else if (*h > ((pg->items[i].flags & LAYOUT_GRAPH_STATS) ? LAYOUT_STATS_HOURS_MAX : LAYOUT_HOURS_MAX))
+                *h = (pg->items[i].flags & LAYOUT_GRAPH_STATS) ? LAYOUT_STATS_HOURS_MAX : LAYOUT_HOURS_MAX;
         }
     }
     for (int k = 0; k < LAYOUT_MAX_IMAGES; k++) l->images[k][LAYOUT_IMAGE_LEN - 1] = 0;
