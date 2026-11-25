@@ -19,3 +19,5 @@ gcc -std=gnu11 -Wall -Werror -I main main/cal_parse.c test/cal_parse_test.c -o /
 TZ=UTC /tmp/cal_parse_test
 gcc -std=c11 -Wall -Werror -I main main/imu.c test/imu_test.c -lm -o /tmp/imu_test
 /tmp/imu_test
+gcc -std=c11 -Wall -Werror -I main -I $J main/theme.c $J/cJSON.c test/theme_test.c -lm -o /tmp/theme_test
+/tmp/theme_test

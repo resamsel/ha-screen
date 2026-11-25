@@ -402,6 +402,8 @@ static int parse_impl(const char *json, const char *view_path, ha_layout_t *out,
         }
     }
     const cJSON *secs = view ? cJSON_GetObjectItemCaseSensitive(view, "sections") : NULL;
+    const char *vt = view ? str(view, "theme") : NULL;
+    if (vt && strcmp(vt, "Backend-selected")) copy(out->theme, sizeof(out->theme), vt);   /* HA's own "use default" */
     if (!view) LOGW("view '%s' not found", view_path);
     if (cJSON_IsArray(secs)) {
         int idx = 0;
@@ -503,6 +505,7 @@ bool layout_sanitize(ha_layout_t *l)
     }
     for (int k = 0; k < LAYOUT_MAX_IMAGES; k++) l->images[k][LAYOUT_IMAGE_LEN - 1] = 0;
     for (int k = 0; k < LAYOUT_MAX_CALS; k++) l->cals[k][LAYOUT_CALS_LEN - 1] = 0;
+    l->theme[sizeof(l->theme) - 1] = 0;
     if (!ok) memset(l, 0, sizeof(*l));
     return ok;
 }

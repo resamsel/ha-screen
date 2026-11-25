@@ -98,6 +98,8 @@ static ha_graph_cb_t s_graph_cb;
 static bool s_force_report;
 static ha_layout_cb_t s_layout_cb;
 void ha_client_set_layout_cb(ha_layout_cb_t cb) { s_layout_cb = cb; }
+static ha_theme_cb_t s_theme_cb;
+void ha_client_set_theme_cb(ha_theme_cb_t cb) { s_theme_cb = cb; }
 static ha_busy_cb_t s_busy_cb;
 static ha_button_cb_t s_button_cb;
 static ha_press_cb_t s_press_cb;
@@ -2068,6 +2070,24 @@ static void use_layout(const ha_layout_t *l)
     load_icon_rules();
 }
 
+/* The theme's colours from frontend/get_themes; kept as they are when HA doesn't answer */
+static void fetch_theme(const char *name)
+{
+    if (!s_theme_cb) return;
+    if (s_http) {                         /* two TLS sessions at once don't fit in RAM */
+        esp_http_client_cleanup(s_http);
+        s_http = NULL;
+    }
+    dash_ws_t *d = dash_ws_open();
+    char *msg = d ? dash_ws_call(d, "\"type\":\"frontend/get_themes\"") : NULL;
+    dash_ws_close(d);
+    if (!msg) return;
+    static ha_theme_t t;
+    if (!theme_parse(msg, name, &t) && name[0]) ESP_LOGW(TAG, "theme '%s' not found or without colours", name);
+    free(msg);
+    s_theme_cb(&t);
+}
+
 /* Re-read the dashboard; switch to it if it is usable and differs from the current one.
  * Failures keep the current layout and never reach the error box. */
 /* force: re-check entities and names even if the dashboard itself is unchanged */
@@ -2109,6 +2129,7 @@ static void refresh_layout(bool force)
     if (n) raw_hash = h;
     s_err[0] = 0;                         /* validation errors are not shown */
     if (!n) { ESP_LOGW(TAG, "dashboard has no usable pages, keeping the current layout"); return; }
+    fetch_theme(l.theme);                 /* the view's theme: as often as the dashboard is read anew */
     if (layout_hash(&l) == s_layout_hash) return;
     ESP_LOGI(TAG, "new layout: %d pages", n);
     layout_store_save(&l);
