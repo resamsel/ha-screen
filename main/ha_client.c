@@ -1165,6 +1165,13 @@ static void name_push_done(void)
 /* After setup: create the board's missing helpers over the websocket API, starting with the
  * board's own values, so the board hands those settings to HA. Only with an admin token
  * (creating helpers needs one); otherwise skipped. Runs once (retried if HA didn't answer). */
+/* For the log, indexed by H_*: one per helper, or the build fails */
+static const char *const HELPER_NAME[] = {
+    "theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page",
+    "night", "night brightness", "screen timeout", "notification", "auto rotate", "motion wake",
+};
+_Static_assert(sizeof(HELPER_NAME) / sizeof(HELPER_NAME[0]) == H_COUNT, "a name for every helper");
+
 static void create_helpers(void)
 {
     bool any = false;
@@ -1210,7 +1217,7 @@ static void create_helpers(void)
         }
         char *res = dash_ws_call(d, body);
         bool ok = res && strstr(res, "\"success\":true");
-        ESP_LOGI(TAG, "helpers: create %s %s: %s", b, (const char *[]){"theme", "landscape", "presentation", "presentation interval", "brightness", "dashboard", "view", "page", "night", "night brightness", "screen timeout", "notification", "auto rotate"}[h], ok ? "ok" : res ? res : "no answer");
+        ESP_LOGI(TAG, "helpers: create %s %s: %s", b, HELPER_NAME[h], ok ? "ok" : res ? res : "no answer");
         if (ok) s_has[h] = 1;
         free(res);
     }
