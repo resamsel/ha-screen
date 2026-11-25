@@ -475,7 +475,7 @@ static char s_board_raw[32];            /* the name as typed in the setup portal
 static bool s_name_push;                /* portal saved a name: write it to the HA helper */
 /* Bump when a firmware adds board helpers: boards set up before then create the new ones
  * once (2: night, night brightness, screen timeout, issue #17; 3: notification, issue #19; 4: auto-rotate, issue #42) */
-#define HELPERS_VERSION 6
+#define HELPERS_VERSION 7
 static bool s_mkhelp;                   /* portal saved: create the missing helpers once */
 static ha_local_cb_t s_local_cb;
 void ha_client_set_local_cb(ha_local_cb_t cb) { s_local_cb = cb; }
@@ -507,7 +507,7 @@ static void ent_build(void)
     snprintf(s_ent.page, 80, "input_number.%s_page", b);
     snprintf(s_ent.night, 80, "input_boolean.%s_night", b);
     snprintf(s_ent.night_bri, 80, "input_number.%s_night_brightness", b);
-    snprintf(s_ent.scr_to, 80, "input_number.%s_screen_timeout", b);
+    snprintf(s_ent.scr_to, 80, "input_number.%s_screen_timeout", b);   /* seconds */
     snprintf(s_ent.notify, 80, "input_text.%s_notification", b);
     snprintf(s_ent.autorot, 80, "input_boolean.%s_auto_rotate", b);
     snprintf(s_ent.motion, 80, "input_boolean.%s_motion_wake", b);
@@ -1209,7 +1209,7 @@ static void create_helpers(void)
         case H_VIEW: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s view\",\"max\":64,\"initial\":\"%s\"", b, L.view); break;
         case H_NIGHT: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s night\",\"icon\":\"mdi:weather-night\",\"initial\":%s", b, L.night ? "true" : "false"); break;
         case H_NIGHT_BRI: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s night brightness\",\"min\":0,\"max\":100,\"step\":1,\"mode\":\"slider\",\"unit_of_measurement\":\"%%\",\"initial\":%d", b, L.night_pct); break;
-        case H_SCR_TO: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s screen timeout\",\"min\":0,\"max\":240,\"step\":1,\"mode\":\"box\",\"unit_of_measurement\":\"min\",\"icon\":\"mdi:timer-off-outline\",\"initial\":%d", b, L.timeout_min); break;
+        case H_SCR_TO: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s screen timeout\",\"min\":0,\"max\":3600,\"step\":5,\"mode\":\"box\",\"unit_of_measurement\":\"s\",\"icon\":\"mdi:timer-off-outline\",\"initial\":%d", b, L.timeout_s); break;
         case H_AUTOROT: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s auto rotate\",\"icon\":\"mdi:screen-rotation\",\"initial\":%s", b, L.auto_rot ? "true" : "false"); break;
         case H_MOTION: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s motion wake\",\"icon\":\"mdi:gesture-tap-hold\",\"initial\":%s", b, L.motion ? "true" : "false"); break;
         case H_SAVER: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s screensaver\",\"icon\":\"mdi:clock-outline\",\"initial\":%s", b, L.saver ? "true" : "false"); break;
@@ -2969,11 +2969,11 @@ void ha_client_notify_clear(void)
     if (s_events) xEventGroupSetBits(s_events, NOTIFY_BIT);
 }
 
-void ha_client_set_night(bool night, int night_pct, int timeout_min)
+void ha_client_set_night(bool night, int night_pct, int timeout_s)
 {
     s_set_night = night;
     s_set_night_pct = night_pct;
-    s_set_scr_to = timeout_min;
+    s_set_scr_to = timeout_s;
     if (s_events) xEventGroupSetBits(s_events, NIGHT_BIT);
 }
 
