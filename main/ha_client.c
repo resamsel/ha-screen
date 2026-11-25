@@ -1844,6 +1844,30 @@ static layout_mask_t s_cond_true;
 static bool s_cond_dirty;          /* s_cond_true changed: show the layout again */
 static uint32_t s_full_hash;       /* the whole layout last saved to the cache */
 
+/* The mask as last seen, in NVS: a boot from the cache shows the cards that were shown (and the
+ * cached data, tagged with that layout's hash, still fits them) */
+static void cond_save(void)
+{
+    static layout_mask_t saved;
+    static bool known;
+    if (known && saved == s_cond_true) return;
+    nvs_handle_t h;
+    if (nvs_open("board", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u16(h, "cond", s_cond_true);
+    nvs_commit(h);
+    nvs_close(h);
+    saved = s_cond_true;
+    known = true;
+}
+
+static layout_mask_t cond_load(void)
+{
+    nvs_handle_t h;
+    uint16_t v = 0;
+    if (nvs_open("board", NVS_READONLY, &h) == ESP_OK) { nvs_get_u16(h, "cond", &v); nvs_close(h); }
+    return v;
+}
+
 static layout_mask_t cond_bit(const ha_layout_t *l, const char *entity, const char *state)
 {
     layout_mask_t m = s_cond_true;
@@ -1882,6 +1906,7 @@ static void cond_apply(void)
 {
     s_cond_dirty = false;
     if (!layout_store_load(&s_scratch)) return;
+    cond_save();
     layout_visible(&s_scratch, s_cond_true);
     if (layout_hash(&s_scratch) == s_layout_hash) return;
     ESP_LOGI(TAG, "conditions changed: %d pages shown", s_scratch.count);
@@ -1947,6 +1972,7 @@ static void refresh_layout(bool force)
     }
     cond_seed(&l);
     s_cond_dirty = false;
+    cond_save();
     n = layout_visible(&l, s_cond_true);
     if (layout_hash(&l) == s_layout_hash) return;
     ESP_LOGI(TAG, "new layout: %d pages shown", n);
@@ -2497,7 +2523,7 @@ static void live_dispatch(const char *id, const char *json)
 static void live_drain(void)
 {
     static char json[512];
-    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 13];
+    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 1 + H_COUNT + LAYOUT_MAX_CONDS];   /* as many as live_start subscribes */
     char *m;
     while (s_live_q && xQueueReceive(s_live_q, &m, 0) == pdTRUE) {
         int n = s_live ? live_apply(s_live, m, ch, sizeof(ch) / sizeof(ch[0])) : 0;
@@ -2697,7 +2723,8 @@ static void ha_task(void *arg)
     {   /* start with the cached layout, if any */
         if (layout_store_load(&s_scratch)) {
             s_full_hash = layout_hash(&s_scratch);
-            layout_visible(&s_scratch, 0);   /* conditions not known yet: only unconditional cards */
+            s_cond_true = cond_load();       /* as last seen, until HA answers */
+            layout_visible(&s_scratch, s_cond_true);
             use_layout(&s_scratch);
             cache_replay();               /* the last data, until HA answers */
         }
@@ -2764,6 +2791,7 @@ static void ha_task(void *arg)
         /* a background round between live periods doesn't pulse the HA dot (the data is
          * current); polling without the websocket, or the refresh button, does */
         bool quiet = s_lws && !(b & REFRESH_BIT);
+        bool was_live = s_lws != NULL;
         live_stop();                      /* HTTP from here: one TLS session at a time */
         if (b == PIC_BIT) {               /* only a page switch: just its pictures */
             fetch_pictures(true);
@@ -2780,6 +2808,11 @@ static void ha_task(void *arg)
             refresh_layout(refresh);
             layout_at = xTaskGetTickCount();
             layout_read = true;
+        }
+        if (!was_live && s_layout.conds[0].entity[0]) {   /* polling: no live events, read the conditions */
+            layout_mask_t before = s_cond_true;
+            cond_seed(&s_layout);
+            if (s_cond_true != before) s_cond_dirty = true;
         }
         if (s_cond_dirty) cond_apply();
         bool updated = b & (TOGGLE_BIT | ORIENT_BIT | SETBRI_BIT | REFRESH_BIT | PRES_BIT | NIGHT_BIT | AUTOROT_BIT);
