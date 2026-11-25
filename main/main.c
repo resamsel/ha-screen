@@ -128,7 +128,7 @@ static bool s_theme_pending, s_orient_pending, s_bri_pending, s_pres_pending;
 static float s_bri_min = 0, s_bri_max = 100;   /* the brightness helper's range (0-100 without one) */
 static bool s_night;            /* night mode (issue #17), NVS "night" */
 static uint8_t s_night_pct;     /* backlight % at night, 0 = off, NVS "nbri" */
-static uint8_t s_timeout_min;   /* screen off after this idle time, 0 = never, NVS "scr_to" */
+static uint16_t s_timeout_s;    /* screen off after this idle time in seconds, 0 = never, NVS "scr_to_s" */
 static uint8_t s_boot_bri = 100;   /* backlight % from NVS until HA (if it has the helper) answers */
 static bool s_theme_known;     /* the theme entity's state is known (label shows the action) */
 static bool s_offline_state = true;
@@ -212,7 +212,8 @@ static void set_screen_bg(lv_obj_t *scr, bool light)
 }
 static void ha_landscape_changed(bool landscape);
 static void ha_pres_changed(bool on, int secs);
-static void ha_night_changed(int night, int pct, int timeout_min);
+static void ha_night_changed(int night, int pct, int timeout_s);
+static void ui_save_u16(const char *key, uint16_t v);
 static void ha_notify(const char *text);
 static void screen_apply(void);
 static void screen_init(void);
@@ -307,7 +308,9 @@ void app_main(void)
             uint8_t nt;
             if (nvs_get_u8(nv, "night", &nt) == ESP_OK) s_night = nt;
             if (nvs_get_u8(nv, "nbri", &nt) == ESP_OK) s_night_pct = nt > 100 ? 100 : nt;
-            if (nvs_get_u8(nv, "scr_to", &nt) == ESP_OK) s_timeout_min = nt;
+            uint16_t ts;
+            if (nvs_get_u16(nv, "scr_to_s", &ts) == ESP_OK) s_timeout_s = ts;
+            else if (nvs_get_u8(nv, "scr_to", &nt) == ESP_OK) s_timeout_s = nt * 60 > 3600 ? 3600 : nt * 60;   /* older firmware: minutes */
             if (s_pres_secs < 1) s_pres_secs = 10;
             size_t dlen = sizeof(s_dash_path);
             if (nvs_get_str(nv, "dash", s_dash_path, &dlen) != ESP_OK) s_dash_path[0] = 0;
@@ -3356,7 +3359,7 @@ static void ha_pres_changed(bool on, int secs)
  * from day/night brightness, idle time and presentation mode; a 1 s timer applies it. While
  * the screen is off, a transparent layer on top takes the touch that wakes it, so that touch
  * presses nothing. Settings are in NVS and mirrored to the optional HA helpers. */
-static const uint8_t SCR_TO[] = {0, 1, 2, 5, 10, 30};
+static const uint16_t SCR_TO[] = {0, 10, 15, 30, 60, 120, 300, 600, 1800};   /* seconds */
 static lv_obj_t *s_wake_layer;
 static bool s_woken;             /* the last touch woke a screen that should be off */
 static int s_level = -1;         /* backlight % last set */
@@ -3366,7 +3369,7 @@ static void screen_in_now(screen_in_t *out)
 {
     screen_in_t in = {
         .normal_pct = s_boot_bri, .night_pct = s_night_pct, .night = s_night,
-        .timeout_min = s_timeout_min, .presenting = s_pres_on && PAGE_COUNT > 1,
+        .timeout_s = s_timeout_s, .presenting = s_pres_on && PAGE_COUNT > 1,
         .idle_ms = lv_disp_get_inactive_time(NULL), .woken = s_woken,
         .face_down = s_motion_wake && s_face_down, .saver = s_saver,
     };
@@ -3607,9 +3610,9 @@ static void night_changed(void)
 {
     ui_save_u8("night", s_night);
     ui_save_u8("nbri", s_night_pct);
-    ui_save_u8("scr_to", s_timeout_min);
+    ui_save_u16("scr_to_s", s_timeout_s);
     s_night_pending = true;
-    ha_client_set_night(s_night, s_night_pct, s_timeout_min);
+    ha_client_set_night(s_night, s_night_pct, s_timeout_s);
     cfg_update();
     screen_apply();
 }
@@ -3619,7 +3622,7 @@ static void night_toggle_cb(lv_event_t *e) { (void)e; if (s_swiped) return; s_ni
 static void scr_to_cb(lv_event_t *e)
 {
     if (s_swiped) return;
-    s_timeout_min = SCR_TO[(int)(intptr_t)lv_event_get_user_data(e)];
+    s_timeout_s = SCR_TO[(int)(intptr_t)lv_event_get_user_data(e)];
     night_changed();
     cfg_back();
 }
@@ -3628,23 +3631,23 @@ static void scr_to_cb(lv_event_t *e)
 static void night_apply(void *arg)
 {
     uint32_t v = (uint32_t)(uintptr_t)arg;
-    int night = (int)(v & 0x3) - 1, pct = (int)((v >> 2) & 0xFF) - 1, to = (int)((v >> 10) & 0xFF) - 1;
+    int night = (int)(v & 0x3) - 1, pct = (int)((v >> 2) & 0xFF) - 1, to = (int)((v >> 10) & 0xFFF) - 1;
     if (s_night_pending) return;
     bool ch = false;
     if (night >= 0 && night != s_night) { s_night = night; ui_save_u8("night", s_night); ch = true; }
     if (pct >= 0 && pct <= 100 && pct != s_night_pct) { s_night_pct = pct; ui_save_u8("nbri", pct); ch = true; }
-    if (to >= 0 && to != s_timeout_min) { s_timeout_min = to; ui_save_u8("scr_to", to); ch = true; }
+    if (to >= 0 && to != s_timeout_s) { s_timeout_s = to; ui_save_u16("scr_to_s", to); ch = true; }
     if (ch) { cfg_update(); screen_apply(); }
 }
 
 /* Network task: the night helpers' state, -1 for a helper HA doesn't have */
-static void ha_night_changed(int night, int pct, int timeout_min)
+static void ha_night_changed(int night, int pct, int timeout_s)
 {
     if (pct > 100) pct = 100;
-    if (timeout_min > 254) timeout_min = 254;
+    if (timeout_s > 3600) timeout_s = 3600;   /* fits the 12 bits below */
     if (!lvgl_port_lock(0)) return;
     if (!s_night_pending)
-        lv_async_call(night_apply, (void *)(uintptr_t)((uint32_t)(night + 1) | (uint32_t)(pct + 1) << 2 | (uint32_t)(timeout_min + 1) << 10));
+        lv_async_call(night_apply, (void *)(uintptr_t)((uint32_t)(night + 1) | (uint32_t)(pct + 1) << 2 | (uint32_t)(timeout_s + 1) << 10));
     lvgl_port_unlock();
 }
 
@@ -3921,7 +3924,8 @@ typedef struct {
     int scr, cur_view, cur_dash, nviews, ndash;
     uint32_t lists;                        /* hash of the view and dashboard titles */
     uint16_t pres_secs;
-    uint8_t bri, night_pct, timeout;
+    uint8_t bri, night_pct;
+    uint16_t timeout;
     bool fw_avail, light, landscape, auto_rot, motion, saver, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
     char board[32];
 } cfg_sig_t;
@@ -3942,7 +3946,7 @@ static void cfg_sig(cfg_sig_t *s)
     s->cur_view = s_cur_view; s->cur_dash = s_cur_dash; s->nviews = s_nviews; s->ndash = s_ndash;
     s->lists = cfg_hash(cfg_hash(2166136261u, s_views, s_nviews), s_dashes, s_ndash);
     s->pres_secs = s_pres_secs;
-    s->bri = s_boot_bri; s->night_pct = s_night_pct; s->timeout = s_timeout_min;
+    s->bri = s_boot_bri; s->night_pct = s_night_pct; s->timeout = s_timeout_s;
     s->light = s_light; s->landscape = s_landscape; s->auto_rot = s_auto_rot; s->motion = s_motion_wake; s->saver = s_saver; s->theme_known = s_theme_known;
     s->busy = s_busy; s->view_pending = s_view_pending; s->refreshing = s_refreshing;
     s->offline = s_offline_state; s->pres_on = s_pres_on; s->night = s_night; s->fw_busy = s_fw_busy; s->fw_avail = s_fw_avail;
@@ -3955,10 +3959,11 @@ static void secs_text(char *b, size_t n, unsigned secs)
     else snprintf(b, n, "%u s", secs);
 }
 
-static void timeout_text(char *b, size_t n, unsigned min)
+static void timeout_text(char *b, size_t n, unsigned secs)
 {
-    if (min) snprintf(b, n, "After %u min", min);
-    else snprintf(b, n, "Never");
+    if (!secs) snprintf(b, n, "Never");
+    else if (secs % 60) snprintf(b, n, "After %u s", secs);
+    else snprintf(b, n, "After %u min", secs / 60);
 }
 
 static void bri_step_cb(lv_event_t *e);
@@ -4018,14 +4023,14 @@ static void cfg_build_screen(void)
         cfg_caption("Night brightness");
         cfg_stepper(s_night_pct, night_step_cb);
         cfg_caption("Screen");
-        timeout_text(b, sizeof(b), s_timeout_min);
+        timeout_text(b, sizeof(b), s_timeout_s);
         cfg_nav("Turn off", b, CS_SCRTO, true);
         cfg_toggle("Clock instead", s_saver, saver_cb);
         break;
     case CS_SCRTO:
-        for (int i = 0; i < (int)sizeof(SCR_TO); i++) {
+        for (int i = 0; i < (int)(sizeof(SCR_TO) / sizeof(SCR_TO[0])); i++) {
             timeout_text(b, sizeof(b), SCR_TO[i]);
-            cfg_option(b, SCR_TO[i] == s_timeout_min, scr_to_cb, i);
+            cfg_option(b, SCR_TO[i] == s_timeout_s, scr_to_cb, i);
         }
         break;
     case CS_FW:
@@ -4656,7 +4661,7 @@ static void local_settings(ha_local_t *o)
     o->motion = s_motion_wake;
     o->saver = s_saver;
     o->night_pct = s_night_pct;
-    o->timeout_min = s_timeout_min;
+    o->timeout_s = s_timeout_s;
     o->page = s_page;
     snprintf(o->dash, sizeof(o->dash), "%s", s_dash_path);
     snprintf(o->view, sizeof(o->view), "%s", s_view_path);
@@ -4698,6 +4703,15 @@ static void ui_save_u8(const char *key, uint8_t v)
     if (nvs_open("ui", NVS_READWRITE, &nv) != ESP_OK) return;
     uint8_t old;
     if (nvs_get_u8(nv, key, &old) != ESP_OK || old != v) { nvs_set_u8(nv, key, v); nvs_commit(nv); }
+    nvs_close(nv);
+}
+
+static void ui_save_u16(const char *key, uint16_t v)
+{
+    nvs_handle_t nv;
+    if (nvs_open("ui", NVS_READWRITE, &nv) != ESP_OK) return;
+    uint16_t old;
+    if (nvs_get_u16(nv, key, &old) != ESP_OK || old != v) { nvs_set_u16(nv, key, v); nvs_commit(nv); }
     nvs_close(nv);
 }
 

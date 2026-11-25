@@ -11,7 +11,7 @@ typedef struct {
     int normal_pct;      /* 5..100, day brightness */
     int night_pct;       /* 0..100, 0 = off */
     bool night;
-    int timeout_min;     /* 0 = never */
+    int timeout_s;       /* screen off after this idle time in seconds, 0 = never */
     bool presenting;     /* presentation mode cycling: no idle timeout */
     uint32_t idle_ms;    /* since the last touch */
     bool woken;          /* the last touch woke a screen whose level was 0 */
