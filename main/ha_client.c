@@ -40,6 +40,7 @@ static void add_error(const char *fmt, ...);
 #include "provision.h"
 #include "notify.h"
 #include "imu.h"
+#include "curve.h"
 
 static const char *TAG = "ha";
 
@@ -1442,7 +1443,7 @@ static float parse_entity(int pg, int row, const char *json, char text[24], char
 }
 
 /* Graph page: latest value every poll, then the history over the page's span */
-static void graph_emit_buckets(int pg, int row, int hours, bool zero_based);
+static void graph_emit_buckets(int pg, int row, int hours, bool zero_based, bool hold);
 
 /* statistics-graph (issue #52): the item's long-term statistics over the websocket
  * (recorder/statistics_during_period) into the history buckets. False if none came. */
@@ -1507,7 +1508,7 @@ static void fetch_graph(int pg, int row)
     memset(s_hist_has, 0, sizeof(s_hist_has));
     if (it->flags & LAYOUT_GRAPH_STATS) {
         if (!fetch_stats(it)) return;
-        graph_emit_buckets(pg, row, it->hours, zero_based);
+        graph_emit_buckets(pg, row, it->hours, zero_based, false);   /* one value per period */
         return;
     }
 
@@ -1528,24 +1529,32 @@ static void fetch_graph(int pg, int row)
     s_hist_mode = false;
     if (st != 200) return;
 
-    graph_emit_buckets(pg, row, it->hours, zero_based);
+    graph_emit_buckets(pg, row, it->hours, zero_based, true);   /* states hold until they change */
 }
 
-/* The filled buckets as the graph's points */
-static void graph_emit_buckets(int pg, int row, int hours, bool zero_based)
+/* The filled buckets as the graph's points: a smooth curve through the buckets with data
+ * (monotone, so no overshoot), like HA's charts. A bucket shows its peak. hold (history): a
+ * state holds until it changes, so the value the sensor ended a bucket on is also put just
+ * before the next change (and right after a peak): flat, then a smooth bend into the change,
+ * and a short spike falls back at once instead of over hours. */
+static void graph_emit_buckets(int pg, int row, int hours, bool zero_based, bool hold)
 {
-    /* a state holds until it changes: carry values forward into empty buckets */
     static float pts[HA_GRAPH_POINTS];
-    float carry = NAN;
+    static bool has[HA_GRAPH_POINTS];
+    _Static_assert(HA_GRAPH_POINTS <= CURVE_MAX, "curve_fill takes the whole graph");
     int known = 0;
-    for (int i = 0; i < HA_GRAPH_POINTS; i++) {
-        /* a bucket shows its peak; the gap after it continues with the value the
-         * sensor ended on, not the peak (a 20 % spike that drops back to 0 within
-         * the same bucket must not draw 20 % for hours) */
-        if (s_hist_has[i]) { pts[i] = s_hist_bucket[i]; carry = s_hist_last[i]; known++; }
-        else pts[i] = carry;
+    for (int i = 0; i < HA_GRAPH_POINTS; i++) { pts[i] = s_hist_bucket[i]; has[i] = s_hist_has[i]; known += has[i]; }
+    for (int i = 0; hold && i < HA_GRAPH_POINTS; i++) {
+        if (!s_hist_has[i]) continue;
+        int j = i + 1;
+        while (j < HA_GRAPH_POINTS && !s_hist_has[j]) j++;
+        if (j == i + 1) continue;          /* the next bucket changes already */
+        pts[i + 1] = s_hist_last[i];       /* back from the peak to where it ended */
+        has[i + 1] = true;
+        if (j < HA_GRAPH_POINTS && j - 1 > i + 1) { pts[j - 1] = s_hist_last[i]; has[j - 1] = true; }   /* held until the change */
     }
-    ESP_LOGD(TAG, "history %dh: %d of %d buckets with data", hours, known, HA_GRAPH_POINTS);
+    curve_fill(pts, has, HA_GRAPH_POINTS);
+    ESP_LOGD(TAG, "graph %dh: %d of %d buckets with data", hours, known, HA_GRAPH_POINTS);
     emit_graph(pg, row, NULL, NULL, NULL, pts, HA_GRAPH_POINTS, s_now, hours, zero_based);
 }
 

@@ -2770,7 +2770,10 @@ static void ha_graph_changed(int graph, int row, const char *latest, const char 
         float top = ceilf(mx / step) * step;
         if (top - mx < step * 0.1f) top += step;
         if (top <= bot) top = bot + step;
-        lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (lv_coord_t)(bot * 10), (lv_coord_t)(top * 10));
+        /* the chart holds 16-bit values: bot..top as 0..CHART_RES, finer than a pixel whatever the unit
+         * (tenths made 0.1-steps stairs on a small range, and overflow on kW-sized values) */
+#define CHART_RES 10000
+        lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, CHART_RES);
         /* resample the n smoothed points onto the chart's (fewer) points */
         int cnt = lv_chart_get_point_count(s_chart);
         n = LV_MIN(n, HA_GRAPH_POINTS);
@@ -2781,7 +2784,8 @@ static void ha_graph_changed(int graph, int row, const char *latest, const char 
             if (isnan(sm[i0])) v = sm[i1];
             else if (isnan(sm[i1])) v = sm[i0];
             else v = sm[i0] + (sm[i1] - sm[i0]) * f;
-            lv_chart_set_value_by_id(s_chart, s_chart_ser, c, isnan(v) ? LV_CHART_POINT_NONE : (lv_coord_t)(v * 10));
+            lv_chart_set_value_by_id(s_chart, s_chart_ser, c, isnan(v) ? LV_CHART_POINT_NONE
+                                    : (lv_coord_t)lroundf(LV_CLAMP(0.0f, (v - bot) / (top - bot), 1.0f) * CHART_RES));
         }
         lv_chart_refresh(s_chart);
     }
