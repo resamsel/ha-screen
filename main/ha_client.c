@@ -1440,6 +1440,15 @@ static bool fetch_stats(const layout_item_t *it)
     static const char *const TYPE[] = { "mean", "min", "max", "state" };
     int per = (it->flags & LAYOUT_GRAPH_PERIOD) >> 1, ty = (it->flags & LAYOUT_GRAPH_TYPE) >> 4;
     if (per > 4) per = 0;
+    /* at most HA_GRAPH_POINTS rows: the graph has no more columns, and the answer must stay
+     * under the websocket's 32 KB (30 days of hours would not) -> a coarser period */
+    static const int ORDER[] = { 1, 0, 2, 3, 4 };              /* 5minute, hour, day, week, month */
+    static const int64_t SECS[] = { 3600, 300, 86400, 604800, 2592000 };
+    int o = 0;
+    while (ORDER[o] != per) o++;
+    while (o < 4 && (int64_t)it->hours * 3600 / SECS[ORDER[o]] > HA_GRAPH_POINTS) o++;
+    if (ORDER[o] != per) ESP_LOGI(TAG, "statistics of %s: period %s instead of %s (%d h)", it->entity, PERIOD[ORDER[o]], PERIOD[per], it->hours);
+    per = ORDER[o];
     char start[32], stop[32], body[320];
     time_t t0 = (time_t)(s_now - (int64_t)it->hours * 3600), t1 = (time_t)s_now;
     struct tm g;
