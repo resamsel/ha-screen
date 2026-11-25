@@ -475,7 +475,7 @@ static char s_board_raw[32];            /* the name as typed in the setup portal
 static bool s_name_push;                /* portal saved a name: write it to the HA helper */
 /* Bump when a firmware adds board helpers: boards set up before then create the new ones
  * once (2: night, night brightness, screen timeout, issue #17; 3: notification, issue #19; 4: auto-rotate, issue #42) */
-#define HELPERS_VERSION 4
+#define HELPERS_VERSION 5
 static bool s_mkhelp;                   /* portal saved: create the missing helpers once */
 static ha_local_cb_t s_local_cb;
 void ha_client_set_local_cb(ha_local_cb_t cb) { s_local_cb = cb; }
