@@ -25,6 +25,12 @@ int main(void)
     NEAR(imu_tilt(0, -G, -G), 45.0f);
     NEAR(IMU_ACC_G(G), 1.0f);
     NEAR(IMU_GYR_DPS(6400), 100.0f);
+    {
+        int still[3] = {0, 0, G}, nudge[3] = {300, -200, G + 100}, lift[3] = {2000, 0, G}, g0[3] = {10, -20, 5}, spin[3] = {0, 3000, 0};
+        if (imu_moved(still, nudge, g0)) { printf("FAIL nudge counted as moved\n"); fails++; }
+        if (!imu_moved(still, lift, g0)) { printf("FAIL lift not moved\n"); fails++; }
+        if (!imu_moved(still, still, spin)) { printf("FAIL spin not moved\n"); fails++; }
+    }
     if (fails) return 1;
     printf("imu ok\n");
     return 0;

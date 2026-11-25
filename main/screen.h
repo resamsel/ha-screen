@@ -14,6 +14,7 @@ typedef struct {
     bool presenting;     /* presentation mode cycling: no idle timeout */
     uint32_t idle_ms;    /* since the last touch */
     bool woken;          /* the last touch woke a screen whose level was 0 */
+    bool face_down;      /* lying face down with motion wake on (issue #58): off */
 } screen_in_t;
 
 /* Backlight % to set, 0 = off */
