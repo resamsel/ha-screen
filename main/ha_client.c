@@ -507,7 +507,7 @@ static void ent_build(void)
     snprintf(s_ent.page, 80, "input_number.%s_page", b);
     snprintf(s_ent.night, 80, "input_boolean.%s_night", b);
     snprintf(s_ent.night_bri, 80, "input_number.%s_night_brightness", b);
-    snprintf(s_ent.scr_to, 80, "input_number.%s_screen_timeout_seconds", b);   /* was _screen_timeout, in minutes */
+    snprintf(s_ent.scr_to, 80, "input_number.%s_screen_timeout", b);   /* seconds */
     snprintf(s_ent.notify, 80, "input_text.%s_notification", b);
     snprintf(s_ent.autorot, 80, "input_boolean.%s_auto_rotate", b);
     snprintf(s_ent.motion, 80, "input_boolean.%s_motion_wake", b);
@@ -1209,7 +1209,7 @@ static void create_helpers(void)
         case H_VIEW: snprintf(body, sizeof(body), "\"type\":\"input_text/create\",\"name\":\"%s view\",\"max\":64,\"initial\":\"%s\"", b, L.view); break;
         case H_NIGHT: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s night\",\"icon\":\"mdi:weather-night\",\"initial\":%s", b, L.night ? "true" : "false"); break;
         case H_NIGHT_BRI: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s night brightness\",\"min\":0,\"max\":100,\"step\":1,\"mode\":\"slider\",\"unit_of_measurement\":\"%%\",\"initial\":%d", b, L.night_pct); break;
-        case H_SCR_TO: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s screen timeout seconds\",\"min\":0,\"max\":3600,\"step\":5,\"mode\":\"box\",\"unit_of_measurement\":\"s\",\"icon\":\"mdi:timer-off-outline\",\"initial\":%d", b, L.timeout_s); break;
+        case H_SCR_TO: snprintf(body, sizeof(body), "\"type\":\"input_number/create\",\"name\":\"%s screen timeout\",\"min\":0,\"max\":3600,\"step\":5,\"mode\":\"box\",\"unit_of_measurement\":\"s\",\"icon\":\"mdi:timer-off-outline\",\"initial\":%d", b, L.timeout_s); break;
         case H_AUTOROT: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s auto rotate\",\"icon\":\"mdi:screen-rotation\",\"initial\":%s", b, L.auto_rot ? "true" : "false"); break;
         case H_MOTION: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s motion wake\",\"icon\":\"mdi:gesture-tap-hold\",\"initial\":%s", b, L.motion ? "true" : "false"); break;
         case H_SAVER: snprintf(body, sizeof(body), "\"type\":\"input_boolean/create\",\"name\":\"%s screensaver\",\"icon\":\"mdi:clock-outline\",\"initial\":%s", b, L.saver ? "true" : "false"); break;
