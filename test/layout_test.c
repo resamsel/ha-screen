@@ -34,6 +34,15 @@ static int parse_sections(const char *sections, ha_layout_t *l)
 #define BTN(e) "{\"type\":\"button\",\"entity\":\"" e "\"}"
 #define SEC(...) "{\"type\":\"grid\",\"cards\":[" __VA_ARGS__ "]}"
 
+static void test_view_theme(void)
+{
+    ha_layout_t l;
+    assert(layout_parse("{\"views\":[{\"path\":\"main\",\"theme\":\"Ocean\",\"sections\":[" SEC(TILE("sensor.a")) "]}]}", "main", &l) == 1);
+    assert(!strcmp(l.theme, "Ocean"));
+    assert(layout_parse("{\"views\":[{\"path\":\"main\",\"theme\":\"Backend-selected\",\"sections\":[" SEC(TILE("sensor.a")) "]}]}", "main", &l) == 1);
+    assert(!l.theme[0]);
+}
+
 static void test_fixture(void)
 {
     ha_layout_t l;
@@ -469,6 +478,7 @@ static void test_dashboards(void)
 
 int main(void)
 {
+    test_view_theme();
     test_picture();
     test_weather();
     test_picture_glance();

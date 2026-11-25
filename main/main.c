@@ -102,6 +102,7 @@ static void ha_weather_changed(int page, int row, const char *cond, const char *
 static void apply_panel_theme(bool light);
 static void ha_sensor_changed(int page, int row, const char *value, const char *unit, const char *name);
 static void ha_layout_changed(const ha_layout_t *layout);
+static void ha_theme_changed(const ha_theme_t *theme);
 static void ha_icon_changed(int page, int row, const char *icon);
 static void dots_show(void);
 static void show_page(int page);
@@ -192,11 +193,22 @@ static void apply_rotation(void);
 extern const lv_img_dsc_t bg_dark;
 extern const lv_img_dsc_t bg_light;
 
-/* Theme background image (centred 320x320, covers both orientations). */
+/* ---- HA theme colours (issue #51): the view's theme replaces these where it sets them ---- */
+static ha_theme_t s_ha_theme;      /* NVS "ui"/"theme" so the board starts in it */
+static lv_color_t theme_col(bool light, int c, uint32_t def)
+{
+    return lv_color_hex(s_ha_theme.has[light] & (1u << c) ? s_ha_theme.rgb[light][c] : def);
+}
+#define COL_ACCENT(light) theme_col(light, THEME_PRIMARY, 0x03A9F4)        /* HA's primary */
+#define COL_CARD(light)   theme_col(light, THEME_CARD, (light) ? 0xD5DAE0 : 0x3A3F47)
+
+/* Theme background image (centred 320x320, covers both orientations), or the HA theme's
+ * background colour when it has one */
 static void set_screen_bg(lv_obj_t *scr, bool light)
 {
-    lv_obj_set_style_bg_color(scr, light ? lv_color_white() : lv_color_black(), 0);
-    lv_obj_set_style_bg_img_src(scr, light ? &bg_light : &bg_dark, 0);
+    bool own = s_ha_theme.has[light] & (1u << THEME_BG);
+    lv_obj_set_style_bg_color(scr, theme_col(light, THEME_BG, light ? 0xFFFFFF : 0x000000), 0);
+    lv_obj_set_style_bg_img_src(scr, own ? NULL : light ? &bg_light : &bg_dark, 0);
 }
 static void ha_landscape_changed(bool landscape);
 static void ha_pres_changed(bool on, int secs);
@@ -281,6 +293,8 @@ void app_main(void)
             s_rot = land ? LV_DISP_ROT_90 : LV_DISP_ROT_NONE;
             if (nvs_get_u8(nv, "rot", &rot) == ESP_OK && rot <= LV_DISP_ROT_270 && (rot & 1) == (land ? 1 : 0)) s_rot = rot;
             if (nvs_get_u8(nv, "auto_rot", &ar) == ESP_OK) s_auto_rot = ar;
+            size_t tlen = sizeof(s_ha_theme);   /* HA theme colours (issue #51) */
+            if (nvs_get_blob(nv, "theme", &s_ha_theme, &tlen) != ESP_OK || tlen != sizeof(s_ha_theme)) memset(&s_ha_theme, 0, sizeof(s_ha_theme));
             if (nvs_get_u8(nv, "page", &page) == ESP_OK) s_boot_page = page;
             size_t vlen = sizeof(s_view_path);
             if (nvs_get_str(nv, "view", s_view_path, &vlen) != ESP_OK) s_view_path[0] = 0;
@@ -327,6 +341,7 @@ void app_main(void)
     ha_client_set_autorot_cb(ha_autorot_changed);
     ha_client_set_notify_cb(ha_notify);
     ha_client_set_layout_cb(ha_layout_changed);
+    ha_client_set_theme_cb(ha_theme_changed);
     ha_client_set_busy_cb(ha_busy);
     ha_client_set_button_cb(ha_button_changed);
     ha_client_set_press_cb(ha_button_pressed);
@@ -586,8 +601,8 @@ static void title_update(void)
 
 /* The two text colours of the cards: MAIN for values, SEC for everything around them
  * (names, titles, units, icons, ...): lighter than MAIN in light mode, darker in dark mode */
-#define COL_MAIN(light) lv_color_hex((light) ? 0x2D4152 : 0xE1E4E7)   /* light: HA's tile text */
-#define COL_SEC(light)  lv_color_hex((light) ? 0x3A4C5D : 0xB4BBC2)
+#define COL_MAIN(light) theme_col(light, THEME_TEXT, (light) ? 0x2D4152 : 0xE1E4E7)   /* light: HA's tile text */
+#define COL_SEC(light)  theme_col(light, THEME_TEXT2, (light) ? 0x3A4C5D : 0xB4BBC2)
 static lv_color_t icon_color(void) { return COL_SEC(s_light); }
 
 static void graph_block(int gi, lv_area_t *a);
@@ -779,7 +794,7 @@ static void btn_paint(int pg, int i)
     if (!b) return;
     ha_btn_state_t st = s_btn_st[pg][i];
     lv_color_t text = s_light ? lv_color_hex(0x1C1C1E) : lv_color_white();
-    lv_color_t bg = lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47);
+    lv_color_t bg = COL_CARD(s_light);
     const char *label = "--";
     switch (st) {
     case HA_BTN_ON:     bg = lv_color_hex(BTN_ON_COLOR); text = lv_color_hex(0x1C1C1E); label = "On"; break;
@@ -948,7 +963,7 @@ static void create_picture(lv_obj_t *page, int pg, int i)
     lv_obj_set_style_radius(bg, 14, 0);
     lv_obj_set_style_clip_corner(bg, true, 0);
     lv_obj_set_style_bg_opa(bg, BTN_OPA, 0);
-    lv_obj_set_style_bg_color(bg, lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+    lv_obj_set_style_bg_color(bg, COL_CARD(s_light), 0);
     lv_obj_set_size(bg, lv_area_get_width(&blk) - 2 * CARD_INSET, lv_area_get_height(&blk) - 2 * CARD_INSET);
     lv_obj_set_pos(bg, blk.x1 + CARD_INSET, blk.y1 + CARD_INSET);
     s_pic[pg][i] = lv_img_create(bg);
@@ -1446,7 +1461,7 @@ static void cal_range(const cal_event_t *e, int day, char *tl, size_t tn, char *
 
 static void cal_draw_month(lv_obj_t *b, const cal_data_t *d, int y, int w, int h)
 {
-    lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light), acc = lv_color_hex(0x03A9F4);
+    lv_color_t fg = COL_MAIN(s_light), sec = COL_SEC(s_light), acc = COL_ACCENT(s_light);
     const lv_font_t *f = &lv_font_latin_12;
     time_t m = d ? (time_t)d->month : time(NULL);
     struct tm tm;
@@ -1702,7 +1717,7 @@ static void create_gauge(lv_obj_t *page, int pg, int i)
     lv_obj_set_style_arc_rounded(a, false, LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(a, LV_OPA_30, LV_PART_MAIN);
     lv_obj_set_style_arc_color(a, COL_SEC(s_light), LV_PART_MAIN);
-    lv_obj_set_style_arc_color(a, lv_color_hex(0x03A9F4), LV_PART_INDICATOR);   /* HA's primary */
+    lv_obj_set_style_arc_color(a, COL_ACCENT(s_light), LV_PART_INDICATOR);   /* HA's primary */
     s_gz_arc[pg][i] = a;
 
     lv_obj_t *v = lv_label_create(page), *u = lv_label_create(page), *n = lv_label_create(page);
@@ -1861,7 +1876,7 @@ static void th_paint(int pg, int i)
     lv_obj_set_style_text_color(t->info, COL_SEC(s_light), 0);
     lv_obj_set_style_text_color(t->tgt, COL_MAIN(s_light), 0);
     for (int k = 0; k < 2; k++) {
-        lv_obj_set_style_bg_color(t->btn[k], lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+        lv_obj_set_style_bg_color(t->btn[k], COL_CARD(s_light), 0);
         lv_obj_set_style_text_color(lv_obj_get_child(t->btn[k], 0), COL_MAIN(s_light), 0);
     }
 }
@@ -2006,7 +2021,7 @@ static void med_paint(int pg, int i)
     lv_obj_set_style_text_color(m->artist, COL_SEC(s_light), 0);
     lv_obj_set_style_text_color(m->title, COL_MAIN(s_light), 0);
     for (int k = 0; k < 2; k++) {
-        lv_obj_set_style_bg_color(m->btn[k], lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+        lv_obj_set_style_bg_color(m->btn[k], COL_CARD(s_light), 0);
         lv_obj_set_style_text_color(lv_obj_get_child(m->btn[k], 0), COL_MAIN(s_light), 0);
     }
     lv_label_set_text(lv_obj_get_child(m->btn[0], 0), !strcmp(m->state, "playing") ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
@@ -2120,9 +2135,9 @@ static void lt_paint(int pg, int i)
     bool on = !strcmp(t->state, "on");
     lv_obj_set_style_text_color(t->name, COL_SEC(s_light), 0);
     lv_obj_set_style_text_color(t->pct, COL_MAIN(s_light), 0);
-    lv_obj_set_style_bg_color(t->btn, on ? lv_color_hex(BTN_ON_COLOR) : lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), 0);
+    lv_obj_set_style_bg_color(t->btn, on ? lv_color_hex(BTN_ON_COLOR) : COL_CARD(s_light), 0);
     lv_obj_set_style_text_color(lv_obj_get_child(t->btn, 0), on ? lv_color_hex(0x1C1C1E) : COL_MAIN(s_light), 0);
-    lv_obj_set_style_bg_color(t->bar, lv_color_hex(s_light ? 0xD5DAE0 : 0x3A3F47), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(t->bar, COL_CARD(s_light), LV_PART_MAIN);
     lv_obj_set_style_bg_color(t->bar, on ? lv_color_hex(BTN_ON_COLOR) : COL_SEC(s_light), LV_PART_INDICATOR);
     lv_bar_set_value(t->bar, on && t->val > 0 ? t->val : 0, LV_ANIM_OFF);
     const char *txt = !strcmp(t->state, "off") ? "Off" : !strcmp(t->state, "unavailable") || !t->state[0] ? "--" : NULL;
@@ -2432,14 +2447,14 @@ static void apply_temp_theme(bool light)
         lv_obj_set_style_text_color(s_g_name, sub, 0);
         lv_obj_set_style_text_color(s_g_val, val, 0);
         lv_obj_set_style_text_color(s_g_unit, unit, 0);
-        lv_chart_set_series_color(s_chart, s_chart_ser, lv_color_hex(light ? 0x2D8EC7 : 0x0E6FA8));   /* like HA's sensor card */
+        lv_chart_set_series_color(s_chart, s_chart_ser, theme_col(light, THEME_PRIMARY, light ? 0x2D8EC7 : 0x0E6FA8));   /* like HA's sensor card */
     }
     s_gi = 0;
     for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++) {
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++) btn_paint(pg, i);
         for (int i = 0; i < LAYOUT_MAX_ROWS; i++) {
             int gi = GI(pg, i);
-            if (s_clk_bg[gi]) lv_obj_set_style_bg_color(s_clk_bg[gi], lv_color_hex(light ? 0xD5DAE0 : 0x3A3F47), 0);
+            if (s_clk_bg[gi]) lv_obj_set_style_bg_color(s_clk_bg[gi], COL_CARD(light), 0);
             if (s_clk_time[gi]) {
                 lv_obj_set_style_text_color(s_clk_time[gi], val, 0);
                 lv_obj_set_style_text_color(s_clk_small[gi], sub, 0);
@@ -3426,7 +3441,7 @@ static void notify_show(void *arg)
         lv_obj_align(s_notify, LV_ALIGN_TOP_MID, 0, 6);
         lv_obj_set_style_radius(s_notify, 12, 0);
         lv_obj_set_style_border_width(s_notify, 2, 0);
-        lv_obj_set_style_border_color(s_notify, lv_color_hex(0x03A9F4), 0);   /* HA's primary */
+        lv_obj_set_style_border_color(s_notify, COL_ACCENT(s_light), 0);   /* HA's primary */
         lv_obj_set_style_pad_all(s_notify, 10, 0);
         lv_obj_add_flag(s_notify, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_clear_flag(s_notify, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -3586,7 +3601,7 @@ static lv_coord_t s_drag_start_x, s_drag_start_y;
 #define CFG_ROW_H    (s_landscape ? 34 : 40)
 #define CFG_INNER_W  (CFG_W - 20)
 #define CFG_TEXT     (s_light ? lv_color_hex(0x1C1C1E) : lv_color_white())
-#define CFG_ACCENT   lv_color_hex(s_light ? 0x0B7FAB : 0x18BCF2)
+#define CFG_ACCENT   theme_col(s_light, THEME_PRIMARY, s_light ? 0x0B7FAB : 0x18BCF2)
 #define CFG_LINE     lv_color_hex(s_light ? 0xDDE1E6 : 0x2A2F36)
 #define CFG_FILL     lv_color_hex(s_light ? 0xE3E7EC : 0x2A2F36)
 #define CFG_SEL      lv_color_hex(s_light ? 0xFFFFFF : 0x4A5058)
@@ -5034,6 +5049,28 @@ static void ha_icon_changed(int page, int row, const char *icon)
             icon_show(page, row);
             if (KIND(page, row) == LAYOUT_VALUES) icon_place(page, row);   /* hidden again if no room */
         }
+    }
+    lvgl_port_unlock();
+}
+
+/* Network task: the view's theme colours. A change redraws everything in them. */
+static void ha_theme_changed(const ha_theme_t *theme)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (memcmp(theme, &s_ha_theme, sizeof(s_ha_theme))) {
+        ESP_LOGI(TAG, "HA theme colours: dark 0x%02x, light 0x%02x", theme->has[0], theme->has[1]);
+        s_ha_theme = *theme;
+        nvs_handle_t nv;
+        if (nvs_open("ui", NVS_READWRITE, &nv) == ESP_OK) {
+            nvs_set_blob(nv, "theme", &s_ha_theme, sizeof(s_ha_theme));
+            nvs_commit(nv);
+            nvs_close(nv);
+        }
+        bool was_open = s_cfg_open;
+        create_ui();
+        if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
+        ui_refill();
+        lv_obj_invalidate(lv_scr_act());
     }
     lvgl_port_unlock();
 }

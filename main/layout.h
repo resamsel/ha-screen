@@ -84,6 +84,7 @@ typedef struct {
      * absolute or relative to HA */
     char images[LAYOUT_MAX_IMAGES][LAYOUT_IMAGE_LEN];
     char cals[LAYOUT_MAX_CALS][LAYOUT_CALS_LEN];   /* calendar cards' entity lists */
+    char theme[32];         /* the view's theme (issue #51), "" = HA's default */
 } ha_layout_t;
 
 /* json: full websocket result message ({"result":{...}}) or the bare dashboard config.

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "layout.h"
 #include "cal_parse.h"
+#include "theme.h"
 
 typedef enum {
     HA_STATE_OFFLINE,  /* no Wi-Fi */
@@ -27,6 +28,11 @@ typedef void (*ha_done_cb_t)(bool ok, bool refresh);
  * during the call. Called from the network task before any sensor/graph callback for it. */
 typedef void (*ha_layout_cb_t)(const ha_layout_t *layout);
 void ha_client_set_layout_cb(ha_layout_cb_t cb);  /* call before ha_client_start */
+
+/* The dashboard view's HA theme colours (issue #51), read with each new layout; no colours set
+ * = the board's own. Called from the network task. */
+typedef void (*ha_theme_cb_t)(const ha_theme_t *theme);
+void ha_client_set_theme_cb(ha_theme_cb_t cb);    /* call before ha_client_start */
 
 /* Button page row: state for display; name = card name or friendly_name */
 typedef enum { HA_BTN_UNAVAILABLE, HA_BTN_OFF, HA_BTN_ON, HA_BTN_SCRIPT, HA_BTN_SCENE, HA_BTN_PRESS } ha_btn_state_t;   /* PRESS: button / input_button */
