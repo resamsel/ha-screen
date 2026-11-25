@@ -24,3 +24,11 @@ float imu_tilt(int ax, int ay, int az)
     if (c < -1.0f) c = -1.0f;
     return acosf(c) * (180.0f / 3.14159265f);
 }
+
+bool imu_moved(const int prev_acc[3], const int acc[3], const int gyr[3])
+{
+    const int ACC_D = 1229, GYR_D = 2560;   /* 0.15 g, 40 deg/s */
+    for (int i = 0; i < 3; i++)
+        if (abs(acc[i] - prev_acc[i]) > ACC_D || abs(gyr[i]) > GYR_D) return true;
+    return false;
+}

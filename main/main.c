@@ -31,6 +31,7 @@ static void button_init(void);
 // #include "bsp_sdcard.h"
 // #include "bsp_battery.h"
 #include "bsp_qmi8658.h"
+#include "imu.h"
 
 // #include "iot_button.h"
 // #include "button_gpio.h"
@@ -182,6 +183,11 @@ static uint8_t s_rot = 0;          /* display rotation (lv_disp_rot_t: 0, 90, 18
 static bool s_auto_rot = false;    /* follow the board's physical orientation (IMU), kept in NVS */
 static bool s_autorot_pending;     /* switched here, not yet confirmed by HA */
 static void ha_autorot_changed(bool on);
+static bool s_motion_wake = true;  /* IMU: pick up to wake, face down to sleep (issue #58), NVS "motion" */
+static bool s_motion_pending;      /* switched here, not yet confirmed by HA */
+static bool s_face_down;           /* lying face down (held for IMU_HOLD_MS) */
+static void ha_motion_changed(bool on);
+static void motion_cb(lv_event_t *e);
 static void settle_poll(lv_timer_t *t);
 static void auto_rot_cb(lv_event_t *e);
 static void orient_save(void);
@@ -281,6 +287,7 @@ void app_main(void)
             s_rot = land ? LV_DISP_ROT_90 : LV_DISP_ROT_NONE;
             if (nvs_get_u8(nv, "rot", &rot) == ESP_OK && rot <= LV_DISP_ROT_270 && (rot & 1) == (land ? 1 : 0)) s_rot = rot;
             if (nvs_get_u8(nv, "auto_rot", &ar) == ESP_OK) s_auto_rot = ar;
+            if (nvs_get_u8(nv, "motion", &ar) == ESP_OK) s_motion_wake = ar;
             if (nvs_get_u8(nv, "page", &page) == ESP_OK) s_boot_page = page;
             size_t vlen = sizeof(s_view_path);
             if (nvs_get_str(nv, "view", s_view_path, &vlen) != ESP_OK) s_view_path[0] = 0;
@@ -325,6 +332,7 @@ void app_main(void)
     ha_client_set_pres_cb(ha_pres_changed);
     ha_client_set_night_cb(ha_night_changed);
     ha_client_set_autorot_cb(ha_autorot_changed);
+    ha_client_set_motion_cb(ha_motion_changed);
     ha_client_set_notify_cb(ha_notify);
     ha_client_set_layout_cb(ha_layout_changed);
     ha_client_set_busy_cb(ha_busy);
@@ -3350,6 +3358,7 @@ static int screen_level_now(void)
         .normal_pct = s_boot_bri, .night_pct = s_night_pct, .night = s_night,
         .timeout_min = s_timeout_min, .presenting = s_pres_on && PAGE_COUNT > 1,
         .idle_ms = lv_disp_get_inactive_time(NULL), .woken = s_woken,
+        .face_down = s_motion_wake && s_face_down,
     };
     return screen_level(&in);
 }
@@ -3794,7 +3803,7 @@ typedef struct {
     uint32_t lists;                        /* hash of the view and dashboard titles */
     uint16_t pres_secs;
     uint8_t bri, night_pct, timeout;
-    bool fw_avail, light, landscape, auto_rot, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
+    bool fw_avail, light, landscape, auto_rot, motion, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
     char board[32];
 } cfg_sig_t;
 static cfg_sig_t s_cfg_sig;
@@ -3815,7 +3824,7 @@ static void cfg_sig(cfg_sig_t *s)
     s->lists = cfg_hash(cfg_hash(2166136261u, s_views, s_nviews), s_dashes, s_ndash);
     s->pres_secs = s_pres_secs;
     s->bri = s_boot_bri; s->night_pct = s_night_pct; s->timeout = s_timeout_min;
-    s->light = s_light; s->landscape = s_landscape; s->auto_rot = s_auto_rot; s->theme_known = s_theme_known;
+    s->light = s_light; s->landscape = s_landscape; s->auto_rot = s_auto_rot; s->motion = s_motion_wake; s->theme_known = s_theme_known;
     s->busy = s_busy; s->view_pending = s_view_pending; s->refreshing = s_refreshing;
     s->offline = s_offline_state; s->pres_on = s_pres_on; s->night = s_night; s->fw_busy = s_fw_busy; s->fw_avail = s_fw_avail;
     snprintf(s->board, sizeof(s->board), "%s", s_board_name);
@@ -3875,6 +3884,7 @@ static void cfg_build_screen(void)
         cfg_caption("Orientation");
         cfg_segmented("Portrait", "Landscape", s_auto_rot ? -1 : s_landscape, orient_seg_cb);
         cfg_toggle("Auto-rotate", s_auto_rot, auto_rot_cb);
+        cfg_toggle("Wake on pick-up", s_motion_wake, motion_cb);
         break;
     case CS_PRES:
         cfg_toggle("On", s_pres_on, pres_toggle_cb);
@@ -4375,7 +4385,7 @@ static void settle_poll(lv_timer_t *t)
     (void)t;
     if (!s_settling || lv_tick_elaps(s_settle_at) < HA_ECHO_HOLD_MS) return;
     s_settling = false;
-    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = s_autorot_pending = false;
+    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = s_autorot_pending = s_motion_pending = false;
 }
 
 /* Network task: the request finished and the state was re-read */
@@ -4523,6 +4533,7 @@ static void local_settings(ha_local_t *o)
     o->bri_pct = s_boot_bri;
     o->night = s_night;
     o->auto_rot = s_auto_rot;
+    o->motion = s_motion_wake;
     o->night_pct = s_night_pct;
     o->timeout_min = s_timeout_min;
     o->page = s_page;
@@ -4741,6 +4752,7 @@ static void orient_save(void)
         nvs_set_u8(nv, "landscape", s_landscape);
         nvs_set_u8(nv, "rot", s_rot);
         nvs_set_u8(nv, "auto_rot", s_auto_rot);
+        nvs_set_u8(nv, "motion", s_motion_wake);
         nvs_commit(nv);
         nvs_close(nv);
     }
@@ -4793,6 +4805,29 @@ static int imu_rotation(int ax, int ay, int az)
     return ax > 0 ? LV_DISP_ROT_270 : LV_DISP_ROT_90;
 }
 
+/* Motion wake (issue #58): moving the board lights the screen like a touch; lying face down
+ * for IMU_HOLD_MS turns it off until it is turned over again. LVGL task. */
+static void imu_motion(const qmi8658_data_t *d)
+{
+    static int prev[3];
+    static bool have_prev, cand;
+    static uint32_t since;
+    int acc[3] = {d->acc_x, d->acc_y, d->acc_z}, gyr[3] = {d->gyr_x, d->gyr_y, d->gyr_z};
+    bool moved = have_prev && imu_moved(prev, acc, gyr);
+    memcpy(prev, acc, sizeof(prev));
+    have_prev = true;
+    if (!s_motion_wake) { s_face_down = cand = false; return; }
+    bool down = !strcmp(imu_orientation(acc[0], acc[1], acc[2]), "face_down");
+    if (down != cand) { cand = down; since = lv_tick_get(); }
+    bool face_down = down && (s_face_down || lv_tick_elaps(since) >= IMU_HOLD_MS);
+    if (face_down != s_face_down) {
+        ESP_LOGI(TAG, "face %s", face_down ? "down: screen off" : "up");
+        s_face_down = face_down;
+        screen_apply();
+    }
+    if (moved && !s_face_down) screen_wake();
+}
+
 static void imu_poll(lv_timer_t *t)
 {
     static int cand = -1;
@@ -4800,6 +4835,7 @@ static void imu_poll(lv_timer_t *t)
     qmi8658_data_t d;
     if (!bsp_qmi8658_read_data(&d)) return;
     ha_client_set_imu(d.acc_x, d.acc_y, d.acc_z, d.gyr_x, d.gyr_y, d.gyr_z);   /* HA sensors, #39 */
+    imu_motion(&d);
     if (!s_auto_rot) { cand = -1; return; }
     int r = imu_rotation(d.acc_x, d.acc_y, d.acc_z);
     if (r != cand) {
@@ -4830,6 +4866,37 @@ static void auto_rot_cb(lv_event_t *e)
     s_autorot_pending = true;
     ha_client_set_auto_rotate(s_auto_rot);
     cfg_update();
+}
+
+static void motion_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_swiped) return;
+    s_motion_wake = !s_motion_wake;
+    orient_save();
+    s_motion_pending = true;
+    ha_client_set_motion_wake(s_motion_wake);
+    screen_apply();
+    cfg_update();
+}
+
+/* HA's motion wake helper (LVGL task) */
+static void motion_apply(void *arg)
+{
+    bool on = arg != NULL;
+    if (s_motion_pending || on == s_motion_wake) return;
+    s_motion_wake = on;
+    orient_save();
+    screen_apply();
+    cfg_update();
+}
+
+/* Network task: the motion wake helper's state */
+static void ha_motion_changed(bool on)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (!s_motion_pending) lv_async_call(motion_apply, (void *)(intptr_t)on);
+    lvgl_port_unlock();
 }
 
 /* HA's auto-rotate helper (LVGL task) */
