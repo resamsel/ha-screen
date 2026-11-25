@@ -502,10 +502,67 @@ static void test_history_graphs(void)
     assert(l.pages[0].items[0].hours == LAYOUT_STATS_HOURS_MAX);
 }
 
+static void test_conditions(void)
+{
+    ha_layout_t l;
+    /* conditional card (old form + state list), card visibility (numeric), section visibility (state_not) */
+    assert(parse_sections("["
+        SEC(TILE("sensor.a")
+            ",{\"type\":\"conditional\",\"conditions\":[{\"entity\":\"sensor.washer\",\"state\":\"done\"}],\"card\":" TILE("sensor.b") "}"
+            ",{\"type\":\"tile\",\"entity\":\"sensor.c\",\"visibility\":[{\"condition\":\"numeric_state\",\"entity\":\"sensor.t\",\"above\":20,\"below\":30}]}"
+            ",{\"type\":\"conditional\",\"conditions\":[{\"condition\":\"state\",\"entity\":\"sensor.washer\",\"state\":[\"done\",\"idle\"]},{\"condition\":\"screen\",\"media_query\":\"x\"}],\"card\":" TILE("sensor.d") "}")
+        "," "{\"type\":\"grid\",\"visibility\":[{\"condition\":\"state\",\"entity\":\"person.me\",\"state_not\":\"home\"}],\"cards\":[" TILE("sensor.e") "]}"
+        "]", &l) == 2);
+    assert(l.pages[0].count == 4);
+    assert(l.pages[0].items[0].cond == 0);
+    assert(!strcmp(l.pages[0].items[1].entity, "sensor.b"));
+    layout_mask_t washer = l.pages[0].items[1].cond;
+    assert(washer == 1);
+    assert(l.conds[0].op == LAYOUT_COND_STATE && !strcmp(l.conds[0].entity, "sensor.washer") && !strcmp(l.conds[0].value, "done"));
+    assert(l.pages[0].items[2].cond == (2 | 4));   /* above and below: two atoms */
+    assert(l.conds[1].op == LAYOUT_COND_ABOVE && l.conds[1].num == 20);
+    assert(l.conds[2].op == LAYOUT_COND_BELOW && l.conds[2].num == 30);
+    assert(l.pages[0].items[3].cond == 8);         /* screen condition ignored */
+    assert(!strcmp(l.conds[3].value, "done|idle"));
+    assert(l.pages[1].cond == 16 && l.conds[4].op == LAYOUT_COND_NOT);
+
+    assert(layout_cond_true(&l.conds[0], "done") && !layout_cond_true(&l.conds[0], "running") && !layout_cond_true(&l.conds[0], NULL));
+    assert(layout_cond_true(&l.conds[3], "idle") && !layout_cond_true(&l.conds[3], "id"));
+    assert(layout_cond_true(&l.conds[1], "20.5") && !layout_cond_true(&l.conds[1], "20") && !layout_cond_true(&l.conds[1], "unavailable"));
+    assert(layout_cond_true(&l.conds[2], "29") && !layout_cond_true(&l.conds[2], "31"));
+    assert(layout_cond_true(&l.conds[4], "away") && layout_cond_true(&l.conds[4], NULL) && !layout_cond_true(&l.conds[4], "home"));
+
+    ha_layout_t v = l;
+    assert(layout_sanitize(&v) && v.pages[0].items[1].cond == 1);   /* masks survive the NVS round trip */
+    assert(layout_visible(&v, 0) == 1);            /* nothing holds: page 2 hidden, page 1 only sensor.a */
+    assert(v.pages[0].count == 1 && !strcmp(v.pages[0].items[0].entity, "sensor.a"));
+    v = l;
+    assert(layout_visible(&v, 1 | 2 | 4 | 16) == 2);
+    assert(v.pages[0].count == 3 && !strcmp(v.pages[0].items[2].entity, "sensor.c"));
+    assert(!strcmp(v.pages[1].items[0].entity, "sensor.e"));
+
+    /* every page hidden: the first is kept whole */
+    assert(parse_sections("[" "{\"type\":\"grid\",\"visibility\":[{\"condition\":\"state\",\"entity\":\"x.y\",\"state\":\"on\"}],\"cards\":[" TILE("sensor.a") "]}" "]", &l) == 1);
+    assert(layout_visible(&l, 0) == 1 && l.pages[0].count == 1);
+
+    /* identical conditions share an atom; the table running full means always shown */
+    char buf[8192] = "[" "{\"type\":\"grid\",\"cards\":[";
+    for (int k = 0; k < LAYOUT_MAX_CONDS + 2; k++) {
+        char c[200];
+        snprintf(c, sizeof(c), "%s{\"type\":\"conditional\",\"conditions\":[{\"entity\":\"sensor.s%d\",\"state\":\"on\"}],\"card\":" TILE("sensor.z") "}", k ? "," : "", k % (LAYOUT_MAX_CONDS + 1));
+        strcat(buf, c);
+    }
+    strcat(buf, "]}]");
+    assert(parse_sections(buf, &l) == 1);
+    assert(l.conds[LAYOUT_MAX_CONDS - 1].entity[0]);
+    assert(sizeof(ha_layout_t) <= 16384);          /* fits the flash cache slot */
+}
+
 int main(void)
 {
     test_history_graphs();
     test_view_theme();
+    test_conditions();
     test_picture();
     test_weather();
     test_picture_glance();

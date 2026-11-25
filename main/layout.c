@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include "cJSON.h"
+#include <stdlib.h>
 
 #ifdef LAYOUT_HOST
 #include <stdio.h>
@@ -100,6 +101,146 @@ static void set_item(layout_item_t *it, const cJSON *card)
     }
 }
 
+/* ---- Conditions (issue #57): conditional cards and card / section visibility ---- */
+static void parse_card_body(const cJSON *card, int idx, layout_page_t *pg, ha_layout_t *l);
+
+/* Index bit of the atom (added to l->conds if new); 0 when the table is full */
+static layout_mask_t cond_add(ha_layout_t *l, const char *entity, uint8_t op, const char *value, float n, int idx)
+{
+    if (strlen(entity) >= sizeof(l->conds[0].entity)) return 0;
+    for (int k = 0; k < LAYOUT_MAX_CONDS; k++) {
+        layout_cond_t *c = &l->conds[k];
+        if (!c->entity[0]) {
+            copy(c->entity, sizeof(c->entity), entity);
+            c->op = op;
+            copy(c->value, sizeof(c->value), value ? value : "");
+            c->num = n;
+            return (layout_mask_t)(1u << k);
+        }
+        if (!strcmp(c->entity, entity) && c->op == op && !strcmp(c->value, value ? value : "") &&
+            (op == LAYOUT_COND_STATE || op == LAYOUT_COND_NOT || c->num == n)) return (layout_mask_t)(1u << k);
+    }
+    LOGW("section %d: more than %d conditions, '%s' ignored (always true)", idx, LAYOUT_MAX_CONDS, entity);
+    return 0;
+}
+
+/* state: "x", ["x", "y"] or a number -> "x|y" */
+static bool cond_values(const cJSON *v, char *out, size_t n)
+{
+    out[0] = 0;
+    const cJSON *e;
+    if (cJSON_IsString(v)) { copy(out, n, v->valuestring); return true; }
+    if (cJSON_IsNumber(v)) { snprintf(out, n, "%g", v->valuedouble); return true; }
+    if (!cJSON_IsArray(v)) return false;
+    cJSON_ArrayForEach(e, v) {
+        char one[LAYOUT_COND_LEN];
+        if (cJSON_IsString(e)) copy(one, sizeof(one), e->valuestring);
+        else if (cJSON_IsNumber(e)) snprintf(one, sizeof(one), "%g", e->valuedouble);
+        else continue;
+        size_t len = strlen(out);
+        if (len + strlen(one) + 2 > n) break;
+        if (len) strcat(out, "|");
+        strcat(out, one);
+    }
+    return out[0] != 0;
+}
+
+static layout_mask_t cond_list(ha_layout_t *l, const cJSON *list, int idx);
+
+/* One condition object -> its atoms. Unsupported kinds (screen, user, or) count as true. */
+static layout_mask_t cond_one(ha_layout_t *l, const cJSON *c, int idx)
+{
+    if (!cJSON_IsObject(c)) return 0;
+    const char *kind = str(c, "condition"), *ent = str(c, "entity");
+    char vals[LAYOUT_COND_LEN];
+    if (kind && !strcmp(kind, "and")) return cond_list(l, cJSON_GetObjectItemCaseSensitive(c, "conditions"), idx);
+    if (!kind || !strcmp(kind, "state")) {   /* no "condition": the conditional card's old form */
+        if (!ent) { LOGW("section %d: condition without entity, ignored", idx); return 0; }
+        if (cond_values(cJSON_GetObjectItemCaseSensitive(c, "state"), vals, sizeof(vals)))
+            return cond_add(l, ent, LAYOUT_COND_STATE, vals, 0, idx);
+        if (cond_values(cJSON_GetObjectItemCaseSensitive(c, "state_not"), vals, sizeof(vals)))
+            return cond_add(l, ent, LAYOUT_COND_NOT, vals, 0, idx);
+        LOGW("section %d: state condition on %s without state, ignored", idx, ent);
+        return 0;
+    }
+    if (!strcmp(kind, "numeric_state")) {
+        if (!ent) { LOGW("section %d: condition without entity, ignored", idx); return 0; }
+        const cJSON *a = cJSON_GetObjectItemCaseSensitive(c, "above"), *b = cJSON_GetObjectItemCaseSensitive(c, "below");
+        layout_mask_t m = 0;
+        if (cJSON_IsNumber(a)) m |= cond_add(l, ent, LAYOUT_COND_ABOVE, "", (float)a->valuedouble, idx);
+        if (cJSON_IsNumber(b)) m |= cond_add(l, ent, LAYOUT_COND_BELOW, "", (float)b->valuedouble, idx);
+        if (!m) LOGW("section %d: numeric_state condition on %s without numeric above/below, ignored", idx, ent);
+        return m;
+    }
+    LOGW("section %d: condition '%s' not supported, treated as true", idx, kind);
+    return 0;
+}
+
+static layout_mask_t cond_list(ha_layout_t *l, const cJSON *list, int idx)
+{
+    layout_mask_t m = 0;
+    const cJSON *c;
+    if (cJSON_IsArray(list)) cJSON_ArrayForEach(c, list) m |= cond_one(l, c, idx);
+    return m;
+}
+
+/* A card with its visibility; a conditional card shows its card while its conditions hold */
+static void parse_card(const cJSON *card, int idx, layout_page_t *pg, ha_layout_t *l, layout_mask_t mask, int depth)
+{
+    if (!cJSON_IsObject(card)) return;
+    mask |= cond_list(l, cJSON_GetObjectItemCaseSensitive(card, "visibility"), idx);
+    const char *ct = str(card, "type");
+    if (ct && !strcmp(ct, "conditional")) {
+        if (depth >= 2) { LOGW("section %d: conditional cards nested too deep, skipped", idx); return; }
+        mask |= cond_list(l, cJSON_GetObjectItemCaseSensitive(card, "conditions"), idx);
+        parse_card(cJSON_GetObjectItemCaseSensitive(card, "card"), idx, pg, l, mask, depth + 1);
+        return;
+    }
+    int before = pg->count;
+    parse_card_body(card, idx, pg, l);
+    for (int i = before; i < pg->count; i++) pg->items[i].cond = mask;
+}
+
+bool layout_cond_true(const layout_cond_t *c, const char *state)
+{
+    if (c->op == LAYOUT_COND_ABOVE || c->op == LAYOUT_COND_BELOW) {
+        char *end;
+        if (!state || !*state) return false;
+        float v = strtof(state, &end);
+        if (end == state || *end) return false;   /* not a number (unavailable, ...) */
+        return c->op == LAYOUT_COND_ABOVE ? v > c->num : v < c->num;
+    }
+    bool match = false;
+    if (state) {
+        size_t n = strlen(state);
+        for (const char *p = c->value; *p && !match; ) {
+            size_t len = strcspn(p, "|");
+            match = len == n && !strncmp(p, state, n);
+            p += len + (p[len] == '|');
+        }
+    }
+    return c->op == LAYOUT_COND_NOT ? !match : match;
+}
+
+int layout_visible(ha_layout_t *l, layout_mask_t true_mask)
+{
+    int np = 0;
+    for (int p = 0; p < l->count; p++) {
+        layout_page_t pg = l->pages[p];
+        if (pg.cond & ~true_mask) continue;
+        int n = 0;
+        for (int i = 0; i < pg.count; i++)
+            if (!(pg.items[i].cond & ~true_mask)) pg.items[n++] = pg.items[i];
+        for (int i = n; i < LAYOUT_MAX_ROWS; i++) memset(&pg.items[i], 0, sizeof(layout_item_t));
+        pg.count = n;
+        if (n) { pg.kind = pg.items[0].kind; l->pages[np++] = pg; }
+    }
+    if (!np && l->count) np = 1;   /* all hidden: keep the first page as it is */
+    for (int p = np; p < LAYOUT_MAX_PAGES; p++) memset(&l->pages[p], 0, sizeof(layout_page_t));
+    l->count = np;
+    return np;
+}
+
 /* Fills *pg from one section; returns false if nothing usable. */
 /* Fills *pg from one section: every supported card becomes one item (block) with its own
  * kind, in dashboard order; returns false if nothing usable. */
@@ -114,9 +255,17 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
     if (!cJSON_IsArray(cards)) return false;
 
     memset(pg, 0, sizeof(*pg));
+    pg->cond = cond_list(l, cJSON_GetObjectItemCaseSensitive(sec, "visibility"), idx);
     const cJSON *card;
-    cJSON_ArrayForEach(card, cards) {
-        if (!cJSON_IsObject(card)) continue;
+    cJSON_ArrayForEach(card, cards) parse_card(card, idx, pg, l, 0, 0);
+    return pg->count > 0;
+}
+
+/* One card of a section (any number of items, or none) */
+static void parse_card_body(const cJSON *card, int idx, layout_page_t *pg, ha_layout_t *l)
+{
+    {
+        if (!cJSON_IsObject(card)) return;
         const char *ct = str(card, "type");
         if (ct && !strcmp(ct, "heading")) {
             const char *h = str(card, "heading");
@@ -125,7 +274,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
                 copy(pg->title, sizeof(pg->title), h);
                 if (hi && strlen(hi) < sizeof(pg->title_icon)) copy(pg->title_icon, sizeof(pg->title_icon), hi);
             }
-            continue;
+            return;
         }
         if (ct && !strcmp(ct, "glance")) {   /* one cell per entity */
             const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
@@ -146,7 +295,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
                 if (no_icon) copy(it->icon, sizeof(it->icon), "-");
                 else if (ic && strlen(ic) < sizeof(it->icon)) copy(it->icon, sizeof(it->icon), ic);
             }
-            continue;
+            return;
         }
         if (ct && (!strcmp(ct, "history-graph") || !strcmp(ct, "statistics-graph"))) {   /* one graph per entity */
             bool stats = !strcmp(ct, "statistics-graph");
@@ -179,7 +328,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
                 it->min = NAN;
                 it->flags = fl;
             }
-            continue;
+            return;
         }
         if (ct && !strcmp(ct, "entities")) {   /* one row per entity; dividers, buttons etc. skipped */
             const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
@@ -205,7 +354,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
                 const char *ic = cJSON_IsObject(e) ? str(e, "icon") : NULL;
                 if (ic && strlen(ic) < sizeof(it->icon)) copy(it->icon, sizeof(it->icon), ic);
             }
-            continue;
+            return;
         }
         if (ct && !strcmp(ct, "calendar")) {   /* upcoming events of its calendars, one block */
             const cJSON *ents = cJSON_GetObjectItemCaseSensitive(card, "entities"), *e;
@@ -218,11 +367,11 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
                 if (n) strcat(ids, ",");
                 strcat(ids, ent);
             }
-            if (!ids[0]) { LOGW("section %d: calendar card without entities, skipped", idx); continue; }
+            if (!ids[0]) { LOGW("section %d: calendar card without entities, skipped", idx); return; }
             int k = 0;
             while (k < LAYOUT_MAX_CALS && l->cals[k][0]) k++;
-            if (k == LAYOUT_MAX_CALS) { LOGW("section %d: more than %d calendar cards, skipped", idx, LAYOUT_MAX_CALS); continue; }
-            if (pg->count == LAYOUT_MAX_ROWS) { LOGW("section %d: more than %d cards, extra skipped", idx, LAYOUT_MAX_ROWS); continue; }
+            if (k == LAYOUT_MAX_CALS) { LOGW("section %d: more than %d calendar cards, skipped", idx, LAYOUT_MAX_CALS); return; }
+            if (pg->count == LAYOUT_MAX_ROWS) { LOGW("section %d: more than %d cards, extra skipped", idx, LAYOUT_MAX_ROWS); return; }
             layout_item_t *it = &pg->items[pg->count++];
             it->kind = LAYOUT_CALENDAR;
             if (pg->count == 1) pg->kind = it->kind;
@@ -235,7 +384,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             const char *iv = str(card, "initial_view");
             if (iv && (!strcmp(iv, "listDay") || !strcmp(iv, "dayGridDay"))) it->flags = LAYOUT_CAL_DAY;
             else if (iv && !strcmp(iv, "listWeek")) it->flags = LAYOUT_CAL_WEEK;   /* else month, HA's default */
-            continue;
+            return;
         }
         bool clock = ct && !strcmp(ct, "clock");
         bool gauge = ct && !strcmp(ct, "gauge");
@@ -247,16 +396,16 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
         bool graph = is_graph(card), tile = is_tile(card), button = is_button(card), picture = is_picture(card);
         if (!clock && !graph && !tile && !button && !picture && !weather && !gauge && !thermo && !media && !light && !todo) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
-            continue;
+            return;
         }
         bool src_only = picture && (str(card, "camera_image") || cJSON_GetObjectItemCaseSensitive(card, "image"));
         if (!clock && !src_only && !str(card, "entity")) {   /* a clock shows the board's own time; pictures may have only a source */
             LOGW("section %d: card without entity, skipped", idx);
-            continue;
+            return;
         }
         if (pg->count == LAYOUT_MAX_ROWS) {
             LOGW("section %d: more than %d cards, extra skipped", idx, LAYOUT_MAX_ROWS);
-            continue;
+            return;
         }
         layout_item_t *it = &pg->items[pg->count++];
         it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : gauge ? LAYOUT_GAUGE : thermo ? LAYOUT_THERMOSTAT : media ? LAYOUT_MEDIA : light ? LAYOUT_LIGHT : todo ? LAYOUT_TODO : LAYOUT_VALUES;
@@ -269,7 +418,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             else if (sz && !strcmp(sz, "large")) it->flags |= LAYOUT_CLOCK_LARGE;
             if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(card, "no_background"))) it->flags |= LAYOUT_CLOCK_NO_BG;
             if (tz) copy(it->entity, sizeof(it->entity), tz);
-            continue;
+            return;
         }
         set_item(it, card);
         if (weather) {
@@ -329,7 +478,6 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             if (it->action == LAYOUT_ACT_NONE) LOGW("section %d: tap action '%s' not supported, button only shows state", idx, act);
         }
     }
-    return pg->count > 0;
 }
 
 static int parse_impl(const char *json, const char *view_path, ha_layout_t *out,
@@ -506,6 +654,19 @@ bool layout_sanitize(ha_layout_t *l)
     for (int k = 0; k < LAYOUT_MAX_IMAGES; k++) l->images[k][LAYOUT_IMAGE_LEN - 1] = 0;
     for (int k = 0; k < LAYOUT_MAX_CALS; k++) l->cals[k][LAYOUT_CALS_LEN - 1] = 0;
     l->theme[sizeof(l->theme) - 1] = 0;
+    for (int k = 0; k < LAYOUT_MAX_CONDS; k++) {
+        layout_cond_t *c = &l->conds[k];
+        c->entity[sizeof(c->entity) - 1] = 0;
+        c->value[sizeof(c->value) - 1] = 0;
+        if (c->op > LAYOUT_COND_BELOW) c->op = LAYOUT_COND_STATE;
+        if (!isfinite(c->num)) c->num = 0;
+    }
+    layout_mask_t used = 0;   /* a mask bit without a condition would hide its card for good */
+    for (int k = 0; k < LAYOUT_MAX_CONDS; k++) if (l->conds[k].entity[0]) used |= (layout_mask_t)(1u << k);
+    for (int p = 0; ok && p < l->count; p++) {
+        l->pages[p].cond &= used;
+        for (int i = 0; i < l->pages[p].count; i++) l->pages[p].items[i].cond &= used;
+    }
     if (!ok) memset(l, 0, sizeof(*l));
     return ok;
 }
