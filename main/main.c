@@ -3439,7 +3439,7 @@ static void saver_update(void)
     bool synced = tm.tm_year >= 120;   /* no SNTP yet: no time to show */
     strftime(b, sizeof(b), "%H:%M", &tm);
     lv_label_set_text(s_sv_time, synced ? b : "--:--");
-    strftime(b, sizeof(b), "%A, %d %B", &tm);
+    strftime(b, sizeof(b), s_landscape ? "%A, %d %B" : "%a, %d %b", &tm);   /* portrait is 172 px wide */
     lv_label_set_text(s_sv_date, synced ? b : "");
     lv_label_set_text(s_sv_wx, s_sv_wx_text);
     b[0] = 0;
@@ -3483,6 +3483,9 @@ static void screen_apply(void)
         if (screen_saver(&in) && lv > 0) {
             saver_update();
             if (lv_obj_has_flag(s_saver_layer, LV_OBJ_FLAG_HIDDEN)) {
+                int f = 0;                /* the largest clock font that fits this orientation's width */
+                for (int k = CLOCK_N - 1; k >= 0; k--) if (clock_fits(k, 0, SCR_W * 9 / 10, 96)) { f = k; break; }
+                lv_obj_set_style_text_font(s_sv_time, CLOCK_FONTS[f], 0);
                 lv_obj_clear_flag(s_saver_layer, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_move_foreground(s_saver_layer);
             }
