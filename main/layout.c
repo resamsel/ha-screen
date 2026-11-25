@@ -243,8 +243,9 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
         bool thermo = ct && !strcmp(ct, "thermostat");
         bool media = ct && !strcmp(ct, "media-control");
         bool light = ct && !strcmp(ct, "light");
+        bool todo = ct && !strcmp(ct, "todo-list");   /* issue #55 */
         bool graph = is_graph(card), tile = is_tile(card), button = is_button(card), picture = is_picture(card);
-        if (!clock && !graph && !tile && !button && !picture && !weather && !gauge && !thermo && !media && !light) {
+        if (!clock && !graph && !tile && !button && !picture && !weather && !gauge && !thermo && !media && !light && !todo) {
             LOGW("section %d: card '%s' not supported, skipped", idx, ct ? ct : "?");
             continue;
         }
@@ -258,7 +259,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             continue;
         }
         layout_item_t *it = &pg->items[pg->count++];
-        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : gauge ? LAYOUT_GAUGE : thermo ? LAYOUT_THERMOSTAT : media ? LAYOUT_MEDIA : light ? LAYOUT_LIGHT : LAYOUT_VALUES;
+        it->kind = clock ? LAYOUT_CLOCK : graph ? LAYOUT_GRAPH : button ? LAYOUT_BUTTONS : picture ? LAYOUT_PICTURE : weather ? LAYOUT_WEATHER : gauge ? LAYOUT_GAUGE : thermo ? LAYOUT_THERMOSTAT : media ? LAYOUT_MEDIA : light ? LAYOUT_LIGHT : todo ? LAYOUT_TODO : LAYOUT_VALUES;
         if (pg->count == 1) pg->kind = it->kind;
         if (clock) {
             const char *tf = str(card, "time_format"), *sz = str(card, "clock_size"), *tz = str(card, "time_zone");
@@ -276,7 +277,7 @@ static bool parse_section(const cJSON *sec, int idx, layout_page_t *pg, ha_layou
             const char *ft = str(card, "forecast_type");
             if (ft && !strcmp(ft, "hourly")) it->flags |= LAYOUT_WX_HOURLY;
         }
-        const char *title = picture && !it->name[0] && !it->name_type[0] ? str(card, "title") : NULL;   /* picture-glance */
+        const char *title = (picture || todo) && !it->name[0] && !it->name_type[0] ? str(card, "title") : NULL;   /* picture-glance, todo-list */
         if (title) copy(it->name, sizeof(it->name), title);
         if (picture && !it->entity[0] && !it->name[0]) it->flags |= LAYOUT_PIC_NO_NAME;   /* nothing to name it by */
         if (picture && cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(card, "show_name"))) it->flags |= LAYOUT_PIC_NO_NAME;
@@ -472,7 +473,7 @@ bool layout_sanitize(ha_layout_t *l)
         layout_page_t *pg = &l->pages[p];
         if (pg->count < 1 || pg->count > LAYOUT_MAX_ROWS) { ok = false; break; }
         for (int i = 0; i < pg->count; i++)
-            if (pg->items[i].kind > LAYOUT_LIGHT) pg->items[i].kind = LAYOUT_VALUES;
+            if (pg->items[i].kind > LAYOUT_TODO) pg->items[i].kind = LAYOUT_VALUES;
         pg->kind = pg->items[0].kind;   /* kind of the first card */
         pg->title[sizeof(pg->title) - 1] = 0;
         for (int i = 0; i < pg->count; i++) {
