@@ -187,6 +187,12 @@ static bool s_motion_wake = true;  /* IMU: pick up to wake, face down to sleep (
 static bool s_motion_pending;      /* switched here, not yet confirmed by HA */
 static bool s_face_down;           /* lying face down (held for IMU_HOLD_MS) */
 static void ha_motion_changed(bool on);
+static bool s_saver;               /* clock screensaver instead of off at the timeout (issue #48), NVS "saver" */
+static bool s_saver_pending;       /* switched here, not yet confirmed by HA */
+static void ha_saver_changed(bool on);
+static void saver_cb(lv_event_t *e);
+static void saver_weather(int key, const char *cond, const char *temp, const char *unit);
+static void saver_calendar(int key, const cal_event_t *ev, int n);
 static void motion_cb(lv_event_t *e);
 static void settle_poll(lv_timer_t *t);
 static void auto_rot_cb(lv_event_t *e);
@@ -288,6 +294,7 @@ void app_main(void)
             if (nvs_get_u8(nv, "rot", &rot) == ESP_OK && rot <= LV_DISP_ROT_270 && (rot & 1) == (land ? 1 : 0)) s_rot = rot;
             if (nvs_get_u8(nv, "auto_rot", &ar) == ESP_OK) s_auto_rot = ar;
             if (nvs_get_u8(nv, "motion", &ar) == ESP_OK) s_motion_wake = ar;
+            if (nvs_get_u8(nv, "saver", &ar) == ESP_OK) s_saver = ar;
             if (nvs_get_u8(nv, "page", &page) == ESP_OK) s_boot_page = page;
             size_t vlen = sizeof(s_view_path);
             if (nvs_get_str(nv, "view", s_view_path, &vlen) != ESP_OK) s_view_path[0] = 0;
@@ -333,6 +340,7 @@ void app_main(void)
     ha_client_set_night_cb(ha_night_changed);
     ha_client_set_autorot_cb(ha_autorot_changed);
     ha_client_set_motion_cb(ha_motion_changed);
+    ha_client_set_saver_cb(ha_saver_changed);
     ha_client_set_notify_cb(ha_notify);
     ha_client_set_layout_cb(ha_layout_changed);
     ha_client_set_busy_cb(ha_busy);
@@ -1286,6 +1294,7 @@ static void ha_weather_changed(int page, int row, const char *cond, const char *
     for (size_t k = 0; k < sizeof(WX_TEXT) / sizeof(WX_TEXT[0]); k++)
         if (!strcmp(cond, WX_TEXT[k].state)) text = WX_TEXT[k].text;
     lv_label_set_text(s_wx_cond[page][row], text);
+    saver_weather(page * LAYOUT_MAX_ROWS + row, text, temp, unit);
     if (name) lv_label_set_text(s_wx_name[page][row], name);
     lv_label_set_text(s_wx_temp[page][row], temp[0] ? temp : "--");
     lv_label_set_text(s_wx_unit[page][row], unit);
@@ -1614,6 +1623,7 @@ static void ha_calendar_changed(int page, int row, const cal_event_t *ev, int n,
         d->month = month;
         memcpy(d->ev, ev, d->n * sizeof(*ev));
         cal_draw(page, row);
+        saver_calendar(page * LAYOUT_MAX_ROWS + row, d->ev, d->n);
     }
     lvgl_port_unlock();
 }
@@ -3352,14 +3362,108 @@ static bool s_woken;             /* the last touch woke a screen that should be 
 static int s_level = -1;         /* backlight % last set */
 static bool s_night_pending;     /* set here, not yet confirmed by HA */
 
-static int screen_level_now(void)
+static void screen_in_now(screen_in_t *out)
 {
     screen_in_t in = {
         .normal_pct = s_boot_bri, .night_pct = s_night_pct, .night = s_night,
         .timeout_min = s_timeout_min, .presenting = s_pres_on && PAGE_COUNT > 1,
         .idle_ms = lv_disp_get_inactive_time(NULL), .woken = s_woken,
-        .face_down = s_motion_wake && s_face_down,
+        .face_down = s_motion_wake && s_face_down, .saver = s_saver,
     };
+    *out = in;
+}
+
+/* ---- Clock screensaver (issue #48): at the screen-off timeout, a dimmed clock with the date,
+ * the first weather card's condition and the next calendar event instead of a dark screen.
+ * A touch on it only ends it. LVGL task. */
+static lv_obj_t *s_saver_layer, *s_sv_time, *s_sv_date, *s_sv_wx, *s_sv_ev;
+static int s_sv_wx_key = -1, s_sv_cal_key = -1;   /* the card the data comes from: the first one */
+static char s_sv_wx_text[48];
+static cal_event_t s_sv_events[4];
+static int s_sv_nev;
+
+static void saver_weather(int key, const char *cond, const char *temp, const char *unit)
+{
+    if (s_sv_wx_key >= 0 && key > s_sv_wx_key) return;
+    s_sv_wx_key = key;
+    if (temp[0]) snprintf(s_sv_wx_text, sizeof(s_sv_wx_text), "%.24s, %.8s %.6s", cond, temp, unit);
+    else snprintf(s_sv_wx_text, sizeof(s_sv_wx_text), "%.40s", cond);
+}
+
+static void saver_calendar(int key, const cal_event_t *ev, int n)
+{
+    if (s_sv_cal_key >= 0 && key > s_sv_cal_key) return;
+    s_sv_cal_key = key;
+    s_sv_nev = LV_MIN(n, (int)(sizeof(s_sv_events) / sizeof(s_sv_events[0])));
+    memcpy(s_sv_events, ev, s_sv_nev * sizeof(*ev));
+}
+
+static void saver_label(lv_obj_t **l, const lv_font_t *f, lv_color_t c)
+{
+    *l = lv_label_create(s_saver_layer);
+    lv_obj_set_style_text_font(*l, f, 0);
+    lv_obj_set_style_text_color(*l, c, 0);
+    lv_obj_set_style_text_align(*l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(*l, LV_PCT(92));
+    lv_label_set_long_mode(*l, LV_LABEL_LONG_DOT);
+    lv_label_set_text(*l, "");
+}
+
+static void saver_tap_cb(lv_event_t *e) { (void)e; lv_disp_trig_activity(NULL); screen_apply(); }
+
+static void saver_create(void)
+{
+    s_saver_layer = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_saver_layer);
+    lv_obj_set_size(s_saver_layer, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_saver_layer, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_saver_layer, LV_OPA_COVER, 0);
+    lv_obj_set_flex_flow(s_saver_layer, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_saver_layer, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_saver_layer, 6, 0);
+    lv_obj_add_flag(s_saver_layer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_saver_layer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(s_saver_layer, saver_tap_cb, LV_EVENT_PRESSED, NULL);
+    saver_label(&s_sv_time, &lv_font_clock_72, COL_MAIN(false));
+    saver_label(&s_sv_date, &lv_font_latin_22, COL_SEC(false));
+    saver_label(&s_sv_wx, &lv_font_latin_16, COL_SEC(false));
+    saver_label(&s_sv_ev, &lv_font_latin_16, COL_SEC(false));
+}
+
+static void saver_update(void)
+{
+    char b[96];
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    bool synced = tm.tm_year >= 120;   /* no SNTP yet: no time to show */
+    strftime(b, sizeof(b), "%H:%M", &tm);
+    lv_label_set_text(s_sv_time, synced ? b : "--:--");
+    strftime(b, sizeof(b), s_landscape ? "%A, %d %B" : "%a, %d %b", &tm);   /* portrait is 172 px wide */
+    lv_label_set_text(s_sv_date, synced ? b : "");
+    lv_label_set_text(s_sv_wx, s_sv_wx_text);
+    b[0] = 0;
+    for (int k = 0; k < s_sv_nev && synced; k++) {   /* earliest first: the first not over yet */
+        const cal_event_t *e = &s_sv_events[k];
+        if (e->end <= now) continue;
+        struct tm st;
+        time_t t = (time_t)e->start;
+        localtime_r(&t, &st);
+        char when[24];
+        bool today = st.tm_yday == tm.tm_yday && st.tm_year == tm.tm_year;
+        if (e->start <= now) snprintf(when, sizeof(when), "Now");
+        else if (e->all_day) strftime(when, sizeof(when), today ? "Today" : "%a", &st);
+        else strftime(when, sizeof(when), today ? "%H:%M" : "%a %H:%M", &st);
+        snprintf(b, sizeof(b), "%s  %.60s", when, e->summary);
+        break;
+    }
+    lv_label_set_text(s_sv_ev, b);
+}
+
+static int screen_level_now(void)
+{
+    screen_in_t in;
+    screen_in_now(&in);
     return screen_level(&in);
 }
 
@@ -3372,6 +3476,20 @@ static void screen_apply(void)
         ESP_LOGI(TAG, "backlight %d%%", lv);
         bsp_display_set_brightness((uint8_t)lv);
         s_level = lv;
+    }
+    if (s_saver_layer) {
+        screen_in_t in;
+        screen_in_now(&in);
+        if (screen_saver(&in) && lv > 0) {
+            saver_update();
+            if (lv_obj_has_flag(s_saver_layer, LV_OBJ_FLAG_HIDDEN)) {
+                int f = 0;                /* the largest clock font that fits this orientation's width */
+                for (int k = CLOCK_N - 1; k >= 0; k--) if (clock_fits(k, 0, SCR_W * 9 / 10, 96)) { f = k; break; }
+                lv_obj_set_style_text_font(s_sv_time, CLOCK_FONTS[f], 0);
+                lv_obj_clear_flag(s_saver_layer, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_move_foreground(s_saver_layer);
+            }
+        } else lv_obj_add_flag(s_saver_layer, LV_OBJ_FLAG_HIDDEN);
     }
     if (s_wake_layer) {
         if (lv == 0) {   /* above the chooser / setup screens, which share the top layer */
@@ -3397,6 +3515,7 @@ static void screen_timer_cb(lv_timer_t *t) { (void)t; screen_apply(); }
 
 static void screen_init(void)
 {
+    saver_create();
     s_wake_layer = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(s_wake_layer);
     lv_obj_set_size(s_wake_layer, LV_PCT(100), LV_PCT(100));
@@ -3803,7 +3922,7 @@ typedef struct {
     uint32_t lists;                        /* hash of the view and dashboard titles */
     uint16_t pres_secs;
     uint8_t bri, night_pct, timeout;
-    bool fw_avail, light, landscape, auto_rot, motion, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
+    bool fw_avail, light, landscape, auto_rot, motion, saver, theme_known, busy, view_pending, refreshing, offline, pres_on, night, fw_busy;
     char board[32];
 } cfg_sig_t;
 static cfg_sig_t s_cfg_sig;
@@ -3824,7 +3943,7 @@ static void cfg_sig(cfg_sig_t *s)
     s->lists = cfg_hash(cfg_hash(2166136261u, s_views, s_nviews), s_dashes, s_ndash);
     s->pres_secs = s_pres_secs;
     s->bri = s_boot_bri; s->night_pct = s_night_pct; s->timeout = s_timeout_min;
-    s->light = s_light; s->landscape = s_landscape; s->auto_rot = s_auto_rot; s->motion = s_motion_wake; s->theme_known = s_theme_known;
+    s->light = s_light; s->landscape = s_landscape; s->auto_rot = s_auto_rot; s->motion = s_motion_wake; s->saver = s_saver; s->theme_known = s_theme_known;
     s->busy = s_busy; s->view_pending = s_view_pending; s->refreshing = s_refreshing;
     s->offline = s_offline_state; s->pres_on = s_pres_on; s->night = s_night; s->fw_busy = s_fw_busy; s->fw_avail = s_fw_avail;
     snprintf(s->board, sizeof(s->board), "%s", s_board_name);
@@ -3901,6 +4020,7 @@ static void cfg_build_screen(void)
         cfg_caption("Screen");
         timeout_text(b, sizeof(b), s_timeout_min);
         cfg_nav("Turn off", b, CS_SCRTO, true);
+        cfg_toggle("Clock instead", s_saver, saver_cb);
         break;
     case CS_SCRTO:
         for (int i = 0; i < (int)sizeof(SCR_TO); i++) {
@@ -4385,7 +4505,7 @@ static void settle_poll(lv_timer_t *t)
     (void)t;
     if (!s_settling || lv_tick_elaps(s_settle_at) < HA_ECHO_HOLD_MS) return;
     s_settling = false;
-    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = s_autorot_pending = s_motion_pending = false;
+    s_theme_pending = s_orient_pending = s_bri_pending = s_pres_pending = s_night_pending = s_autorot_pending = s_motion_pending = s_saver_pending = false;
 }
 
 /* Network task: the request finished and the state was re-read */
@@ -4534,6 +4654,7 @@ static void local_settings(ha_local_t *o)
     o->night = s_night;
     o->auto_rot = s_auto_rot;
     o->motion = s_motion_wake;
+    o->saver = s_saver;
     o->night_pct = s_night_pct;
     o->timeout_min = s_timeout_min;
     o->page = s_page;
@@ -4753,6 +4874,7 @@ static void orient_save(void)
         nvs_set_u8(nv, "rot", s_rot);
         nvs_set_u8(nv, "auto_rot", s_auto_rot);
         nvs_set_u8(nv, "motion", s_motion_wake);
+        nvs_set_u8(nv, "saver", s_saver);
         nvs_commit(nv);
         nvs_close(nv);
     }
@@ -4878,6 +5000,37 @@ static void motion_cb(lv_event_t *e)
     ha_client_set_motion_wake(s_motion_wake);
     screen_apply();
     cfg_update();
+}
+
+static void saver_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_swiped) return;
+    s_saver = !s_saver;
+    orient_save();
+    s_saver_pending = true;
+    ha_client_set_screensaver(s_saver);
+    screen_apply();
+    cfg_update();
+}
+
+/* HA's screensaver helper (LVGL task) */
+static void saver_apply(void *arg)
+{
+    bool on = arg != NULL;
+    if (s_saver_pending || on == s_saver) return;
+    s_saver = on;
+    orient_save();
+    screen_apply();
+    cfg_update();
+}
+
+/* Network task: the screensaver helper's state */
+static void ha_saver_changed(bool on)
+{
+    if (!lvgl_port_lock(0)) return;
+    if (!s_saver_pending) lv_async_call(saver_apply, (void *)(intptr_t)on);
+    lvgl_port_unlock();
 }
 
 /* HA's motion wake helper (LVGL task) */
@@ -5113,6 +5266,8 @@ static void ha_layout_changed(const ha_layout_t *layout)
     if (s_view_pending) s_page = 0;
     s_layout = *layout;
     memset(s_icon_name, 0, sizeof(s_icon_name));   /* rows changed: HA sends them again */
+    s_sv_wx_key = s_sv_cal_key = -1;   /* screensaver: take the first cards of the new layout */
+    s_sv_wx_text[0] = 0; s_sv_nev = 0;
     create_ui();   /* keeps the current page when it still exists */
     if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
     ui_refill();
