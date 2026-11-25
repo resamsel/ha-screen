@@ -22,6 +22,16 @@ int main(void)
     s.idle_ms = 30000;                            assert(screen_level(&s) == 0);   /* expires, never */
     s.timeout_min = 2; s.idle_ms = 60000;         assert(screen_level(&s) == 10);
     s.idle_ms = 120000;                           assert(screen_level(&s) == 0);
+    s = base(); s.saver = true; s.timeout_min = 1; s.idle_ms = 60000;   /* saver: clock, dimmed */
+    assert(screen_saver(&s) && screen_level(&s) == SCREEN_SAVER_PCT);
+    s.idle_ms = 59999;                            assert(!screen_saver(&s) && screen_level(&s) == 60);
+    s = base(); s.saver = true; s.idle_ms = 36000000; assert(!screen_saver(&s));   /* no timeout */
+    s = base(); s.saver = true; s.timeout_min = 1; s.idle_ms = 60000; s.night = true; s.night_pct = 5;
+    assert(screen_saver(&s) && screen_level(&s) == 5);                /* night dimmer than the saver */
+    s.night_pct = 0;                              assert(!screen_saver(&s) && screen_level(&s) == 0);
+    s = base(); s.saver = true; s.timeout_min = 1; s.idle_ms = 60000; s.face_down = true;
+    assert(!screen_saver(&s) && screen_level(&s) == 0);
+    s.face_down = false; s.presenting = true;     assert(!screen_saver(&s) && screen_level(&s) == 60);
     puts("screen_test: ok");
     return 0;
 }
