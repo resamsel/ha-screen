@@ -2507,7 +2507,7 @@ static void live_dispatch(const char *id, const char *json)
 static void live_drain(void)
 {
     static char json[512];
-    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 13];
+    int ch[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 1 + H_COUNT];   /* as many as live_start subscribes */
     char *m;
     while (s_live_q && xQueueReceive(s_live_q, &m, 0) == pdTRUE) {
         int n = s_live ? live_apply(s_live, m, ch, sizeof(ch) / sizeof(ch[0])) : 0;
