@@ -2392,7 +2392,7 @@ static bool live_start(void)
 {
     if (s_lws) return true;
     if (!s_live_q && !(s_live_q = xQueueCreate(16, sizeof(char *)))) return false;
-    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 14];   /* + name and 13 board helpers */
+    static const char *ids[LAYOUT_MAX_PAGES * LAYOUT_MAX_ROWS + 1 + H_COUNT];   /* + name and the board helpers */
     int n = 0;
     ids[n++] = s_name_ent;
     if (s_board[0]) {
