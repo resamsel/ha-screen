@@ -103,6 +103,8 @@ static ha_layout_cb_t s_layout_cb;
 static volatile bool s_hold_next;         /* the next refresh round is a switch */
 static bool s_hold;                       /* this round: don't show card data */
 static bool s_held_layout;                /* use_layout ran while holding: send it on release */
+static bool s_held_theme;                 /* its theme, read on release */
+static void fetch_theme(const char *name);
 void ha_client_set_layout_cb(ha_layout_cb_t cb) { s_layout_cb = cb; }
 static ha_theme_cb_t s_theme_cb;
 void ha_client_set_theme_cb(ha_theme_cb_t cb) { s_theme_cb = cb; }
@@ -2201,8 +2203,11 @@ static void hold_release(void)
 {
     if (!s_hold) return;
     s_hold = false;
-    if (!s_held_layout) return;
+    if (!s_held_layout) { s_held_theme = false; return; }
     s_held_layout = false;
+    ESP_LOGI(TAG, "switch: new layout to the UI");
+    if (s_held_theme) fetch_theme(s_layout.theme);
+    s_held_theme = false;
     if (s_layout_cb) s_layout_cb(&s_layout);
     for (int pg = 0; pg < s_layout.count; pg++)
         for (int i = 0; i < s_layout.pages[pg].count; i++)
@@ -2244,7 +2249,8 @@ static void refresh_layout(bool force)
     if (n) raw_hash = h;
     s_err[0] = 0;                         /* validation errors are not shown */
     if (!n) { ESP_LOGW(TAG, "dashboard has no usable pages, keeping the current layout"); return; }
-    fetch_theme(l.theme);                 /* the view's theme: as often as the dashboard is read anew */
+    if (s_hold) s_held_theme = true;      /* with the layout, on release: a theme rebuild now would empty the old view */
+    else fetch_theme(l.theme);            /* the view's theme: as often as the dashboard is read anew */
     uint32_t full = layout_hash(&l);
     if (full != s_full_hash) {            /* the whole layout: shown cards come from it */
         layout_store_save(&l);
