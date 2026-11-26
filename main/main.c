@@ -5479,7 +5479,9 @@ static void ha_layout_changed(const ha_layout_t *layout)
 {
     if (!lvgl_port_lock(0)) return;
     bool was_open = s_cfg_open && !s_view_pending;   /* a new view: show its pages */
+    bool switched = s_view_pending;
     if (s_view_pending) s_page = 0;
+    s_view_pending = false;               /* the new view is here with its data: taps and swipes work */
     s_layout = *layout;
     memset(s_icon_name, 0, sizeof(s_icon_name));   /* rows changed: HA sends them again */
     s_sv_wx_key = s_sv_cal_key = -1;   /* screensaver: take the first cards of the new layout */
@@ -5488,6 +5490,7 @@ static void ha_layout_changed(const ha_layout_t *layout)
     create_ui();   /* keeps the current page when it still exists */
     if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
     ui_refill();
+    if (switched) cfg_update();
     lv_obj_invalidate(lv_scr_act());
     lvgl_port_unlock();
 }
