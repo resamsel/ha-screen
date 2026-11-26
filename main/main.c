@@ -112,6 +112,7 @@ static void ha_icon_changed(int page, int row, const char *icon);
 static void dots_show(void);
 static void show_page(int page);
 static void test_tap(int x, int y);
+static void rot_test(int rot);
 static void value_tap(lv_point_t p);
 
 static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
@@ -386,6 +387,7 @@ void app_main(void)
     screenshot_set_page_cb(show_page);
     screenshot_set_tap_cb(test_tap);
     screenshot_set_view_cb(view_select);
+    screenshot_set_rot_cb(rot_test);
     screenshot_set_cfg_cb(cfg_test_open);
     ha_client_start(ha_state_changed, ha_brightness_changed, ha_update_done, ha_sensor_changed, ha_graph_changed);
 }
@@ -5056,6 +5058,9 @@ static void orient_save(void)
         nvs_close(nv);
     }
 }
+
+static void rot_set(uint8_t rot);
+static void rot_test(int rot) { rot_set((uint8_t)rot); }
 
 /* Turn to rotation rot (0..3): a 180 degree turn only redraws, a turn between portrait and
  * landscape rebuilds the UI. LVGL task. */
