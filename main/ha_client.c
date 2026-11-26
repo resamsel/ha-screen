@@ -3179,10 +3179,10 @@ static void ha_task(void *arg)
                 report_orientation(false);   /* in between: only when it changed */
             }
         }
+        hold_release();                   /* with the states: graphs and pictures follow on the new view */
         for (int pg = 0; pg < s_layout.count && !user_waiting(); pg++)
             for (int i = 0; i < s_layout.pages[pg].count && !user_waiting(); i++)
                 if (s_layout.pages[pg].items[i].kind == LAYOUT_GRAPH) fetch_graph(pg, i);
-        hold_release();                   /* before the pictures: no decoded image waits in RAM */
         bool pic_force = b & (PIC_BIT | REFRESH_BIT);
         if (!user_waiting() && (pic_force || xTaskGetTickCount() - pic_at >= pdMS_TO_TICKS(HA_PICTURE_INTERVAL_MS))) {
             fetch_pictures(pic_force);
