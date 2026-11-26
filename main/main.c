@@ -43,7 +43,10 @@ LV_FONT_DECLARE(lv_font_latin_12)
 LV_FONT_DECLARE(lv_font_latin_14)
 LV_FONT_DECLARE(lv_font_latin_16)
 LV_FONT_DECLARE(lv_font_emoji_16)   /* the banner: emoji, then lv_font_latin_16 */
+LV_FONT_DECLARE(lv_font_latin_20)
 LV_FONT_DECLARE(lv_font_latin_22)
+LV_FONT_DECLARE(lv_font_latin_28)
+LV_FONT_DECLARE(lv_font_latin_36)
 LV_FONT_DECLARE(lv_font_clock_24)
 LV_FONT_DECLARE(lv_font_clock_28)
 LV_FONT_DECLARE(lv_font_clock_32)
@@ -399,7 +402,7 @@ void app_main(void)
 #define SCR_W  lv_disp_get_hor_res(NULL)
 #define SCR_H  lv_disp_get_ver_res(NULL)
 /* value / unit / name fonts: smaller in landscape, where three values share one row */
-#define VFONT  (s_landscape ? &lv_font_montserrat_28 : &lv_font_montserrat_36)
+#define VFONT  (s_landscape ? &lv_font_latin_28 : &lv_font_latin_36)
 #define UFONT  (s_landscape ? &lv_font_latin_16 : &lv_font_latin_22)
 #define NFONT  (s_landscape ? &lv_font_latin_14 : &lv_font_latin_16)
 #define NAME_DY (s_landscape ? 34 : 44)       /* name label below the value's top */
@@ -430,7 +433,7 @@ static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y);
 /* Top of a value label whose digits are centred on y = c (name and icon hang off it) */
 static lv_coord_t value_top(lv_coord_t c)
 {
-    const lv_font_t *f = s_landscape ? &lv_font_montserrat_28 : &lv_font_montserrat_36;
+    const lv_font_t *f = s_landscape ? &lv_font_latin_28 : &lv_font_latin_36;
     lv_font_glyph_dsc_t g;
     lv_coord_t digit_h = lv_font_get_glyph_dsc(f, &g, '0', 0) ? g.box_h + g.ofs_y : f->line_height / 2;
     lv_coord_t baseline = f->line_height - f->base_line;   /* from the label's top */
@@ -642,7 +645,7 @@ static void icon_place(int pg, int i)
     }
     lv_coord_t cx, y;
     value_pos(pg, i, &cx, &y);
-    const lv_font_t *vf = s_landscape ? &lv_font_montserrat_28 : &lv_font_montserrat_36;
+    const lv_font_t *vf = s_landscape ? &lv_font_latin_28 : &lv_font_latin_36;
     if (s_landscape) lv_obj_set_pos(o, cx - ICON_SIZE / 2, y - ICON_SIZE - 2);
     else {                                /* just left of the (centred) value */
         lv_coord_t x = 6;
@@ -1179,7 +1182,7 @@ static void wx_draw_icon(lv_obj_t *p, int S, const char *c)
         lv_obj_t *b = lv_label_create(p);
         lv_label_set_text(b, LV_SYMBOL_CHARGE);
         lv_obj_set_style_text_color(b, lv_color_hex(0xFDD93C), 0);
-        lv_obj_set_style_text_font(b, S >= 44 ? &lv_font_montserrat_20 : &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(b, S >= 44 ? &lv_font_latin_20 : &lv_font_latin_16, 0);
         lv_obj_set_pos(b, S * 42 / 100, y - S / 20);
     }
     int n = !strcmp(c, "pouring") ? 5 : 3, dw = LV_MAX(S / 16, 2);
@@ -1232,7 +1235,7 @@ static void create_weather(lv_obj_t *page, int pg, int i)
     lv_label_set_text(t, "--");
     lv_label_set_text(u, "");
     lv_label_set_text(hm, "");
-    lv_obj_set_style_text_font(t, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(t, &lv_font_latin_28, 0);
     lv_obj_set_style_text_font(u, &lv_font_latin_16, 0);
     lv_obj_set_style_text_font(hm, &lv_font_montserrat_14, 0);   /* has the drop symbol */
     lv_obj_set_style_text_color(t, fg, 0);
@@ -1656,18 +1659,32 @@ static todo_data_t *s_todo_data[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
 #define TODO_ROW_H 30
 
 static void todo_draw(int pg, int i);
-static void todo_draw_async(void *arg);
 
-static void todo_tap_cb(lv_event_t *e)
+/* A tap on the main screen (from edge_swipe_cb, so swipes still page): the item under the
+ * finger is checked / unchecked at once and HA told. The rows aren't clickable themselves,
+ * or they would take the press and the page couldn't be swiped. */
+static bool todo_tap(lv_point_t p)
 {
-    if (s_swiped) return;
-    uint32_t v = (uint32_t)(uintptr_t)lv_event_get_user_data(e);   /* page << 16 | row << 8 | item */
-    int pg = v >> 16, i = (v >> 8) & 0xFF, k = v & 0xFF;
-    todo_data_t *d = s_todo_data[pg][i];
-    if (!d || k >= d->n) return;
-    d->it[k].done = !d->it[k].done;       /* at once; HA's list comes back after the update */
-    ha_client_todo_set(pg, i, d->it[k].uid, d->it[k].done);
-    lv_async_call(todo_draw_async, (void *)(uintptr_t)v);   /* not while in this row's event */
+    int pg = s_page;
+    if (pg >= PAGE_COUNT) return false;
+    for (int i = 0; i < ROWS(pg); i++) {
+        lv_obj_t *b = s_todo_box[pg][i];
+        todo_data_t *d = s_todo_data[pg][i];
+        if (KIND(pg, i) != LAYOUT_TODO || !b || !d) continue;
+        for (uint32_t c = 0; c < lv_obj_get_child_cnt(b); c++) {
+            lv_obj_t *row = lv_obj_get_child(b, c);
+            int k = (int)(intptr_t)lv_obj_get_user_data(row) - 1;   /* 0: not an item row */
+            if (k < 0 || k >= d->n) continue;
+            lv_area_t a;
+            lv_obj_get_coords(row, &a);
+            if (p.x < a.x1 || p.x > a.x2 || p.y < a.y1 || p.y > a.y2) continue;
+            d->it[k].done = !d->it[k].done;   /* at once; HA's list comes back after the update */
+            ha_client_todo_set(pg, i, d->it[k].uid, d->it[k].done);
+            todo_draw(pg, i);
+            return true;
+        }
+    }
+    return false;
 }
 
 static void create_todo(lv_obj_t *page, int pg, int i)
@@ -1708,9 +1725,8 @@ static void todo_draw(int pg, int i)
         lv_obj_remove_style_all(row);
         lv_obj_set_size(row, w, TODO_ROW_H);
         lv_obj_set_pos(row, 0, y);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_event_cb(row, todo_tap_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)((uint32_t)pg << 16 | (uint32_t)i << 8 | (uint32_t)k));
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);   /* taps: todo_tap */
+        lv_obj_set_user_data(row, (void *)(intptr_t)(k + 1));
         lv_obj_t *box = lv_obj_create(row);
         lv_obj_remove_style_all(box);
         lv_obj_set_size(box, 18, 18);
@@ -1734,13 +1750,6 @@ static void todo_draw(int pg, int i)
         if (t->done) lv_obj_set_style_text_decor(l, LV_TEXT_DECOR_STRIKETHROUGH, 0);
         y += TODO_ROW_H;
     }
-}
-
-static void todo_draw_async(void *arg)
-{
-    uint32_t v = (uint32_t)(uintptr_t)arg;
-    int pg = v >> 16, i = (v >> 8) & 0xFF;
-    if (pg < PAGE_COUNT && i < ROWS(pg) && KIND(pg, i) == LAYOUT_TODO) todo_draw(pg, i);
 }
 
 /* Network task: the list's items */
@@ -1807,7 +1816,7 @@ static void gauge_layout(int pg, int i)
      * through the value's middle; portrait: arc, value and name centred as a whole, the
      * value's baseline on the flat edge */
     lv_coord_t cy = blk.y1 + h / 2, cx = blk.x1 + w / 2;
-    const lv_font_t *vf = &lv_font_montserrat_28;
+    const lv_font_t *vf = &lv_font_latin_28;
     lv_coord_t D = 0, base = 0, flat = 0;
     for (int pass = 0; pass < 3; pass++) {
         lv_font_glyph_dsc_t g;
@@ -1821,7 +1830,7 @@ static void gauge_layout(int pg, int i)
             flat = blk.y1 + (h - (D / 2 + 6 + nh)) / 2 + D / 2;
             base = flat;
         }
-        const lv_font_t *want = D >= 120 ? &lv_font_montserrat_28 : D >= 96 ? &lv_font_montserrat_20 : &lv_font_montserrat_16;
+        const lv_font_t *want = D >= 120 ? &lv_font_latin_28 : D >= 96 ? &lv_font_latin_20 : &lv_font_latin_16;
         if (want == vf) break;
         vf = want;
     }
@@ -2049,7 +2058,7 @@ static void create_thermostat(lv_obj_t *page, int pg, int i)
         lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
         lv_obj_set_pos(b, k ? blk.x2 - 8 - TH_BTN : blk.x1 + 8, mid - TH_BTN / 2);
         lv_obj_t *l = lv_label_create(b);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_font(l, &lv_font_latin_20, 0);
         lv_label_set_text(l, k ? LV_SYMBOL_PLUS : LV_SYMBOL_MINUS);
         lv_obj_center(l);
         t->btn[k] = b;
@@ -2197,7 +2206,7 @@ static void create_media(lv_obj_t *page, int pg, int i)
         lv_obj_set_style_bg_opa(b, BTN_OPA, 0);
         lv_obj_set_pos(b, bx + k * (TH_BTN + 8), by);
         lv_obj_t *l = lv_label_create(b);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_font(l, &lv_font_latin_20, 0);
         lv_label_set_text(l, k ? LV_SYMBOL_NEXT : LV_SYMBOL_PLAY);
         lv_obj_center(l);
         m->btn[k] = b;
@@ -2310,7 +2319,7 @@ static void create_light(lv_obj_t *page, int pg, int i)
     lv_obj_set_style_bg_opa(t->btn, BTN_OPA, 0);
     lv_obj_set_pos(t->btn, x, y);
     lv_obj_t *l = lv_label_create(t->btn);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(l, &lv_font_latin_20, 0);
     lv_label_set_text(l, LV_SYMBOL_POWER);
     lv_obj_center(l);
     t->bar = lv_bar_create(page);
@@ -3357,7 +3366,7 @@ static void value_tap(lv_point_t p);
 /* A tap on the main screen: select the value under the finger, or none */
 static void value_tap(lv_point_t p)
 {
-    if (button_tap(p) || thermostat_tap(p) || media_tap(p) || light_tap(p)) return;
+    if (button_tap(p) || thermostat_tap(p) || media_tap(p) || light_tap(p) || todo_tap(p)) return;
     for (int g = 0; g < GROUPS; g++) {
         if (group_page(g) != s_page) continue;
         lv_obj_t *o[3];
@@ -4230,8 +4239,8 @@ static void cfg_build(void)
         if (icons[i]) { if (home) lv_obj_clear_flag(icons[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(icons[i], LV_OBJ_FLAG_HIDDEN); }
     const lv_coord_t room = CFG_W - 20 - (home ? 44 : 0);
     lv_point_t ts;
-    lv_txt_get_size(&ts, lv_label_get_text(s_cfg_title), &lv_font_montserrat_20, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    const lv_font_t *tf = ts.x > room ? &lv_font_montserrat_16 : &lv_font_montserrat_20;
+    lv_txt_get_size(&ts, lv_label_get_text(s_cfg_title), &lv_font_latin_20, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const lv_font_t *tf = ts.x > room ? &lv_font_latin_16 : &lv_font_latin_20;
     lv_obj_set_style_text_font(s_cfg_title, tf, 0);
 
     cfg_build_screen();
@@ -4429,6 +4438,19 @@ static void edge_swipe_cb(lv_event_t *e)
 }
 
 
+/* Forecast, calendar and todo items as HA sent them. They outlive create_ui (a rotation or
+ * theme change redraws them; HA only sends them again when they change) and go with the
+ * layout, whose rows they belong to. */
+static void free_card_data(void)
+{
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) {
+            free(s_fc_data[p][r]); s_fc_data[p][r] = NULL;
+            free(s_cal_data[p][r]); s_cal_data[p][r] = NULL;
+            free(s_todo_data[p][r]); s_todo_data[p][r] = NULL;
+        }
+}
+
 static void create_ui(void)
 {
     lv_obj_t *scr = lv_scr_act();
@@ -4477,14 +4499,8 @@ static void create_ui(void)
     memset(s_clk_bg, 0, sizeof(s_clk_bg));
     memset(s_wx_temp, 0, sizeof(s_wx_temp));
     memset(s_fc_box, 0, sizeof(s_fc_box));
-    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
-        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_fc_data[p][r]); s_fc_data[p][r] = NULL; }
     memset(s_cal_box, 0, sizeof(s_cal_box));
     memset(s_todo_box, 0, sizeof(s_todo_box));
-    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
-        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_todo_data[p][r]); s_todo_data[p][r] = NULL; }
-    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
-        for (int r = 0; r < LAYOUT_MAX_ROWS; r++) { free(s_cal_data[p][r]); s_cal_data[p][r] = NULL; }
     memset(s_full, 0, sizeof(s_full));
     s_fw_status = NULL;
     s_cfg_body = NULL;
@@ -4515,7 +4531,7 @@ static void create_ui(void)
     lv_obj_add_flag(s_cfg_back, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_cfg_back, cfg_back_cb, LV_EVENT_CLICKED, NULL);
     s_cfg_title = lv_label_create(s_cfg_back);
-    lv_obj_set_style_text_font(s_cfg_title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_cfg_title, &lv_font_latin_20, 0);
     lv_obj_align(s_cfg_title, LV_ALIGN_LEFT_MID, 0, 0);
 
     /* Body: the current screen's rows, below the header */
@@ -5460,6 +5476,7 @@ static void ha_layout_changed(const ha_layout_t *layout)
     memset(s_icon_name, 0, sizeof(s_icon_name));   /* rows changed: HA sends them again */
     s_sv_wx_key = s_sv_cal_key = -1;   /* screensaver: take the first cards of the new layout */
     s_sv_wx_text[0] = 0; s_sv_nev = 0;
+    free_card_data();
     create_ui();   /* keeps the current page when it still exists */
     if (was_open) { lv_obj_set_y(s_cfg, 0); s_cfg_open = true; }
     ui_refill();

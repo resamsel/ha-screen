@@ -8,7 +8,7 @@ import re
 from PIL import Image, ImageDraw, ImageFont
 
 TTF = "managed_components/lvgl__lvgl/scripts/built_in_font/Montserrat-Medium.ttf"
-SIZES = [12, 14, 16, 22]
+SIZES = [12, 14, 16, 20, 22, 28, 36]
 RANGES = [(0x20, 0x7F), (0xA0, 0xFF),   # inclusive
           # punctuation HA text often has: – — ‘ ’ ‚ “ ” „ † ‡ • … ‰ ‹ › € ™ ← → −
           (0x2013, 0x2014), (0x2018, 0x201A), (0x201C, 0x201E), (0x2020, 0x2022), (0x2026, 0x2026),
