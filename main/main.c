@@ -5114,8 +5114,18 @@ static void imu_poll(lv_timer_t *t)
 {
     static int cand = -1;
     static uint32_t since;
+    static int silent;
     qmi8658_data_t d;
-    if (!bsp_qmi8658_read_data(&d)) return;
+    if (!bsp_qmi8658_read_data(&d)) {
+        /* no sample for 2 s: the IMU lost its settings (a restart caught it mid-reset) */
+        if (++silent * IMU_POLL_MS >= 2000) {
+            silent = 0;
+            ESP_LOGW(TAG, "IMU silent, configuring it again");
+            bsp_qmi8658_configure();
+        }
+        return;
+    }
+    silent = 0;
     ha_client_set_imu(d.acc_x, d.acc_y, d.acc_z, d.gyr_x, d.gyr_y, d.gyr_z);   /* HA sensors, #39 */
     imu_motion(&d);
     if (!s_auto_rot) { cand = -1; return; }
