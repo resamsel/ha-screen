@@ -93,6 +93,7 @@ extern "C"
 #endif
 
 void bsp_qmi8658_init(i2c_master_bus_handle_t bus_handle);
+bool bsp_qmi8658_configure(void);
 void bsp_qmi8658_test(void);
 bool bsp_qmi8658_read_data(qmi8658_data_t *data);
 

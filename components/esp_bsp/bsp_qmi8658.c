@@ -34,13 +34,13 @@ static esp_err_t bsp_qmi8658_reg_write_byte(uint8_t reg_addr, uint8_t *data, siz
 
 bool bsp_qmi8658_read_data(qmi8658_data_t *data)
 {
-    uint8_t status;
+    uint8_t status = 0;
     float mask;
     uint16_t buf[6];
-    bsp_qmi8658_reg_read(QMI8658_STATUS0, &status, 1); // 读状态寄存器
+    if (bsp_qmi8658_reg_read(QMI8658_STATUS0, &status, 1) != ESP_OK) return false;
     if (status & 0x03)
     {
-        bsp_qmi8658_reg_read(QMI8658_AX_L, (uint8_t *)buf, 12); // 读加速度和陀螺仪值
+        if (bsp_qmi8658_reg_read(QMI8658_AX_L, (uint8_t *)buf, 12) != ESP_OK) return false;
         data->acc_x = buf[0];
         data->acc_y = buf[1];
         data->acc_z = buf[2];
@@ -60,31 +60,45 @@ bool bsp_qmi8658_read_data(qmi8658_data_t *data)
     return false;
 }
 
+/* Soft reset and configure; true when the settings read back (a reset that is still running
+ * NACKs or drops the writes, and the chip then never reports data) */
+bool bsp_qmi8658_configure(void)
+{
+    static const uint8_t cfg[][2] = {
+        {QMI8658_CTRL1, 0x40},   /* address auto-increment */
+        {QMI8658_CTRL2, 0x95},   /* accelerometer 4 g, 250 Hz */
+        {QMI8658_CTRL3, 0xd5},   /* gyroscope 512 dps, 250 Hz */
+        {QMI8658_CTRL7, 0x03},   /* enable accelerometer and gyroscope */
+    };
+    uint8_t v = 0;
+    bsp_qmi8658_reg_write_byte(QMI8658_RESET, (uint8_t[]){0xb0}, 1);
+    for (int i = 0; i < 10; i++) {   /* reset done: register 0x4D reads 0x80 */
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (bsp_qmi8658_reg_read(0x4D, &v, 1) == ESP_OK && v == 0x80) break;
+    }
+    for (int i = 0; i < 4; i++) {
+        uint8_t b = cfg[i][1];
+        if (bsp_qmi8658_reg_write_byte(cfg[i][0], &b, 1) != ESP_OK ||
+            bsp_qmi8658_reg_read(cfg[i][0], &v, 1) != ESP_OK || v != cfg[i][1]) {
+            ESP_LOGW(TAG, "QMI8658 register %d: wrote 0x%02x, read 0x%02x", cfg[i][0], cfg[i][1], v);
+            return false;
+        }
+    }
+    return true;
+}
+
 void bsp_qmi8658_init(i2c_master_bus_handle_t bus_handle)
 {
     uint8_t id = 0;
-    ESP_LOGI(TAG, "QMI8658 Initialize");
-    
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = QMI8658_SENSOR_ADDR,
         .scl_speed_hz = 400000,
     };
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_handle));
-    
-    ESP_ERROR_CHECK(bsp_qmi8658_reg_read(QMI8658_WHO_AM_I, &id, 1));
-    
-    if (0x05 != id)
-    {
-        ESP_LOGI(TAG, "QMI8658 not found");
-    }
-    ESP_LOGI(TAG, "Find QMI8658");
-    bsp_qmi8658_reg_write_byte(QMI8658_RESET, (uint8_t[]){0xb0}, 1); // 复位
-    vTaskDelay(pdMS_TO_TICKS(10));                                   // 延时10ms
-    bsp_qmi8658_reg_write_byte(QMI8658_CTRL1, (uint8_t[]){0x40}, 1); // CTRL1 设置地址自动增加
-    bsp_qmi8658_reg_write_byte(QMI8658_CTRL7, (uint8_t[]){0x03}, 1); // CTRL7 允许加速度和陀螺仪
-    bsp_qmi8658_reg_write_byte(QMI8658_CTRL2, (uint8_t[]){0x95}, 1); // CTRL2 设置ACC 4g 250Hz
-    bsp_qmi8658_reg_write_byte(QMI8658_CTRL3, (uint8_t[]){0xd5}, 1); // CTRL3 设置GRY 512dps 250Hz
+    if (bsp_qmi8658_reg_read(QMI8658_WHO_AM_I, &id, 1) != ESP_OK || id != 0x05)
+        ESP_LOGW(TAG, "QMI8658 not found (id 0x%02x)", id);
+    for (int i = 0; i < 3 && !bsp_qmi8658_configure(); i++) vTaskDelay(pdMS_TO_TICKS(20));
 }
 
 static void qmi8658_test_task(void *arg)
