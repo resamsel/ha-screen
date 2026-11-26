@@ -214,6 +214,9 @@ typedef void (*ha_dashboards_cb_t)(const layout_view_t *dashes, int n, int curre
 void ha_client_set_dashboards_cb(ha_dashboards_cb_t cb);  /* call before ha_client_start */
 /* Show this dashboard's views (url_path; "" = none chosen yet), starting with its view `view`
  * ("" = the first): re-reads the dashboard like ha_client_refresh. */
+/* The next set_view / set_dashboard is a switch: the new layout reaches the UI only with its
+ * states (issue #83). Call it first. */
+void ha_client_hold_next(void);
 void ha_client_set_dashboard(const char *url_path, const char *view);
 
 /* The dashboard / view / page helpers as read from HA (poll or live): dash and

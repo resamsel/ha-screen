@@ -3366,6 +3366,7 @@ static void value_tap(lv_point_t p);
 /* A tap on the main screen: select the value under the finger, or none */
 static void value_tap(lv_point_t p)
 {
+    if (s_view_pending) return;           /* the old view, held until the new one has its data */
     if (button_tap(p) || thermostat_tap(p) || media_tap(p) || light_tap(p) || todo_tap(p)) return;
     for (int g = 0; g < GROUPS; g++) {
         if (group_page(g) != s_page) continue;
@@ -4133,7 +4134,7 @@ static void cfg_build_home(void)
                           s_offline_state ? LV_SYMBOL_REFRESH " Connecting..." : LV_SYMBOL_REFRESH " Refresh",
                           refresh_cb, NULL, !s_busy);
     (void)r;
-    const char *dash = s_view_pending ? "Loading..." : s_cur_dash >= 0 ? s_dashes[s_cur_dash].title : s_ndash ? "Choose" : "-";
+    const char *dash = s_cur_dash >= 0 ? s_dashes[s_cur_dash].title : s_ndash ? "Choose" : "-";
     cfg_nav("Dashboard", dash, CS_DASH, !s_busy && s_ndash > 0);
     const char *view = s_view_pending ? "Loading..." : s_cur_view >= 0 ? s_views[s_cur_view].title : "-";
     cfg_nav("View", view, CS_VIEW, !s_busy && s_nviews > 0);
@@ -4387,7 +4388,7 @@ static void edge_swipe_cb(lv_event_t *e)
         dots_show();
         pres_touch();
         s_dragging = s_cfg_open || p.y <= CFG_EDGE;
-        s_paging = !s_dragging && s_strip;
+        s_paging = !s_dragging && s_strip && !s_view_pending;   /* switching: stay on this page */
         s_drag_start_x = p.x;
         s_drag_start_y = p.y;
         s_cfg_mode = s_cfg_open ? CFG_UNDECIDED : CFG_VERTICAL;
@@ -5296,6 +5297,7 @@ static void view_select(int i)
     s_view_pending = true;
     set_busy(true);
     cfg_update();
+    ha_client_hold_next();
     ha_client_set_view(s_view_path);
     s_ha_page = 0;
     ha_client_set_nav(s_dash_path, s_view_path, 0);
@@ -5337,10 +5339,12 @@ static void dash_select(int i)
         nvs_commit(nv);
         nvs_close(nv);
     }
+    s_cur_dash = i;                       /* shown at once; only the view is loading */
     s_cur_view = -1;
     s_view_pending = true;
     set_busy(true);
     cfg_update();
+    ha_client_hold_next();
     ha_client_set_dashboard(s_dash_path, s_view_path);
     s_ha_page = 0;
     ha_client_set_nav(s_dash_path, s_view_path, 0);
@@ -5379,12 +5383,16 @@ static void nav_apply(void *arg)
             nvs_commit(nv);
             nvs_close(nv);
         }
-        if (dash_new) s_cur_dash = -1;
+        if (dash_new) {                   /* known from the list: shown at once */
+            s_cur_dash = -1;
+            for (int k = 0; k < s_ndash; k++) if (dash_same(s_dashes[k].path, s_dash_path)) s_cur_dash = k;
+        }
         s_cur_view = -1;
         s_view_pending = true;
         s_boot_page = page >= 0 ? page : -1;      /* applied once the new pages exist */
         set_busy(true);
-    cfg_update();
+        cfg_update();
+        ha_client_hold_next();
         ha_client_set_dashboard(s_dash_path, s_view_path);
     } else if (page >= 0 && !PAGE_COUNT) {
         s_boot_page = page;                        /* no pages yet */
