@@ -113,6 +113,7 @@ static void dots_show(void);
 static void show_page(int page);
 static void test_tap(int x, int y);
 static void rot_test(int rot);
+static void test_touch(void);
 static void value_tap(lv_point_t p);
 
 static void ha_graph_changed(int graph, int row, const char *latest, const char *unit, const char *name,
@@ -383,7 +384,7 @@ void app_main(void)
     ha_client_set_nav_cb(ha_nav_changed);
     ha_client_set_dashboard(s_dash_path, s_view_path);
     screenshot_start();
-    screenshot_set_touch_cb(dots_show);
+    screenshot_set_touch_cb(test_touch);
     screenshot_set_page_cb(show_page);
     screenshot_set_tap_cb(test_tap);
     screenshot_set_view_cb(view_select);
@@ -633,7 +634,9 @@ static lv_color_t icon_color(void) { return COL_SEC(s_light); }
 
 static void graph_block(int gi, lv_area_t *a);
 static void value_pos(int pg, int i, lv_coord_t *cx, lv_coord_t *y);
-#define GRAPH_X 10   /* left margin of a graph's name and value inside its block */
+#define TEXT_PAD 12  /* text inside a card stays this far from its edges (issue #84); charts and icons don't */
+#define GRAPH_X TEXT_PAD   /* left margin of a graph's name and value inside its block */
+#define GRAPH_Y 6          /* top margin of a graph's name */
 /* Tiles: left of the value (portrait) or above it (landscape columns); graphs: top right */
 static void icon_place(int pg, int i)
 {
@@ -642,7 +645,7 @@ static void icon_place(int pg, int i)
     if (KIND(pg, i) == LAYOUT_GRAPH) {
         lv_area_t b;
         graph_block(GI(pg, i), &b);
-        lv_obj_set_pos(o, b.x2 + 1 - GRAPH_X + 2 - GRAPH_ICON, b.y1 + 2);
+        lv_obj_set_pos(o, b.x2 + 1 - 10 + 2 - GRAPH_ICON, b.y1 + 2);   /* icon: where it was */
         return;
     }
     lv_coord_t cx, y;
@@ -1051,7 +1054,7 @@ static void ha_picture_changed(int page, int row, uint16_t *px, int w, int h, in
 #define FC_SIDE 12                        /* margin left and right of the forecast row */
 #define FC_TOP  8                         /* the current weather sits this much lower with a forecast */
 #define FC_BOTTOM 8                       /* gap below the forecast row */
-#define WX_PAD 6                          /* side padding inside the current-weather block */
+#define WX_PAD TEXT_PAD                   /* side padding inside the current-weather block */
 #define WX_SIDE_WIDE 14                   /* extra side margin of a full-width card in landscape */
 #define FC_COLW 44                        /* narrowest forecast column: fewer columns in portrait */
 typedef struct { int n; bool hourly; ha_forecast_t f[HA_FORECAST_MAX]; } wx_fc_t;
@@ -1936,9 +1939,9 @@ static void create_glance(lv_obj_t *page, int pg, int i)
         lv_obj_set_style_text_font(l, f, 0);
         lv_obj_set_style_text_color(l, k == 0 ? COL_SEC(s_light) : COL_MAIN(s_light), 0);
         lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-        lv_obj_set_size(l, w - 8, f->line_height);
+        lv_obj_set_size(l, w - 12, f->line_height);   /* 12 px between neighbouring cells */
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(l, blk.x1 + 4, y);
+        lv_obj_set_pos(l, blk.x1 + 6, y);
         lv_label_set_text(l, k == 0 ? (it->name[0] ? it->name : it->entity) : "--");
         y += f->line_height + 2;
         labels[k] = l;
@@ -1963,26 +1966,26 @@ static void create_entity_row(lv_obj_t *page, int pg, int i)
     int w = lv_area_get_width(&blk), h = lv_area_get_height(&blk);
     const layout_item_t *it = &s_layout.pages[pg].items[i];
     const lv_font_t *f = &lv_font_latin_16;
-    lv_coord_t x = blk.x1 + 10, cy = blk.y1 + h / 2;
+    lv_coord_t x = blk.x1 + TEXT_PAD, cy = blk.y1 + h / 2;
     if (icon_slot(pg, i)) {
         lv_obj_t *o = icon_create(page, pg, i, icon_color(), ICON_SIZE);
         lv_obj_set_pos(o, x, cy - ICON_SIZE / 2);
         x += ICON_SIZE + 8;
     }
-    lv_coord_t sw = (w - 10) * 2 / 5;     /* state column, right-aligned */
+    lv_coord_t sw = (w - TEXT_PAD) * 2 / 5;     /* state column, right-aligned */
     lv_obj_t *st = lv_label_create(page);
     lv_obj_set_style_text_font(st, f, 0);
     lv_obj_set_style_text_color(st, COL_MAIN(s_light), 0);
     lv_label_set_long_mode(st, LV_LABEL_LONG_DOT);
     lv_obj_set_size(st, sw, f->line_height);
     lv_obj_set_style_text_align(st, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(st, blk.x2 - 10 - sw, cy - f->line_height / 2);
+    lv_obj_set_pos(st, blk.x2 - TEXT_PAD - sw, cy - f->line_height / 2);
     lv_label_set_text(st, "--");
     lv_obj_t *nm = lv_label_create(page);
     lv_obj_set_style_text_font(nm, f, 0);
     lv_obj_set_style_text_color(nm, COL_SEC(s_light), 0);
     lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
-    lv_obj_set_size(nm, LV_MAX(blk.x2 - 10 - sw - 6 - x, 10), f->line_height);
+    lv_obj_set_size(nm, LV_MAX(blk.x2 - TEXT_PAD - sw - 6 - x, 10), f->line_height);
     lv_obj_set_pos(nm, x, cy - f->line_height / 2);
     lv_label_set_text(nm, it->name[0] ? it->name : it->entity);
     s_gl_name[pg][i] = nm;
@@ -2182,7 +2185,7 @@ static void create_media(lv_obj_t *page, int pg, int i)
     const lv_font_t *sf = &lv_font_latin_14, *tf = &lv_font_latin_16;
     lv_coord_t text = sf->line_height + 2 + tf->line_height + 2 + sf->line_height;
     bool side = w >= 220;                 /* buttons right of the text, else below it */
-    lv_coord_t bw = 2 * TH_BTN + 8, tw = side ? w - 16 - bw - 8 : w - 16;
+    lv_coord_t bw = 2 * TH_BTN + 8, tw = side ? w - 2 * TEXT_PAD - bw - 8 : w - 2 * TEXT_PAD;
     lv_coord_t total = side ? LV_MAX(text, TH_BTN) : text + 6 + TH_BTN;
     lv_coord_t y = blk.y1 + LV_MAX((h - total) / 2, 0), ty = side ? y + (total - text) / 2 : y;
     lv_obj_t **ls[3] = { &m->name, &m->title, &m->artist };
@@ -2193,7 +2196,7 @@ static void create_media(lv_obj_t *page, int pg, int i)
         lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
         lv_obj_set_size(l, tw, f->line_height);
         lv_obj_set_style_text_align(l, side ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(l, blk.x1 + 8, ty);
+        lv_obj_set_pos(l, blk.x1 + TEXT_PAD, ty);
         lv_label_set_text(l, k == 0 ? (it->name[0] ? it->name : it->entity) : k == 1 ? "--" : "");
         ty += f->line_height + 2;
         *ls[k] = l;
@@ -2300,7 +2303,7 @@ static void create_light(lv_obj_t *page, int pg, int i)
     lt_t *t = &s_lt[pg][i];
     const lv_font_t *sf = &lv_font_latin_14, *vf = &lv_font_latin_16;
     lv_coord_t total = vf->line_height + 6 + TH_BTN;
-    lv_coord_t y = blk.y1 + LV_MAX((h - total) / 2, 0), x = blk.x1 + 10, r = blk.x2 - 10;
+    lv_coord_t y = blk.y1 + LV_MAX((h - total) / 2, 0), x = blk.x1 + TEXT_PAD, r = blk.x2 - TEXT_PAD;
     t->pct = lv_label_create(page);
     lv_obj_set_style_text_font(t->pct, vf, 0);
     lv_obj_set_style_text_align(t->pct, LV_TEXT_ALIGN_RIGHT, 0);
@@ -2832,7 +2835,7 @@ static void graph_name_pos(lv_coord_t *cx, lv_coord_t *y)
     lv_area_t b;
     graph_block(s_gi, &b);
     *cx = b.x1 + GRAPH_X;
-    *y = b.y1 + 2;
+    *y = b.y1 + GRAPH_Y;
 }
 
 static void graph_value_pos(lv_coord_t *cx, lv_coord_t *y)
@@ -3559,6 +3562,8 @@ static void saver_label(lv_obj_t **l, const lv_font_t *f, lv_color_t c)
 }
 
 static void saver_tap_cb(lv_event_t *e) { (void)e; lv_disp_trig_activity(NULL); screen_apply(); }
+/* screenshot tool, 'S': what a touch does: wakes the screen, shows the status line and dots */
+static void test_touch(void) { lv_disp_trig_activity(NULL); screen_apply(); dots_show(); }
 
 static void saver_create(void)
 {
