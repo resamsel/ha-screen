@@ -43,6 +43,8 @@ static void (*s_view)(int);
 static void (*s_cfg)(int);
 void screenshot_set_cfg_cb(void (*cb)(int)) { s_cfg = cb; }
 void screenshot_set_view_cb(void (*cb)(int)) { s_view = cb; }
+static void (*s_rot)(int);
+void screenshot_set_rot_cb(void (*cb)(int)) { s_rot = cb; }
 void screenshot_set_page_cb(void (*cb)(int)) { s_page = cb; }
 void screenshot_set_touch_cb(void (*cb)(void)) { s_touch = cb; }
 
@@ -79,6 +81,10 @@ static void task(void *arg)
         else if (c == 'V') {              /* V<n>: show dashboard view n (0 = first) */
             if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(500)) == 1 && c >= '0' && c <= '9'
                 && s_view && lvgl_port_lock(0)) { s_view(c - '0'); lvgl_port_unlock(); }
+        }
+        else if (c == 'R') {              /* R<n>: turn to rotation n (0..3) */
+            if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(500)) == 1 && c >= '0' && c <= '3'
+                && s_rot && lvgl_port_lock(0)) { s_rot(c - '0'); lvgl_port_unlock(); }
         }
         else if (c == 'C') {              /* C<n>: open config panel page n; C9 closes it */
             if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(500)) == 1 && c >= '0' && c <= '9'
