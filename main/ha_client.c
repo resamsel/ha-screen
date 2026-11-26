@@ -809,6 +809,14 @@ static bool json_num(const char *json, const char *key, float *out)
 enum { REC_VALUE, REC_GLATEST, REC_GPOINTS, REC_BUTTON, REC_WEATHER, REC_ICON, REC_FORECAST, REC_CALENDAR, REC_CLIMATE, REC_MEDIA, REC_LIGHT, REC_TYPES };
 static uint8_t *s_rec[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
 static uint16_t s_rec_len[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
+/* During a switch (issue #83): the old view's records, so a rotation or theme rebuild of the
+ * old view can repaint it; freed when the new view reaches the UI */
+static uint8_t *s_rec_old[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
+static uint16_t s_rec_old_len[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS][REC_TYPES];
+static uint16_t s_old_hours[LAYOUT_MAX_PAGES][LAYOUT_MAX_ROWS];
+static bool s_has_old;
+static TaskHandle_t s_replay_old;         /* the task replaying them: its emits go to the UI, not the records */
+static bool replaying_old(void) { return s_replay_old && s_replay_old == xTaskGetCurrentTaskHandle(); }
 static uint8_t s_rec_theme = 0xFF;        /* HA_STATE_ON/OFF of the theme entity */
 static float s_rec_bri[3];
 static bool s_rec_bri_has, s_rec_dirty;
@@ -823,6 +831,7 @@ static void rec_unlock(void) { if (s_rec_mx) xSemaphoreGiveRecursive(s_rec_mx); 
 static void rec_put(int type, int pg, int row, const void *d, size_t n)
 {
     if (pg < 0 || pg >= LAYOUT_MAX_PAGES || row < 0 || row >= LAYOUT_MAX_ROWS || n > 4096) return;
+    if (replaying_old()) return;
     rec_lock();
     if (!(s_rec[pg][row][type] && s_rec_len[pg][row][type] == n && !memcmp(s_rec[pg][row][type], d, n))) {
         uint8_t *b = realloc(s_rec[pg][row][type], n ? n : 1);
@@ -833,6 +842,16 @@ static void rec_put(int type, int pg, int row, const void *d, size_t n)
             s_rec_dirty = true;
         }
     }
+    rec_unlock();
+}
+
+static void rec_old_free(void)
+{
+    rec_lock();
+    for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+        for (int i = 0; i < LAYOUT_MAX_ROWS; i++)
+            for (int t = 0; t < REC_TYPES; t++) { free(s_rec_old[p][i][t]); s_rec_old[p][i][t] = NULL; s_rec_old_len[p][i][t] = 0; }
+    s_has_old = false;
     rec_unlock();
 }
 
@@ -872,7 +891,7 @@ static void emit_sensor(int pg, int row, const char *text, const char *unit, con
     uint8_t b[96];
     const char *a[] = { text, unit, name };
     rec_put(REC_VALUE, pg, row, b, pack_strs(b, sizeof(b), a, 3));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_sensor_cb) s_sensor_cb(pg, row, text, unit, name);
 }
 
@@ -894,7 +913,7 @@ static void emit_graph(int pg, int row, const char *latest, const char *unit, co
         memcpy(b + 13, pts, n * sizeof(float));
         rec_put(REC_GPOINTS, pg, row, b, 13 + n * sizeof(float));
     }
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_graph_cb) s_graph_cb(pg, row, latest, unit, name, pts, n, end, hours, zero_based);
 }
 
@@ -904,7 +923,7 @@ static void emit_button(int pg, int row, ha_btn_state_t st, const char *name)
     b[0] = st;
     const char *a[] = { name };
     rec_put(REC_BUTTON, pg, row, b, 1 + pack_strs(b + 1, sizeof(b) - 1, a, 1));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_button_cb) s_button_cb(pg, row, st, name);
 }
 
@@ -914,7 +933,7 @@ static void emit_weather(int pg, int row, const char *cond, const char *temp, co
     uint8_t b[96];
     const char *a[] = { cond, temp, unit, hum, name };
     rec_put(REC_WEATHER, pg, row, b, pack_strs(b, sizeof(b), a, 5));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_weather_cb) s_weather_cb(pg, row, cond, temp, unit, hum, name);
 }
 
@@ -923,7 +942,7 @@ static void emit_climate(int pg, int row, const ha_climate_t *c, const char *nam
     uint8_t b[160];
     const char *a[] = { c->mode, c->action, c->cur, c->target, c->min, c->max, c->step, name };
     rec_put(REC_CLIMATE, pg, row, b, pack_strs(b, sizeof(b), a, 8));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_climate_cb) s_climate_cb(pg, row, c, name);
 }
 
@@ -932,7 +951,7 @@ static void emit_media(int pg, int row, const char *st, const char *title, const
     uint8_t b[160];
     const char *a[] = { st, title, artist, name };
     rec_put(REC_MEDIA, pg, row, b, pack_strs(b, sizeof(b), a, 4));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_media_cb) s_media_cb(pg, row, st, title, artist, name);
 }
 
@@ -943,7 +962,7 @@ static void emit_light(int pg, int row, const char *st, int pct, const char *nam
     b[0] = (uint8_t)(int8_t)pct;
     const char *a[] = { st, name };
     rec_put(REC_LIGHT, pg, row, b, 1 + pack_strs(b + 1, sizeof(b) - 1, a, 2));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_light_cb) s_light_cb(pg, row, st, pct, name);
 }
 
@@ -955,7 +974,7 @@ static void emit_forecast(int pg, int row, const ha_forecast_t *f, int n, bool h
     b[0] = hourly; b[1] = n;
     memcpy(b + 2, f, n * sizeof(ha_forecast_t));
     rec_put(REC_FORECAST, pg, row, b, 2 + n * sizeof(ha_forecast_t));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_forecast_cb) s_forecast_cb(pg, row, f, n, hourly);
 }
 
@@ -969,7 +988,7 @@ static void emit_calendar(int pg, int row, const cal_event_t *ev, int n, uint32_
     b[12] = n;
     memcpy(b + 13, ev, n * sizeof(cal_event_t));
     rec_put(REC_CALENDAR, pg, row, b, 13 + n * sizeof(cal_event_t));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_calendar_cb) s_calendar_cb(pg, row, ev, n, mask, month);
 }
 
@@ -978,7 +997,7 @@ static void emit_icon(int pg, int row, const char *icon)
     uint8_t b[52];
     const char *a[] = { icon };
     rec_put(REC_ICON, pg, row, b, pack_strs(b, sizeof(b), a, 1));
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_icon_cb) s_icon_cb(pg, row, icon);
 }
 
@@ -1021,7 +1040,7 @@ static void rec_emit(int t, int pg, int row, const uint8_t *d, const uint8_t *de
     }
     case REC_GLATEST: {
         const char *a = unpack_str(&d, de), *u = unpack_str(&d, de), *nm = unpack_str(&d, de);
-        emit_graph(pg, row, a, u, nm, NULL, 0, 0, s_layout.pages[pg].items[row].hours, false);
+        emit_graph(pg, row, a, u, nm, NULL, 0, 0, replaying_old() ? s_old_hours[pg][row] : s_layout.pages[pg].items[row].hours, false);
         break;
     }
     case REC_GPOINTS: {
@@ -1622,7 +1641,7 @@ static void fetch_todo(int pg, int row)
             n++;
         }
     cJSON_Delete(root);
-    if (s_hold) return;
+    if (s_hold && !replaying_old()) return;
     if (s_todo_cb) s_todo_cb(pg, row, out, n);
 }
 
@@ -2163,7 +2182,17 @@ static void cond_apply(void)
 static void use_layout(const ha_layout_t *l)
 {
     rec_lock();
-    if (layout_hash(l) != s_layout_hash) rec_clear();   /* the rows mean something else now */
+    if (layout_hash(l) != s_layout_hash) {   /* the rows mean something else now */
+        if (s_hold && !s_has_old) {          /* a switch: the old view's records stay for its repaints */
+            memcpy(s_rec_old, s_rec, sizeof(s_rec));
+            memcpy(s_rec_old_len, s_rec_len, sizeof(s_rec_len));
+            memset(s_rec, 0, sizeof(s_rec));
+            memset(s_rec_len, 0, sizeof(s_rec_len));
+            for (int p = 0; p < LAYOUT_MAX_PAGES; p++)
+                for (int i = 0; i < LAYOUT_MAX_ROWS; i++) s_old_hours[p][i] = s_layout.pages[p].items[i].hours;
+            s_has_old = true;
+        } else rec_clear();
+    }
     s_layout = *l;
     s_layout_hash = layout_hash(l);
     memset(s_cal_rgb_ok, 0, sizeof(s_cal_rgb_ok));   /* calendar colours: read again */
@@ -2202,7 +2231,10 @@ static void fetch_todo(int pg, int row);
 static void hold_release(void)
 {
     if (!s_hold) return;
+    rec_lock();                           /* not while the UI replays the old records */
     s_hold = false;
+    rec_unlock();
+    rec_old_free();
     if (!s_held_layout) { s_held_theme = false; return; }
     s_held_layout = false;
     ESP_LOGI(TAG, "switch: new layout to the UI");
@@ -3203,8 +3235,22 @@ static void ha_task(void *arg)
 /* Re-send the last data of every card, the theme and the brightness through the callbacks */
 void ha_client_replay(void)
 {
-    if (s_hold) return;                   /* the records are the held layout's: not the UI's */
     rec_lock();
+    if (s_hold && s_rec_bri_has && s_brightness_cb) s_brightness_cb(s_rec_bri[0], s_rec_bri[1], s_rec_bri[2]);
+    if (s_hold) {                         /* the UI still shows the old view: its records */
+        if (s_has_old) {
+            s_replay_old = xTaskGetCurrentTaskHandle();
+            for (int pg = 0; pg < LAYOUT_MAX_PAGES; pg++)
+                for (int row = 0; row < LAYOUT_MAX_ROWS; row++)
+                    for (int t = 0; t < REC_TYPES; t++) {
+                        const uint8_t *d = s_rec_old[pg][row][t];
+                        if (d) rec_emit(t, pg, row, d, d + s_rec_old_len[pg][row][t], s_rec_old_len[pg][row][t]);
+                    }
+            s_replay_old = NULL;
+        }
+        rec_unlock();
+        return;
+    }
     if (s_rec_bri_has && s_brightness_cb) s_brightness_cb(s_rec_bri[0], s_rec_bri[1], s_rec_bri[2]);
     for (int pg = 0; pg < s_layout.count; pg++)
         for (int row = 0; row < s_layout.pages[pg].count; row++)
